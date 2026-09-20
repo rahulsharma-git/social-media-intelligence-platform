@@ -1,5 +1,6 @@
 import hashlib
 import io
+import os
 import random
 import re
 from datetime import datetime, timedelta, timezone
@@ -38,7 +39,7 @@ st.set_page_config(
 )
 
 st.title("📡 Social Media Intelligence Platform")
-st.caption("Build 5.6.1 Free Stable — briefs + legends + verified PDF report")
+st.caption("Build 5.6.2 Free Stable — PDF generation hotfix")
 
 
 # =========================================================
