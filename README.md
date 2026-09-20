@@ -1,57 +1,25 @@
-# Social Media Intelligence Platform — Build 5 Free
+# Social Media Intelligence Platform — Build 5.3 Free Stable
 
-This build keeps the project at zero API cost by supporting:
+This build combines both working free data paths.
 
-1. **CSV / manual X-post import**
-2. **Free web/news monitoring through GDELT**
-3. **Combined CSV + web/news analysis**
-4. **Supabase persistence**
-5. Existing sentiment, emotion, semantic-clustering, narrative, trend and risk agents
+## Option A — X / CSV
+- Upload is processed immediately.
+- No Analyze button or session-state dependency.
+- Shows filename, valid row count, engagement totals, and a 10-row preview.
+- The supplied `isro_x_posts_TEMPLATE_READY.csv` was smoke-tested with this build.
 
-## CSV minimum columns
+## Option B — Free web/news
+- Tries GDELT first.
+- Automatically falls back to Google News RSS when GDELT returns HTTP 429 or another transient error.
+- No paid API key is required.
 
-- `timestamp`
-- `username`
-- `text`
+## Combined mode
+Choose `Combine CSV + web/news` to analyze both datasets together.
 
-Optional:
-
-- `hashtags`
-- `likes`
-- `reposts`
-- `replies`
-- `followers`
-- `platform`
-- `source_url`
-- `external_id`
-
-A header-only template is included as `isro_x_template.csv`.
-
-## GDELT
-
-The app uses GDELT DOC 2.0 ArticleList JSON output. No X developer
-credential is required.
-
-Default query:
-
-`(ISRO OR "Indian Space Research Organisation")`
-
-## Supabase secrets
-
-Keep these only in Streamlit Secrets:
+## Supabase
+Existing Streamlit secrets remain unchanged:
 
 ```toml
 SUPABASE_URL = "https://YOUR_PROJECT.supabase.co"
 SUPABASE_SECRET_KEY = "sb_secret_..."
 ```
-
-Do not commit secrets to GitHub.
-
-
-## Build 5.2 hotfix
-
-Free news collection now uses:
-1. GDELT first
-2. Automatic Google News RSS fallback if GDELT returns HTTP 429 or a transient failure
-
-No paid API key is required.

@@ -1,4 +1,5 @@
 import hashlib
+import io
 import random
 import re
 from datetime import datetime, timedelta, timezone
@@ -826,7 +827,7 @@ with st.sidebar:
         "Choose source",
         [
             "CSV / manual X posts",
-            "Free web/news — GDELT",
+            "Free web/news",
             "Combine CSV + web/news",
             "Supabase database",
             "Demo sample",
@@ -847,6 +848,10 @@ if source_mode in [
     "Combine CSV + web/news",
 ]:
     st.subheader("Option A — CSV / X samples")
+    st.caption(
+        "Upload the CSV and it will be validated and analyzed immediately. "
+        "No extra Analyze button is required."
+    )
 
     st.download_button(
         "Download CSV template",
@@ -858,85 +863,105 @@ if source_mode in [
     uploaded = st.file_uploader(
         "Upload CSV",
         type=["csv"],
-        key="x_csv_upload",
+        key="x_csv_upload_v53",
         help=(
             "Required columns: timestamp, username, text. "
-            "Other metrics are optional."
+            "Optional: hashtags, likes, reposts, replies, followers, "
+            "platform, source_url."
         ),
     )
 
     if uploaded is not None:
         try:
-            # Read into a temporary dataframe first so mobile users can
-            # immediately see that Streamlit actually received the file.
-            uploaded.seek(0)
-            preview_df = pd.read_csv(uploaded)
+            # Use immutable bytes so reruns/mobile browser behavior cannot
+            # leave the file pointer at EOF.
+            uploaded_bytes = uploaded.getvalue()
 
-            st.success(
-                f"✅ File received: {uploaded.name} · "
-                f"{len(preview_df):,} rows · {len(preview_df.columns)} columns"
+            if not uploaded_bytes:
+                raise ValueError("The uploaded file is empty.")
+
+            preview_df = pd.read_csv(
+                io.BytesIO(uploaded_bytes),
+                encoding="utf-8",
             )
 
-            st.caption("Uploaded file preview")
-            st.dataframe(
-                preview_df.head(8),
-                use_container_width=True,
-                hide_index=True,
-            )
-
+            normalized_columns = {
+                str(c).strip().lower()
+                for c in preview_df.columns
+            }
             missing_required = (
                 {"timestamp", "username", "text"}
-                - {str(c).strip().lower() for c in preview_df.columns}
+                - normalized_columns
             )
 
             if missing_required:
                 st.error(
-                    "Missing required column(s): "
+                    "CSV received, but required column(s) are missing: "
                     + ", ".join(sorted(missing_required))
                 )
             else:
-                if st.button(
-                    "Analyze uploaded CSV",
-                    type="primary",
-                    key="analyze_csv_button",
-                ):
-                    normalized = normalize_posts(preview_df)
-                    st.session_state["csv_posts"] = normalized
-                    st.session_state["csv_filename"] = uploaded.name
-                    st.session_state["csv_ready"] = True
+                csv_df = normalize_posts(preview_df)
 
-                if st.session_state.get("csv_ready"):
-                    csv_df = st.session_state.get(
-                        "csv_posts",
-                        pd.DataFrame(columns=STANDARD_COLUMNS),
+                st.success(
+                    f"✅ X/CSV loaded: {uploaded.name} · "
+                    f"{len(csv_df):,} valid records"
+                )
+
+                d1, d2, d3, d4 = st.columns(4)
+                d1.metric("X/CSV rows", f"{len(csv_df):,}")
+                d2.metric("Likes", f"{int(csv_df['likes'].sum()):,}")
+                d3.metric("Reposts", f"{int(csv_df['reposts'].sum()):,}")
+                d4.metric("Replies", f"{int(csv_df['replies'].sum()):,}")
+
+                with st.expander("Preview uploaded X/CSV data", expanded=True):
+                    st.dataframe(
+                        csv_df[
+                            [
+                                "timestamp",
+                                "username",
+                                "text",
+                                "likes",
+                                "reposts",
+                                "replies",
+                                "platform",
+                            ]
+                        ].head(10),
+                        use_container_width=True,
+                        hide_index=True,
                     )
 
-                    st.success(
-                        f"🧠 Ready for analysis: {len(csv_df):,} valid records"
-                    )
+                st.info(
+                    "CSV is ready. The intelligence dashboard below "
+                    "is using these uploaded records."
+                )
 
-                    if len(csv_df):
-                        d1, d2, d3, d4 = st.columns(4)
-                        d1.metric("Valid rows", f"{len(csv_df):,}")
-                        d2.metric("Likes", f"{int(csv_df['likes'].sum()):,}")
-                        d3.metric("Reposts", f"{int(csv_df['reposts'].sum()):,}")
-                        d4.metric("Replies", f"{int(csv_df['replies'].sum()):,}")
-
-                        st.caption(
-                            "Now scroll down: the intelligence dashboard "
-                            "is generated from this uploaded dataset."
-                        )
+        except UnicodeDecodeError:
+            try:
+                preview_df = pd.read_csv(
+                    io.BytesIO(uploaded_bytes),
+                    encoding="utf-8-sig",
+                )
+                csv_df = normalize_posts(preview_df)
+                st.success(
+                    f"✅ X/CSV loaded: {uploaded.name} · "
+                    f"{len(csv_df):,} valid records"
+                )
+            except Exception as exc:
+                st.error(
+                    "CSV could not be read. "
+                    f"{type(exc).__name__}: {exc}"
+                )
 
         except Exception as exc:
             st.error(
                 "CSV could not be loaded. "
-                f"Technical detail: {type(exc).__name__}: {exc}"
+                f"{type(exc).__name__}: {exc}"
             )
 
 
 # ---------- GDELT controls ----------
 if source_mode in [
-    "Free web/news — GDELT",
+    "Free web/news",
     "Combine CSV + web/news",
 ]:
     st.subheader("Option B — Free web/news")
@@ -1002,7 +1027,7 @@ if source_mode in [
 if source_mode == "CSV / manual X posts":
     raw_df = csv_df
 
-elif source_mode == "Free web/news — GDELT":
+elif source_mode == "Free web/news":
     raw_df = news_df
 
 elif source_mode == "Combine CSV + web/news":
@@ -1064,15 +1089,16 @@ if (
 
 if raw_df.empty:
     if source_mode == "CSV / manual X posts":
-        if uploaded is not None and not st.session_state.get("csv_ready"):
-            st.info(
-                "The file is uploaded. Tap **Analyze uploaded CSV** above."
+        if uploaded is not None:
+            st.warning(
+                "A CSV was selected but produced no valid records. "
+                "Check the validation message above."
             )
         else:
             st.info(
                 "Upload your ISRO-related X CSV to begin."
             )
-    elif source_mode == "Free web/news — GDELT":
+    elif source_mode == "Free web/news":
         st.info(
             "Tap **Fetch free news** to begin."
         )
@@ -1086,6 +1112,30 @@ if raw_df.empty:
         )
     st.stop()
 
+
+
+# =========================================================
+# LOADED SOURCE DIAGNOSTICS
+# =========================================================
+st.divider()
+st.subheader("Loaded data")
+
+source_counts = (
+    raw_df["platform"]
+    .value_counts()
+    .rename_axis("source")
+    .reset_index(name="records")
+)
+
+st.dataframe(
+    source_counts,
+    use_container_width=True,
+    hide_index=True,
+)
+
+st.success(
+    f"✅ {len(raw_df):,} total records are ready for intelligence analysis."
+)
 
 # =========================================================
 # RUN INTELLIGENCE PIPELINE
@@ -1112,7 +1162,7 @@ try:
         trend_df = run_trend_agent(df)
 
     st.success(
-        f"✅ Intelligence analysis complete for {len(df):,} records."
+        f"✅ Intelligence analysis complete for {len(df):,} loaded records."
     )
 
 except Exception as exc:
