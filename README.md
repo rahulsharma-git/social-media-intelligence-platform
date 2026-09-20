@@ -1,52 +1,19 @@
-# Social Media Intelligence Platform — Build 4
+# Social Media Intelligence Platform — Build 4.1
 
-Build 4 introduces the persistent-data and ingestion foundation.
+Small Supabase compatibility update.
 
-## New capabilities
+## Change
 
-- Data-source selector
-- Demo dataset
-- CSV upload from phone/computer
-- Standardized social-post schema
-- Optional Supabase persistence
-- Supabase loading through REST
-- Existing sentiment, emotion, semantic topic, narrative, trend and risk agents
-
-## CSV minimum columns
-
-- `timestamp`
-- `username`
-- `text`
-
-Optional columns:
-
-- `hashtags`
-- `likes`
-- `reposts`
-- `replies`
-- `followers`
-- `platform`
-- `source_url`
-- `external_id`
-
-## Supabase setup
-
-1. Create a Supabase project.
-2. Open its SQL editor and run `schema.sql`.
-3. In Streamlit Community Cloud, open your app settings and add these secrets:
+The app now prefers Supabase's current server-side secret API key:
 
 ```toml
 SUPABASE_URL = "https://YOUR_PROJECT.supabase.co"
-SUPABASE_SERVICE_KEY = "YOUR_SERVICE_ROLE_KEY"
+SUPABASE_SECRET_KEY = "sb_secret_..."
 ```
 
-Never commit the service-role key to GitHub.
+The old `SUPABASE_SERVICE_KEY` variable remains supported as a legacy fallback.
 
-After secrets are saved, reboot/redeploy the Streamlit app.
+Do not commit either secret key to GitHub. Store it only in Streamlit Community
+Cloud's Secrets settings.
 
-## Architecture
-
-Data source -> normalized social-post records -> intelligence agents -> dashboard.
-
-This means the future live X collector can replace the demo/CSV source without
-rewriting the analysis layer.
+All Build 4 analytics and CSV features are unchanged.

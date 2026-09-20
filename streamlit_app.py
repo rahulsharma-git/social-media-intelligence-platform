@@ -193,7 +193,14 @@ def make_sample_data(n=320):
 def get_supabase_config():
     try:
         url = str(st.secrets.get("SUPABASE_URL", "")).strip().rstrip("/")
-        key = str(st.secrets.get("SUPABASE_SERVICE_KEY", "")).strip()
+        # Prefer Supabase's current server-side secret key.
+        # Keep the legacy variable as a fallback for older projects.
+        key = str(
+            st.secrets.get(
+                "SUPABASE_SECRET_KEY",
+                st.secrets.get("SUPABASE_SERVICE_KEY", "")
+            )
+        ).strip()
     except Exception:
         url, key = "", ""
     return url, key
@@ -206,11 +213,17 @@ def supabase_enabled():
 
 def supabase_headers():
     _, key = get_supabase_config()
-    return {
+    headers = {
         "apikey": key,
-        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
+
+    # Legacy service_role keys are JWTs and may be sent as Bearer tokens.
+    # New sb_secret_* keys are API keys, not JWTs, and should stay in apikey.
+    if key.startswith("eyJ"):
+        headers["Authorization"] = f"Bearer {key}"
+
+    return headers
 
 
 def load_supabase_posts(limit=5000):
@@ -546,7 +559,7 @@ elif source_mode == "Supabase database":
     if not supabase_enabled():
         st.warning(
             "Supabase is not configured yet. Add SUPABASE_URL and "
-            "SUPABASE_SERVICE_KEY in Streamlit app secrets."
+            "SUPABASE_SECRET_KEY in Streamlit app secrets."
         )
     else:
         try:
