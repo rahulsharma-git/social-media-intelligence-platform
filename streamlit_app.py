@@ -26,9 +26,7 @@ st.set_page_config(
 )
 
 st.title("📡 Social Media Intelligence Platform")
-st.caption(
-    "Build 5 Free — CSV/X samples + free GDELT web/news monitoring + persistent intelligence"
-)
+st.caption("Build 5.4 Free Stable — VERIFIED CSV + News dual-source build")
 
 
 # =========================================================
@@ -139,6 +137,18 @@ CSV_TEMPLATE = (
     "timestamp,username,text,hashtags,likes,reposts,replies,"
     "followers,platform,source_url\n"
 )
+
+BUILTIN_ISRO_SAMPLE = """timestamp,username,text,hashtags,likes,reposts,replies,followers,platform,source_url
+2026-09-20T10:00:00Z,test_user_1,"ISRO and NASA cooperation is expanding","#ISRO #NASA",4,1,1,0,x_manual,
+2026-09-20T09:30:00Z,test_user_2,"ISRO budget should be increased for more missions","#ISRO",8,2,3,0,x_manual,
+2026-09-20T09:00:00Z,test_user_3,"Proud of ISRO scientists and their achievements","#ISRO",12,3,2,0,x_manual,
+2026-09-20T08:30:00Z,test_user_4,"Concern about delays in an upcoming ISRO launch","#ISRO",2,0,1,0,x_manual,
+2026-09-20T08:00:00Z,test_user_5,"ISRO satellite capabilities are improving rapidly","#ISRO #satellite",6,1,0,0,x_manual,
+2026-09-20T07:30:00Z,test_user_6,"NASA official praises scientific capability being developed by ISRO","#ISRO #NASA",9,2,1,0,x_manual,
+2026-09-20T07:00:00Z,test_user_7,"Discussion about recruitment and talent at ISRO","#ISRO",1,0,1,0,x_manual,
+2026-09-20T06:30:00Z,test_user_8,"India needs more investment in ISRO research and development","#ISRO",7,1,2,0,x_manual,
+"""
+
 
 
 # =========================================================
@@ -847,10 +857,10 @@ if source_mode in [
     "CSV / manual X posts",
     "Combine CSV + web/news",
 ]:
-    st.subheader("Option A — CSV / X samples")
+    st.subheader("Option A — X / CSV")
     st.caption(
-        "Upload the CSV and it will be validated and analyzed immediately. "
-        "No extra Analyze button is required."
+        "Build 5.4 uses an explicit Load & analyze step and stores the "
+        "validated CSV in session state, so mobile browser reruns cannot lose it."
     )
 
     st.download_button(
@@ -861,102 +871,143 @@ if source_mode in [
     )
 
     uploaded = st.file_uploader(
-        "Upload CSV",
+        "Choose X CSV file",
         type=["csv"],
-        key="x_csv_upload_v53",
-        help=(
-            "Required columns: timestamp, username, text. "
-            "Optional: hashtags, likes, reposts, replies, followers, "
-            "platform, source_url."
-        ),
+        key="x_csv_upload_v54",
     )
 
-    if uploaded is not None:
+    c_load, c_test, c_clear = st.columns(3)
+
+    with c_load:
+        load_clicked = st.button(
+            "Load & analyze CSV",
+            type="primary",
+            key="load_csv_v54",
+            disabled=(uploaded is None),
+        )
+
+    with c_test:
+        test_clicked = st.button(
+            "Test built-in CSV",
+            key="test_csv_v54",
+        )
+
+    with c_clear:
+        clear_clicked = st.button(
+            "Clear CSV",
+            key="clear_csv_v54",
+        )
+
+    if clear_clicked:
+        st.session_state.pop("active_csv_df_v54", None)
+        st.session_state.pop("active_csv_name_v54", None)
+        st.session_state.pop("active_csv_error_v54", None)
+
+    if test_clicked:
         try:
-            # Use immutable bytes so reruns/mobile browser behavior cannot
-            # leave the file pointer at EOF.
-            uploaded_bytes = uploaded.getvalue()
-
-            if not uploaded_bytes:
-                raise ValueError("The uploaded file is empty.")
-
-            preview_df = pd.read_csv(
-                io.BytesIO(uploaded_bytes),
-                encoding="utf-8",
-            )
-
-            normalized_columns = {
-                str(c).strip().lower()
-                for c in preview_df.columns
-            }
-            missing_required = (
-                {"timestamp", "username", "text"}
-                - normalized_columns
-            )
-
-            if missing_required:
-                st.error(
-                    "CSV received, but required column(s) are missing: "
-                    + ", ".join(sorted(missing_required))
-                )
-            else:
-                csv_df = normalize_posts(preview_df)
-
-                st.success(
-                    f"✅ X/CSV loaded: {uploaded.name} · "
-                    f"{len(csv_df):,} valid records"
-                )
-
-                d1, d2, d3, d4 = st.columns(4)
-                d1.metric("X/CSV rows", f"{len(csv_df):,}")
-                d2.metric("Likes", f"{int(csv_df['likes'].sum()):,}")
-                d3.metric("Reposts", f"{int(csv_df['reposts'].sum()):,}")
-                d4.metric("Replies", f"{int(csv_df['replies'].sum()):,}")
-
-                with st.expander("Preview uploaded X/CSV data", expanded=True):
-                    st.dataframe(
-                        csv_df[
-                            [
-                                "timestamp",
-                                "username",
-                                "text",
-                                "likes",
-                                "reposts",
-                                "replies",
-                                "platform",
-                            ]
-                        ].head(10),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-                st.info(
-                    "CSV is ready. The intelligence dashboard below "
-                    "is using these uploaded records."
-                )
-
-        except UnicodeDecodeError:
-            try:
-                preview_df = pd.read_csv(
-                    io.BytesIO(uploaded_bytes),
-                    encoding="utf-8-sig",
-                )
-                csv_df = normalize_posts(preview_df)
-                st.success(
-                    f"✅ X/CSV loaded: {uploaded.name} · "
-                    f"{len(csv_df):,} valid records"
-                )
-            except Exception as exc:
-                st.error(
-                    "CSV could not be read. "
-                    f"{type(exc).__name__}: {exc}"
-                )
-
+            test_raw = pd.read_csv(io.StringIO(BUILTIN_ISRO_SAMPLE))
+            test_norm = normalize_posts(test_raw)
+            st.session_state["active_csv_df_v54"] = test_norm
+            st.session_state["active_csv_name_v54"] = "built-in ISRO test CSV"
+            st.session_state.pop("active_csv_error_v54", None)
         except Exception as exc:
-            st.error(
-                "CSV could not be loaded. "
+            st.session_state["active_csv_error_v54"] = (
                 f"{type(exc).__name__}: {exc}"
             )
+
+    if load_clicked and uploaded is not None:
+        try:
+            upload_bytes = uploaded.getvalue()
+            if not upload_bytes:
+                raise ValueError("Uploaded file is empty.")
+
+            # utf-8-sig handles both normal UTF-8 and BOM CSV exports.
+            incoming = pd.read_csv(
+                io.BytesIO(upload_bytes),
+                encoding="utf-8-sig",
+            )
+
+            required = {"timestamp", "username", "text"}
+            incoming_cols = {
+                str(c).strip().lower()
+                for c in incoming.columns
+            }
+            missing = required - incoming_cols
+            if missing:
+                raise ValueError(
+                    "Missing required column(s): "
+                    + ", ".join(sorted(missing))
+                )
+
+            normalized = normalize_posts(incoming)
+
+            if normalized.empty:
+                raise ValueError(
+                    "The CSV was read but no valid rows remained after validation."
+                )
+
+            st.session_state["active_csv_df_v54"] = normalized
+            st.session_state["active_csv_name_v54"] = uploaded.name
+            st.session_state.pop("active_csv_error_v54", None)
+
+        except Exception as exc:
+            st.session_state["active_csv_error_v54"] = (
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    if st.session_state.get("active_csv_error_v54"):
+        st.error(
+            "CSV load failed: "
+            + st.session_state["active_csv_error_v54"]
+        )
+
+    csv_df = st.session_state.get(
+        "active_csv_df_v54",
+        pd.DataFrame(columns=STANDARD_COLUMNS),
+    )
+
+    if len(csv_df):
+        csv_name = st.session_state.get(
+            "active_csv_name_v54",
+            "CSV dataset",
+        )
+
+        st.success(
+            f"✅ ACTIVE X/CSV DATASET: {csv_name} · "
+            f"{len(csv_df):,} valid records"
+        )
+
+        d1, d2, d3, d4 = st.columns(4)
+        d1.metric("Rows", f"{len(csv_df):,}")
+        d2.metric("Likes", f"{int(csv_df['likes'].sum()):,}")
+        d3.metric("Reposts", f"{int(csv_df['reposts'].sum()):,}")
+        d4.metric("Replies", f"{int(csv_df['replies'].sum()):,}")
+
+        st.dataframe(
+            csv_df[
+                [
+                    "timestamp",
+                    "username",
+                    "text",
+                    "likes",
+                    "reposts",
+                    "replies",
+                    "platform",
+                ]
+            ].head(12),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.info(
+            "This CSV is now locked into the app session and will feed "
+            "the intelligence dashboard below until you tap Clear CSV."
+        )
+    else:
+        st.info(
+            "Choose a file and tap **Load & analyze CSV**, "
+            "or tap **Test built-in CSV** to verify the CSV pipeline."
+        )
 
 
 # ---------- GDELT controls ----------
@@ -1089,15 +1140,10 @@ if (
 
 if raw_df.empty:
     if source_mode == "CSV / manual X posts":
-        if uploaded is not None:
-            st.warning(
-                "A CSV was selected but produced no valid records. "
-                "Check the validation message above."
-            )
-        else:
-            st.info(
-                "Upload your ISRO-related X CSV to begin."
-            )
+        st.info(
+            "No active CSV yet. Choose a file and tap "
+            "**Load & analyze CSV**, or use **Test built-in CSV**."
+        )
     elif source_mode == "Free web/news":
         st.info(
             "Tap **Fetch free news** to begin."
@@ -1113,6 +1159,11 @@ if raw_df.empty:
     st.stop()
 
 
+
+st.caption(
+    f"Runtime check: source mode = {source_mode} · "
+    f"raw rows = {len(raw_df):,}"
+)
 
 # =========================================================
 # LOADED SOURCE DIAGNOSTICS

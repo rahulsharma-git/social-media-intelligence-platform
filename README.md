@@ -1,25 +1,21 @@
-# Social Media Intelligence Platform — Build 5.3 Free Stable
+# Build 5.4 Free Stable
 
-This build combines both working free data paths.
+This build explicitly fixes the Android CSV workflow while preserving the
+working free-news workflow.
 
-## Option A — X / CSV
-- Upload is processed immediately.
-- No Analyze button or session-state dependency.
-- Shows filename, valid row count, engagement totals, and a 10-row preview.
-- The supplied `isro_x_posts_TEMPLATE_READY.csv` was smoke-tested with this build.
+## CSV
+1. Choose file
+2. Tap **Load & analyze CSV**
+3. The normalized dataframe is stored in Streamlit session state
+4. You immediately see row count, engagement totals and preview
+5. Dashboard analyzes the active dataset
 
-## Option B — Free web/news
-- Tries GDELT first.
-- Automatically falls back to Google News RSS when GDELT returns HTTP 429 or another transient error.
-- No paid API key is required.
+There is also a **Test built-in CSV** button. If that works, the app's CSV
+pipeline is healthy even before choosing a phone file.
 
-## Combined mode
-Choose `Combine CSV + web/news` to analyze both datasets together.
+## News
+GDELT remains primary and Google News RSS remains the automatic free fallback.
 
-## Supabase
-Existing Streamlit secrets remain unchanged:
-
-```toml
-SUPABASE_URL = "https://YOUR_PROJECT.supabase.co"
-SUPABASE_SECRET_KEY = "sb_secret_..."
-```
+## Version check
+The app visibly says:
+`Build 5.4 Free Stable — VERIFIED CSV + News dual-source build`
