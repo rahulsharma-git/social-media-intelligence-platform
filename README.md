@@ -1,54 +1,48 @@
-# Social Media Intelligence Platform — Build 5
+# Social Media Intelligence Platform — Build 5 Free
 
-Build 5 adds live X Recent Search with ISRO monitoring presets.
+This build keeps the project at zero API cost by supporting:
 
-## New data source
+1. **CSV / manual X-post import**
+2. **Free web/news monitoring through GDELT**
+3. **Combined CSV + web/news analysis**
+4. **Supabase persistence**
+5. Existing sentiment, emotion, semantic-clustering, narrative, trend and risk agents
 
-**X Recent Search**
+## CSV minimum columns
 
-Presets:
-- Public conversation about ISRO
-- Official `@isro` posts
-- Custom X query
+- `timestamp`
+- `username`
+- `text`
 
-The first live collector intentionally requests only one API page (10–100 posts)
-to keep testing controlled.
+Optional:
 
-## Required Streamlit secret
+- `hashtags`
+- `likes`
+- `reposts`
+- `replies`
+- `followers`
+- `platform`
+- `source_url`
+- `external_id`
 
-Add your X App Bearer Token in Streamlit Community Cloud:
+A header-only template is included as `isro_x_template.csv`.
 
-```toml
-X_BEARER_TOKEN = "YOUR_X_BEARER_TOKEN"
-```
+## GDELT
 
-Do not commit the token to GitHub.
+The app uses GDELT DOC 2.0 ArticleList JSON output. No X developer
+credential is required.
 
-## Existing Supabase secrets
+Default query:
+
+`(ISRO OR "Indian Space Research Organisation")`
+
+## Supabase secrets
+
+Keep these only in Streamlit Secrets:
 
 ```toml
 SUPABASE_URL = "https://YOUR_PROJECT.supabase.co"
 SUPABASE_SECRET_KEY = "sb_secret_..."
 ```
 
-## Workflow
-
-X Recent Search
--> standardized social post records
--> sentiment/emotion
--> semantic clustering
--> narrative intelligence
--> trend/risk analysis
--> optional Save to Supabase
-
-## ISRO public-conversation query
-
-```text
-(ISRO OR @isro OR #ISRO) lang:en -is:retweet
-```
-
-## ISRO official-account query
-
-```text
-from:isro -is:retweet
-```
+Do not commit secrets to GitHub.

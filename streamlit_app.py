@@ -1,7 +1,7 @@
 import hashlib
 import random
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -24,7 +24,7 @@ st.set_page_config(
 
 st.title("📡 Social Media Intelligence Platform")
 st.caption(
-    "Build 5 — live X Recent Search, ISRO presets, Supabase persistence and intelligence agents"
+    "Build 5 Free — CSV/X samples + free GDELT web/news monitoring + persistent intelligence"
 )
 
 
@@ -53,6 +53,7 @@ def deterministic_id(row):
         str(row.get("username", "")),
         str(row.get("timestamp", "")),
         str(row.get("text", "")),
+        str(row.get("source_url", "")),
     ])
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
@@ -67,18 +68,20 @@ def normalize_posts(df):
     required = {"timestamp", "username", "text"}
     missing = required - set(result.columns)
     if missing:
-        raise ValueError("Missing required column(s): " + ", ".join(sorted(missing)))
+        raise ValueError(
+            "Missing required column(s): " + ", ".join(sorted(missing))
+        )
 
     defaults = {
         "external_id": "",
-        "platform": "x",
+        "platform": "x_manual",
         "hashtags": "",
         "likes": 0,
         "reposts": 0,
         "replies": 0,
         "followers": 0,
         "source_url": "",
-        "topic_seed": "Unassigned",
+        "topic_seed": "ISRO",
     }
 
     for col, default in defaults.items():
@@ -109,6 +112,9 @@ def normalize_posts(df):
     ]:
         result[col] = result[col].fillna("").astype(str)
 
+    result["platform"] = result["platform"].replace("", "x_manual")
+    result["topic_seed"] = result["topic_seed"].replace("", "ISRO")
+
     missing_ids = result["external_id"].str.strip().eq("")
     if missing_ids.any():
         result.loc[missing_ids, "external_id"] = result.loc[
@@ -124,63 +130,60 @@ def normalize_posts(df):
 
 
 # =========================================================
+# CSV TEMPLATE
+# =========================================================
+CSV_TEMPLATE = (
+    "timestamp,username,text,hashtags,likes,reposts,replies,"
+    "followers,platform,source_url\n"
+)
+
+
+# =========================================================
 # DEMO DATA
 # =========================================================
 @st.cache_data
-def make_sample_data(n=320):
+def make_sample_data(n=180):
     random.seed(42)
 
     templates = [
-        ("Launch", "Really impressed with the new product launch. Great design and smooth experience.", ["launch", "product"]),
-        ("Launch", "The latest feature is surprisingly useful and makes the product much easier to use.", ["launch", "feature"]),
-        ("Support", "Customer support resolved my issue quickly. Excellent service.", ["support", "service"]),
-        ("Support", "Very frustrated with customer support. I have been waiting for hours.", ["support", "frustrated"]),
-        ("Quality", "The product quality is much better than expected. Very happy with it.", ["quality", "product"]),
-        ("Quality", "The product stopped working after a few days. Very disappointing.", ["quality", "problem"]),
-        ("Pricing", "The new pricing is too expensive. This increase makes no sense.", ["pricing", "expensive"]),
-        ("Pricing", "I am angry about this price increase. Customers deserve better.", ["pricing", "angry"]),
-        ("Delivery", "Delivery is delayed again and there is still no clear update.", ["delivery", "delay"]),
-        ("Delivery", "I am worried the shipment may not arrive before the event.", ["delivery", "worried"]),
-        ("App", "The mobile app feels faster after the latest update.", ["app", "update"]),
-        ("App", "The app keeps crashing after the update and needs a fix.", ["app", "crash"]),
+        ("ISRO", "ISRO successfully completed another important mission milestone.", ["ISRO", "space"]),
+        ("ISRO", "Exciting progress from India's space programme and its latest launch.", ["ISRO", "launch"]),
+        ("ISRO", "People are waiting for more details about the upcoming ISRO mission.", ["ISRO", "mission"]),
+        ("ISRO", "Congratulations to the scientists and engineers behind the mission.", ["ISRO", "science"]),
+        ("ISRO", "Some users are questioning the mission timeline and reported delay.", ["ISRO", "delay"]),
+        ("ISRO", "A technical issue has raised concern about the next launch window.", ["ISRO", "technical"]),
     ]
 
-    users = [f"user_{i:03d}" for i in range(1, 81)]
-    now = datetime.now().replace(minute=0, second=0, microsecond=0)
+    users = [f"sample_user_{i:03d}" for i in range(1, 50)]
+    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
     rows = []
 
     for _ in range(n):
         topic, text, tags = random.choice(templates)
-        hours_ago = random.randint(0, 95)
-
-        if hours_ago < 12 and random.random() < 0.7:
-            topic, text, tags = random.choice([
-                ("Pricing", "I am angry about this price increase. Customers deserve better.", ["pricing", "angry"]),
-                ("Delivery", "Delivery is delayed again and there is still no clear update.", ["delivery", "delay"]),
-                ("App", "The app keeps crashing after the update and needs a fix.", ["app", "crash"]),
-            ])
-
-        ts = now - timedelta(hours=hours_ago, minutes=random.randint(0, 59))
+        ts = now - timedelta(
+            hours=random.randint(0, 95),
+            minutes=random.randint(0, 59)
+        )
         rows.append({
             "external_id": "",
             "platform": "demo",
             "timestamp": ts,
             "username": random.choice(users),
             "text": text,
-            "topic_seed": topic,
             "hashtags": " ".join(f"#{t}" for t in tags),
-            "likes": max(0, int(random.gauss(32, 26))),
-            "reposts": max(0, int(random.gauss(9, 10))),
-            "replies": max(0, int(random.gauss(6, 7))),
-            "followers": max(25, int(random.lognormvariate(6.4, 1.05))),
+            "likes": max(0, int(random.gauss(25, 20))),
+            "reposts": max(0, int(random.gauss(6, 7))),
+            "replies": max(0, int(random.gauss(4, 5))),
+            "followers": max(10, int(random.lognormvariate(6.0, 1.0))),
             "source_url": "",
+            "topic_seed": topic,
         })
 
     return normalize_posts(pd.DataFrame(rows))
 
 
 # =========================================================
-# SECRETS
+# SECRETS + SUPABASE
 # =========================================================
 def get_secret(name, fallback=""):
     try:
@@ -189,9 +192,6 @@ def get_secret(name, fallback=""):
         return fallback
 
 
-# =========================================================
-# SUPABASE REST CONNECTOR
-# =========================================================
 def get_supabase_config():
     url = get_secret("SUPABASE_URL").rstrip("/")
     key = get_secret(
@@ -226,15 +226,18 @@ def load_supabase_posts(limit=5000):
         f"{url}/rest/v1/social_posts",
         headers=supabase_headers(),
         params={
-            "select": "external_id,platform,timestamp,username,text,hashtags,likes,reposts,replies,followers,source_url",
+            "select": (
+                "external_id,platform,timestamp,username,text,hashtags,"
+                "likes,reposts,replies,followers,source_url"
+            ),
             "order": "timestamp.desc",
             "limit": str(limit),
         },
         timeout=30,
     )
     response.raise_for_status()
-
     data = response.json()
+
     if not data:
         return pd.DataFrame(columns=STANDARD_COLUMNS)
 
@@ -283,120 +286,88 @@ def save_posts_to_supabase(df):
 
 
 # =========================================================
-# X RECENT SEARCH COLLECTOR
-# One page only by design: 10-100 recent posts.
+# FREE WEB / NEWS COLLECTOR — GDELT DOC 2.0
 # =========================================================
-def x_enabled():
-    return bool(get_secret("X_BEARER_TOKEN"))
+def parse_gdelt_date(value):
+    if not value:
+        return pd.NaT
+
+    value = str(value).strip()
+
+    for fmt in ("%Y%m%dT%H%M%SZ", "%Y%m%d%H%M%S"):
+        try:
+            dt = datetime.strptime(value, fmt)
+            return pd.Timestamp(dt, tz="UTC")
+        except ValueError:
+            pass
+
+    return pd.to_datetime(value, errors="coerce", utc=True)
 
 
-def x_error_message(response):
-    try:
-        payload = response.json()
-        if isinstance(payload, dict):
-            return (
-                payload.get("detail")
-                or payload.get("title")
-                or payload.get("message")
-                or f"HTTP {response.status_code}"
-            )
-    except Exception:
-        pass
-    return f"HTTP {response.status_code}"
-
-
-def fetch_x_recent_posts(query, max_results=50):
-    bearer = get_secret("X_BEARER_TOKEN")
-    if not bearer:
-        raise RuntimeError(
-            "X_BEARER_TOKEN is not configured in Streamlit Secrets."
-        )
-
-    max_results = int(max(10, min(100, max_results)))
-
-    params = {
-        "query": query,
-        "max_results": max_results,
-        "tweet.fields": "created_at,public_metrics,author_id,entities,lang",
-        "expansions": "author_id",
-        "user.fields": "username,public_metrics,verified",
-        "sort_order": "recency",
-    }
+def fetch_gdelt_news(query, timespan="1week", max_records=50):
+    max_records = int(max(10, min(100, max_records)))
 
     response = requests.get(
-        "https://api.x.com/2/tweets/search/recent",
-        headers={"Authorization": f"Bearer {bearer}"},
-        params=params,
+        "https://api.gdeltproject.org/api/v2/doc/doc",
+        params={
+            "query": query,
+            "mode": "artlist",
+            "maxrecords": max_records,
+            "timespan": timespan,
+            "sort": "datedesc",
+            "format": "json",
+        },
         timeout=45,
+        headers={
+            "User-Agent": "SocialMediaIntelligenceMVP/1.0"
+        },
     )
 
     if response.status_code != 200:
-        if response.status_code == 401:
-            raise RuntimeError("X rejected the token (401). Check X_BEARER_TOKEN.")
-        if response.status_code == 402:
-            raise RuntimeError(
-                "X returned 402. Your developer account may need API credits/access."
-            )
-        if response.status_code == 403:
-            raise RuntimeError(
-                "X returned 403. The app or access level may not permit Recent Search."
-            )
-        if response.status_code == 429:
-            raise RuntimeError(
-                "X rate limit reached (429). Wait before trying again."
-            )
         raise RuntimeError(
-            f"X API request failed: {x_error_message(response)}"
+            f"GDELT request failed with HTTP {response.status_code}."
         )
 
-    payload = response.json()
-    posts = payload.get("data", []) or []
-    users = payload.get("includes", {}).get("users", []) or []
-    user_map = {str(u.get("id")): u for u in users}
+    try:
+        payload = response.json()
+    except Exception as exc:
+        raise RuntimeError(
+            "GDELT did not return valid JSON. Try again shortly."
+        ) from exc
 
+    articles = payload.get("articles", []) or []
     rows = []
-    for post in posts:
-        author_id = str(post.get("author_id", ""))
-        user = user_map.get(author_id, {})
-        username = user.get("username") or author_id or "unknown"
 
-        post_metrics = post.get("public_metrics") or {}
-        user_metrics = user.get("public_metrics") or {}
-        entities = post.get("entities") or {}
+    for article in articles:
+        url = str(article.get("url", "") or "")
+        title = str(article.get("title", "") or "").strip()
+        domain = str(article.get("domain", "") or "").strip()
+        seen = parse_gdelt_date(article.get("seendate"))
 
-        hashtag_items = entities.get("hashtags") or []
-        hashtags = " ".join(
-            f"#{item.get('tag')}"
-            for item in hashtag_items
-            if item.get("tag")
-        )
+        if not title or pd.isna(seen):
+            continue
 
-        post_id = str(post.get("id", ""))
-        source_url = (
-            f"https://x.com/{username}/status/{post_id}"
-            if username and post_id
-            else f"https://x.com/i/web/status/{post_id}"
-        )
+        if not domain:
+            domain = "news_source"
 
         rows.append({
-            "external_id": post_id,
-            "platform": "x",
-            "timestamp": post.get("created_at"),
-            "username": username,
-            "text": post.get("text", ""),
-            "hashtags": hashtags,
-            "likes": post_metrics.get("like_count", 0),
-            "reposts": post_metrics.get(
-                "retweet_count",
-                post_metrics.get("repost_count", 0)
-            ),
-            "replies": post_metrics.get("reply_count", 0),
-            "followers": user_metrics.get("followers_count", 0),
-            "source_url": source_url,
-            "topic_seed": "ISRO",
+            "external_id": hashlib.sha256(
+                (url or (domain + "|" + title)).encode("utf-8")
+            ).hexdigest(),
+            "platform": "web_news",
+            "timestamp": seen,
+            "username": domain,
+            "text": title,
+            "hashtags": "",
+            "likes": 0,
+            "reposts": 0,
+            "replies": 0,
+            "followers": 0,
+            "source_url": url,
+            "topic_seed": "ISRO News",
         })
 
-    return normalize_posts(pd.DataFrame(rows)), payload.get("meta", {})
+    return normalize_posts(pd.DataFrame(rows))
 
 
 # =========================================================
@@ -425,12 +396,27 @@ def run_sentiment_agent(df):
 @st.cache_data
 def run_emotion_agent(df):
     emotion_terms = {
-        "Anger": ["angry", "frustrated", "furious", "unacceptable", "outrage"],
-        "Fear/Worry": ["worried", "afraid", "concerned", "risk", "uncertain"],
-        "Joy": ["happy", "excellent", "great", "impressed", "love", "proud", "congratulations"],
-        "Sadness/Disappointment": ["disappointing", "disappointed", "sad", "failure"],
-        "Surprise": ["wow", "surprise", "surprisingly", "unexpected"],
-        "Relief": ["relieved", "finally", "resolved", "successfully"],
+        "Anger": [
+            "angry", "frustrated", "furious", "outrage",
+            "unacceptable", "criticism", "slams"
+        ],
+        "Fear/Worry": [
+            "worried", "concern", "concerned", "risk", "uncertain",
+            "failure", "problem", "issue", "delay"
+        ],
+        "Joy": [
+            "happy", "excellent", "great", "impressed", "proud",
+            "congratulations", "success", "successful"
+        ],
+        "Sadness/Disappointment": [
+            "disappointing", "disappointed", "sad", "setback"
+        ],
+        "Surprise": [
+            "wow", "surprise", "surprising", "unexpected"
+        ],
+        "Relief": [
+            "relieved", "finally", "resolved", "recovered"
+        ],
     }
 
     def classify(text):
@@ -447,7 +433,6 @@ def run_emotion_agent(df):
     return result
 
 
-@st.cache_data
 def run_semantic_topic_agent(df, requested_clusters=6):
     result = df.copy()
 
@@ -472,17 +457,34 @@ def run_semantic_topic_agent(df, requested_clusters=6):
         result["semantic_y"] = 0.0
         return result, None, None, np.array([])
 
-    max_components = min(12, tfidf.shape[0] - 1, tfidf.shape[1] - 1)
+    max_components = min(
+        10,
+        tfidf.shape[0] - 1,
+        tfidf.shape[1] - 1
+    )
+
     if max_components < 2:
         result["semantic_cluster"] = 0
         result["semantic_x"] = 0.0
         result["semantic_y"] = 0.0
-        return result, vectorizer, tfidf, np.array(vectorizer.get_feature_names_out())
+        return (
+            result,
+            vectorizer,
+            tfidf,
+            np.array(vectorizer.get_feature_names_out())
+        )
 
-    svd = TruncatedSVD(n_components=max_components, random_state=42)
-    latent = Normalizer(copy=False).fit_transform(svd.fit_transform(tfidf))
+    latent = TruncatedSVD(
+        n_components=max_components,
+        random_state=42
+    ).fit_transform(tfidf)
 
-    cluster_count = max(2, min(requested_clusters, max(2, len(result) // 8)))
+    latent = Normalizer(copy=False).fit_transform(latent)
+
+    cluster_count = max(
+        2,
+        min(requested_clusters, max(2, len(result) // 8))
+    )
     cluster_count = min(cluster_count, len(result))
 
     labels = KMeans(
@@ -493,7 +495,9 @@ def run_semantic_topic_agent(df, requested_clusters=6):
 
     result["semantic_cluster"] = labels
     result["semantic_x"] = latent[:, 0]
-    result["semantic_y"] = latent[:, 1] if latent.shape[1] > 1 else 0.0
+    result["semantic_y"] = (
+        latent[:, 1] if latent.shape[1] > 1 else 0.0
+    )
 
     return (
         result,
@@ -503,9 +507,12 @@ def run_semantic_topic_agent(df, requested_clusters=6):
     )
 
 
-# Not cached: scipy/sklearn objects are not reliable Streamlit cache keys.
 def run_narrative_agent(df, vectorizer, tfidf, feature_names):
-    if vectorizer is None or tfidf is None or len(feature_names) == 0:
+    if (
+        vectorizer is None
+        or tfidf is None
+        or len(feature_names) == 0
+    ):
         return pd.DataFrame()
 
     narratives = []
@@ -516,7 +523,10 @@ def run_narrative_agent(df, vectorizer, tfidf, feature_names):
         cluster_df = df[mask].copy()
         cluster_matrix = tfidf[mask]
 
-        mean_tfidf = np.asarray(cluster_matrix.mean(axis=0)).ravel()
+        mean_tfidf = np.asarray(
+            cluster_matrix.mean(axis=0)
+        ).ravel()
+
         top_indices = mean_tfidf.argsort()[::-1][:5]
         top_terms = [
             feature_names[i]
@@ -531,20 +541,35 @@ def run_narrative_agent(df, vectorizer, tfidf, feature_names):
         )
 
         centroid = np.asarray(cluster_matrix.mean(axis=0))
-        similarities = cosine_similarity(cluster_matrix, centroid).ravel()
-        representative = cluster_df.iloc[int(np.argmax(similarities))]["text"]
+        similarities = cosine_similarity(
+            cluster_matrix, centroid
+        ).ravel()
+        representative = cluster_df.iloc[
+            int(np.argmax(similarities))
+        ]["text"]
 
         recent = cluster_df[
-            cluster_df["timestamp"] >= latest_time - pd.Timedelta(hours=12)
+            cluster_df["timestamp"]
+            >= latest_time - pd.Timedelta(hours=12)
         ]
         previous = cluster_df[
-            (cluster_df["timestamp"] < latest_time - pd.Timedelta(hours=12))
-            & (cluster_df["timestamp"] >= latest_time - pd.Timedelta(hours=24))
+            (
+                cluster_df["timestamp"]
+                < latest_time - pd.Timedelta(hours=12)
+            )
+            & (
+                cluster_df["timestamp"]
+                >= latest_time - pd.Timedelta(hours=24)
+            )
         ]
+
         growth = (
             0.0
             if len(previous) == 0
-            else ((len(recent) - len(previous)) / len(previous)) * 100
+            else (
+                (len(recent) - len(previous))
+                / len(previous)
+            ) * 100
         )
 
         narratives.append({
@@ -552,24 +577,38 @@ def run_narrative_agent(df, vectorizer, tfidf, feature_names):
             "narrative": title,
             "posts": len(cluster_df),
             "negative_pct": round(
-                cluster_df["sentiment"].eq("Negative").mean() * 100, 1
+                cluster_df["sentiment"]
+                .eq("Negative")
+                .mean() * 100,
+                1,
             ),
-            "engagement": int(cluster_df["engagement"].sum()),
-            "12h_growth_pct": round(float(growth), 1),
+            "engagement": int(
+                cluster_df["engagement"].sum()
+            ),
+            "12h_growth_pct": round(
+                float(growth), 1
+            ),
             "top_terms": ", ".join(top_terms),
             "representative_post": representative,
         })
 
-    return pd.DataFrame(narratives).sort_values(
-        ["12h_growth_pct", "posts"],
-        ascending=[False, False],
-    ).reset_index(drop=True)
+    return (
+        pd.DataFrame(narratives)
+        .sort_values(
+            ["12h_growth_pct", "posts"],
+            ascending=[False, False]
+        )
+        .reset_index(drop=True)
+    )
 
 
 def run_trend_agent(df):
     if df.empty:
         return pd.DataFrame(
-            columns=["hour", "posts", "rolling_avg", "anomaly_score", "is_anomaly"]
+            columns=[
+                "hour", "posts", "rolling_avg",
+                "anomaly_score", "is_anomaly"
+            ]
         )
 
     hourly = (
@@ -578,8 +617,12 @@ def run_trend_agent(df):
         .reset_index(name="posts")
     )
     hourly.columns = ["hour", "posts"]
+
     hourly["rolling_avg"] = (
-        hourly["posts"].rolling(6, min_periods=2).mean().shift(1)
+        hourly["posts"]
+        .rolling(6, min_periods=2)
+        .mean()
+        .shift(1)
     )
 
     def score(row):
@@ -588,28 +631,50 @@ def run_trend_agent(df):
             return 0.0
         return row["posts"] / baseline
 
-    hourly["anomaly_score"] = hourly.apply(score, axis=1)
-    hourly["is_anomaly"] = hourly["anomaly_score"] >= 2.0
+    hourly["anomaly_score"] = hourly.apply(
+        score, axis=1
+    )
+    hourly["is_anomaly"] = (
+        hourly["anomaly_score"] >= 2.0
+    )
     return hourly
 
 
 def run_risk_agent(df, trend_df, narratives):
     if df.empty:
-        return {"risk": 0, "negative_pct": 0, "recent_growth_pct": 0}
+        return {
+            "risk": 0,
+            "negative_pct": 0,
+            "recent_growth_pct": 0,
+        }
 
-    negative_pct = df["sentiment"].eq("Negative").mean() * 100
+    negative_pct = (
+        df["sentiment"].eq("Negative").mean() * 100
+    )
     latest_time = df["timestamp"].max()
 
-    recent = df[df["timestamp"] >= latest_time - pd.Timedelta(hours=12)]
+    recent = df[
+        df["timestamp"]
+        >= latest_time - pd.Timedelta(hours=12)
+    ]
     previous = df[
-        (df["timestamp"] < latest_time - pd.Timedelta(hours=12))
-        & (df["timestamp"] >= latest_time - pd.Timedelta(hours=24))
+        (
+            df["timestamp"]
+            < latest_time - pd.Timedelta(hours=12)
+        )
+        & (
+            df["timestamp"]
+            >= latest_time - pd.Timedelta(hours=24)
+        )
     ]
 
     growth = (
         0
         if len(previous) == 0
-        else ((len(recent) - len(previous)) / len(previous)) * 100
+        else (
+            (len(recent) - len(previous))
+            / len(previous)
+        ) * 100
     )
 
     anomaly_multiplier = (
@@ -617,8 +682,12 @@ def run_risk_agent(df, trend_df, narratives):
         if len(trend_df)
         else 0
     )
+
     narrative_growth = (
-        max(0.0, float(narratives["12h_growth_pct"].max()))
+        max(
+            0.0,
+            float(narratives["12h_growth_pct"].max())
+        )
         if len(narratives)
         else 0.0
     )
@@ -626,8 +695,14 @@ def run_risk_agent(df, trend_df, narratives):
     risk = round(
         0.45 * negative_pct
         + 0.20 * max(0, min(growth, 100))
-        + 0.20 * max(0, min((anomaly_multiplier - 1) * 50, 100))
-        + 0.15 * max(0, min(narrative_growth, 100))
+        + 0.20 * max(
+            0,
+            min((anomaly_multiplier - 1) * 50, 100)
+        )
+        + 0.15 * max(
+            0,
+            min(narrative_growth, 100)
+        )
     )
 
     return {
@@ -642,119 +717,205 @@ def run_risk_agent(df, trend_df, narratives):
 # =========================================================
 with st.sidebar:
     st.header("Data source")
+
     source_mode = st.radio(
         "Choose source",
-        ["X Recent Search", "Supabase database", "Upload CSV", "Demo sample"],
+        [
+            "CSV / manual X posts",
+            "Free web/news — GDELT",
+            "Combine CSV + web/news",
+            "Supabase database",
+            "Demo sample",
+        ],
     )
 
-raw_df = pd.DataFrame()
+
+csv_df = pd.DataFrame(columns=STANDARD_COLUMNS)
+news_df = st.session_state.get(
+    "gdelt_posts",
+    pd.DataFrame(columns=STANDARD_COLUMNS)
+)
 
 
-if source_mode == "X Recent Search":
-    st.subheader("X — ISRO monitor")
+# ---------- CSV controls ----------
+if source_mode in [
+    "CSV / manual X posts",
+    "Combine CSV + web/news",
+]:
+    st.subheader("Option A — CSV / X samples")
 
-    if not x_enabled():
-        st.warning(
-            "Add X_BEARER_TOKEN to Streamlit Secrets before using X Recent Search."
-        )
-
-    preset = st.radio(
-        "Monitoring preset",
-        ["Public conversation about ISRO", "Official @isro posts", "Custom query"],
+    st.download_button(
+        "Download CSV template",
+        data=CSV_TEMPLATE,
+        file_name="isro_x_template.csv",
+        mime="text/csv",
     )
 
-    if preset == "Public conversation about ISRO":
-        default_query = "(ISRO OR @isro OR #ISRO) lang:en -is:retweet"
-    elif preset == "Official @isro posts":
-        default_query = "from:isro -is:retweet"
-    else:
-        default_query = "ISRO lang:en -is:retweet"
+    uploaded = st.file_uploader(
+        "Upload CSV",
+        type=["csv"],
+        help=(
+            "Required columns: timestamp, username, text. "
+            "Other metrics are optional."
+        ),
+    )
 
-    query = st.text_input("X search query", value=default_query)
-    max_results = st.slider(
-        "Posts to fetch",
+    if uploaded is not None:
+        try:
+            csv_df = normalize_posts(
+                pd.read_csv(uploaded)
+            )
+            st.success(
+                f"Loaded {len(csv_df):,} CSV records."
+            )
+        except Exception as exc:
+            st.error(
+                f"CSV could not be loaded: {exc}"
+            )
+
+
+# ---------- GDELT controls ----------
+if source_mode in [
+    "Free web/news — GDELT",
+    "Combine CSV + web/news",
+]:
+    st.subheader("Option B — Free web/news")
+
+    query = st.text_input(
+        "News query",
+        value='(ISRO OR "Indian Space Research Organisation")',
+    )
+
+    period_label = st.selectbox(
+        "Look-back period",
+        ["24 hours", "7 days", "1 month"],
+        index=1,
+    )
+
+    timespan_map = {
+        "24 hours": "24h",
+        "7 days": "1week",
+        "1 month": "1month",
+    }
+
+    max_records = st.slider(
+        "News items",
         min_value=10,
         max_value=100,
         value=50,
         step=10,
     )
 
-    st.caption(
-        "Build 5 intentionally fetches one page only to keep the first live test small."
-    )
-
-    if st.button("Fetch latest X posts", type="primary"):
+    if st.button(
+        "Fetch free news",
+        type="primary"
+    ):
         try:
-            fetched, meta = fetch_x_recent_posts(query, max_results)
-            st.session_state["x_posts"] = fetched
-            st.session_state["x_query"] = query
-            st.session_state["x_meta"] = meta
-            st.success(f"Fetched {len(fetched):,} X posts.")
+            fetched = fetch_gdelt_news(
+                query=query,
+                timespan=timespan_map[period_label],
+                max_records=max_records,
+            )
+            st.session_state["gdelt_posts"] = fetched
+            news_df = fetched
+            st.success(
+                f"Fetched {len(fetched):,} news items."
+            )
         except Exception as exc:
             st.error(str(exc))
 
-    raw_df = st.session_state.get(
-        "x_posts",
+    news_df = st.session_state.get(
+        "gdelt_posts",
         pd.DataFrame(columns=STANDARD_COLUMNS)
     )
 
-    if len(raw_df):
+    if len(news_df):
         st.info(
-            f"Current X dataset: {len(raw_df):,} posts · "
-            f"query: {st.session_state.get('x_query', query)}"
+            f"Current news dataset: {len(news_df):,} items"
         )
 
+
+# ---------- Build raw dataset ----------
+if source_mode == "CSV / manual X posts":
+    raw_df = csv_df
+
+elif source_mode == "Free web/news — GDELT":
+    raw_df = news_df
+
+elif source_mode == "Combine CSV + web/news":
+    raw_df = normalize_posts(
+        pd.concat(
+            [csv_df, news_df],
+            ignore_index=True
+        )
+    )
 
 elif source_mode == "Supabase database":
     if not supabase_enabled():
         st.warning(
-            "Add SUPABASE_URL and SUPABASE_SECRET_KEY to Streamlit Secrets."
+            "Supabase secrets are not configured."
+        )
+        raw_df = pd.DataFrame(
+            columns=STANDARD_COLUMNS
         )
     else:
         try:
             raw_df = load_supabase_posts()
-            st.success(f"Loaded {len(raw_df):,} posts from Supabase.")
+            st.success(
+                f"Loaded {len(raw_df):,} stored records."
+            )
         except Exception as exc:
-            st.error(f"Could not load Supabase data: {exc}")
+            st.error(
+                f"Could not load Supabase: {exc}"
+            )
+            raw_df = pd.DataFrame(
+                columns=STANDARD_COLUMNS
+            )
 
-
-elif source_mode == "Upload CSV":
-    uploaded = st.file_uploader("Upload social posts CSV", type=["csv"])
-    st.caption(
-        "Required: timestamp, username, text. Optional: hashtags, likes, "
-        "reposts, replies, followers, platform, source_url."
-    )
-
-    if uploaded is not None:
-        try:
-            raw_df = normalize_posts(pd.read_csv(uploaded))
-            st.success(f"Loaded {len(raw_df):,} valid posts.")
-        except Exception as exc:
-            st.error(f"CSV could not be loaded: {exc}")
-
-
-elif source_mode == "Demo sample":
+else:
     raw_df = make_sample_data()
 
 
-# Save any non-database source into Supabase.
-if len(raw_df) and supabase_enabled() and source_mode != "Supabase database":
+# ---------- Optional persistence ----------
+if (
+    len(raw_df)
+    and supabase_enabled()
+    and source_mode != "Supabase database"
+):
     with st.sidebar:
-        if st.button("Save current posts to Supabase"):
+        if st.button(
+            "Save current data to Supabase"
+        ):
             try:
-                count = save_posts_to_supabase(raw_df)
-                st.success(f"Sent {count:,} posts to Supabase.")
+                count = save_posts_to_supabase(
+                    raw_df
+                )
+                st.success(
+                    f"Sent {count:,} records to Supabase."
+                )
             except Exception as exc:
-                st.error(f"Save failed: {exc}")
+                st.error(
+                    f"Save failed: {exc}"
+                )
 
 
 if raw_df.empty:
-    if source_mode == "X Recent Search":
+    if source_mode == "CSV / manual X posts":
         st.info(
-            "Configure the X bearer token, then tap **Fetch latest X posts**."
+            "Upload your ISRO-related X CSV to begin."
+        )
+    elif source_mode == "Free web/news — GDELT":
+        st.info(
+            "Tap **Fetch free news** to begin."
+        )
+    elif source_mode == "Combine CSV + web/news":
+        st.info(
+            "Upload a CSV and/or tap **Fetch free news**."
         )
     else:
-        st.info("No posts are available from the selected source.")
+        st.info(
+            "No records are available from this source."
+        )
     st.stop()
 
 
@@ -763,10 +924,21 @@ if raw_df.empty:
 # =========================================================
 df = run_sentiment_agent(raw_df)
 df = run_emotion_agent(df)
-df["engagement"] = df["likes"] + df["reposts"] + df["replies"]
+df["engagement"] = (
+    df["likes"] + df["reposts"] + df["replies"]
+)
 
-df, vectorizer, tfidf, feature_names = run_semantic_topic_agent(df)
-narratives_df = run_narrative_agent(df, vectorizer, tfidf, feature_names)
+df, vectorizer, tfidf, feature_names = (
+    run_semantic_topic_agent(df)
+)
+
+narratives_df = run_narrative_agent(
+    df,
+    vectorizer,
+    tfidf,
+    feature_names,
+)
+
 trend_df = run_trend_agent(df)
 
 
@@ -777,43 +949,80 @@ with st.sidebar:
     st.divider()
     st.header("Analysis filters")
 
-    sentiments = ["Positive", "Neutral", "Negative"]
+    platforms = sorted(
+        df["platform"].unique().tolist()
+    )
+    selected_platforms = st.multiselect(
+        "Source/platform",
+        platforms,
+        default=platforms,
+    )
+
+    sentiments = [
+        "Positive", "Neutral", "Negative"
+    ]
     selected_sentiments = st.multiselect(
-        "Sentiment", sentiments, default=sentiments
+        "Sentiment",
+        sentiments,
+        default=sentiments,
     )
 
-    emotions = sorted(df["emotion"].unique())
+    emotions = sorted(
+        df["emotion"].unique().tolist()
+    )
     selected_emotions = st.multiselect(
-        "Emotion", emotions, default=emotions
+        "Emotion",
+        emotions,
+        default=emotions,
     )
 
-    clusters = sorted(df["semantic_cluster"].unique().tolist())
+    clusters = sorted(
+        df["semantic_cluster"].unique().tolist()
+    )
     selected_clusters = st.multiselect(
-        "Semantic clusters", clusters, default=clusters
+        "Semantic clusters",
+        clusters,
+        default=clusters,
     )
 
     search = st.text_input(
-        "Search within loaded posts",
-        placeholder="launch, mission, satellite..."
+        "Search within loaded data",
+        placeholder="launch, satellite, mission...",
     )
 
 
 filtered = df[
-    df["sentiment"].isin(selected_sentiments)
+    df["platform"].isin(selected_platforms)
+    & df["sentiment"].isin(selected_sentiments)
     & df["emotion"].isin(selected_emotions)
-    & df["semantic_cluster"].isin(selected_clusters)
+    & df["semantic_cluster"].isin(
+        selected_clusters
+    )
 ].copy()
 
 if search:
     filtered = filtered[
-        filtered["text"].str.contains(re.escape(search), case=False, na=False)
-        | filtered["hashtags"].str.contains(re.escape(search), case=False, na=False)
+        filtered["text"].str.contains(
+            re.escape(search),
+            case=False,
+            na=False,
+        )
+        | filtered["hashtags"].str.contains(
+            re.escape(search),
+            case=False,
+            na=False,
+        )
     ]
 
+
 filtered_trend = run_trend_agent(filtered)
+
 filtered_narratives = narratives_df[
-    narratives_df["cluster"].isin(selected_clusters)
+    narratives_df["cluster"].isin(
+        selected_clusters
+    )
 ].copy()
+
 risk_data = run_risk_agent(
     filtered,
     filtered_trend,
@@ -825,34 +1034,47 @@ risk_data = run_risk_agent(
 # DASHBOARD
 # =========================================================
 c1, c2, c3, c4, c5, c6 = st.columns(6)
-c1.metric("Posts", f"{len(filtered):,}")
-c2.metric("Engagement", f"{int(filtered['engagement'].sum()):,}")
-c3.metric("Negative", f"{risk_data['negative_pct']:.1f}%")
-c4.metric("12h growth", f"{risk_data['recent_growth_pct']:+.0f}%")
-c5.metric("Narratives", len(filtered_narratives))
-c6.metric("Risk", f"{risk_data['risk']}/100")
 
-if risk_data["risk"] >= 65:
-    st.error("🔴 High monitoring priority")
-elif risk_data["risk"] >= 40:
-    st.warning("🟠 Moderate monitoring priority")
-else:
-    st.success("🟢 Low monitoring priority")
+c1.metric("Records", f"{len(filtered):,}")
+c2.metric(
+    "Engagement",
+    f"{int(filtered['engagement'].sum()):,}",
+)
+c3.metric(
+    "Negative",
+    f"{risk_data['negative_pct']:.1f}%",
+)
+c4.metric(
+    "12h growth",
+    f"{risk_data['recent_growth_pct']:+.0f}%",
+)
+c5.metric(
+    "Narratives",
+    len(filtered_narratives),
+)
+c6.metric(
+    "Monitoring score",
+    f"{risk_data['risk']}/100",
+)
 
 
-anomalies = filtered_trend[filtered_trend["is_anomaly"]]
-if len(anomalies):
-    latest = anomalies.sort_values("hour").iloc[-1]
-    st.warning(
-        f"⚠️ Trend Agent: {latest['posts']} posts in one hour, "
-        f"{latest['anomaly_score']:.1f}× rolling baseline."
+if (
+    len(filtered)
+    and filtered["platform"]
+    .eq("web_news")
+    .all()
+):
+    st.info(
+        "News mode: sentiment/emotion are calculated from "
+        "article headlines, so treat them as headline-framing "
+        "signals rather than public-opinion measurements."
     )
 
 
 left, right = st.columns([2, 1])
 
 with left:
-    st.subheader("Conversation trend")
+    st.subheader("Conversation / coverage trend")
     fig = px.line(
         filtered_trend,
         x="hour",
@@ -861,27 +1083,40 @@ with left:
     )
     fig.update_layout(
         xaxis_title=None,
-        yaxis_title="Posts",
+        yaxis_title="Records",
         legend_title_text="",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+    )
 
 with right:
     st.subheader("Sentiment")
     sent = (
         filtered["sentiment"]
         .value_counts()
-        .reindex(["Positive", "Neutral", "Negative"], fill_value=0)
+        .reindex(
+            ["Positive", "Neutral", "Negative"],
+            fill_value=0,
+        )
         .reset_index()
     )
-    sent.columns = ["sentiment", "posts"]
+    sent.columns = ["sentiment", "records"]
+
     st.plotly_chart(
-        px.pie(sent, names="sentiment", values="posts", hole=0.55),
+        px.pie(
+            sent,
+            names="sentiment",
+            values="records",
+            hole=0.55,
+        ),
         use_container_width=True,
     )
 
 
 st.subheader("🧠 Narrative intelligence")
+
 if len(filtered_narratives):
     view = filtered_narratives[
         [
@@ -893,80 +1128,127 @@ if len(filtered_narratives):
             "top_terms",
         ]
     ].copy()
+
     view.columns = [
         "Narrative",
-        "Posts",
+        "Records",
         "12h growth %",
         "Negative %",
         "Engagement",
         "Key terms",
     ]
-    st.dataframe(view, use_container_width=True, hide_index=True)
+
+    st.dataframe(
+        view,
+        use_container_width=True,
+        hide_index=True,
+    )
 
     chosen = st.selectbox(
         "Inspect a narrative",
-        filtered_narratives["narrative"].tolist(),
+        filtered_narratives[
+            "narrative"
+        ].tolist(),
     )
+
     row = filtered_narratives[
-        filtered_narratives["narrative"] == chosen
+        filtered_narratives["narrative"]
+        == chosen
     ].iloc[0]
-    st.markdown(f"**Representative post:** {row['representative_post']}")
+
+    st.markdown(
+        f"**Representative item:** "
+        f"{row['representative_post']}"
+    )
 else:
     st.info(
-        "Narrative clustering needs enough textual variation. "
-        "Try fetching more posts if this section is empty."
+        "More records or more textual variation may be "
+        "needed for narrative clustering."
     )
 
 
 st.subheader("Semantic conversation map")
+
 if len(filtered):
     plot_df = filtered.copy()
     plot_df["cluster_label"] = (
-        "Cluster " + plot_df["semantic_cluster"].astype(str)
+        "Cluster "
+        + plot_df["semantic_cluster"].astype(str)
     )
+
     fig = px.scatter(
         plot_df,
         x="semantic_x",
         y="semantic_y",
         color="cluster_label",
-        hover_data=["username", "sentiment", "emotion", "text"],
+        hover_data=[
+            "platform",
+            "username",
+            "sentiment",
+            "emotion",
+            "text",
+        ],
     )
+
     fig.update_layout(
         xaxis_title="Semantic dimension 1",
         yaxis_title="Semantic dimension 2",
         legend_title_text="",
     )
-    st.plotly_chart(fig, use_container_width=True)
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+    )
 
 
 left, right = st.columns(2)
 
 with left:
     st.subheader("Emotion intelligence")
-    emotions = filtered["emotion"].value_counts().reset_index()
-    emotions.columns = ["emotion", "posts"]
+    emotions = (
+        filtered["emotion"]
+        .value_counts()
+        .reset_index()
+    )
+    emotions.columns = ["emotion", "records"]
+
     st.plotly_chart(
-        px.bar(emotions, x="emotion", y="posts"),
+        px.bar(
+            emotions,
+            x="emotion",
+            y="records",
+        ),
         use_container_width=True,
     )
 
 with right:
-    st.subheader("Top authors")
-    authors = (
-        filtered.groupby("username")
-        .agg(
-            engagement=("engagement", "sum"),
-            posts=("text", "size"),
-            followers=("followers", "max"),
+    st.subheader("Top sources / authors")
+    sources = (
+        filtered.groupby(
+            ["platform", "username"]
         )
-        .sort_values("engagement", ascending=False)
-        .head(10)
+        .agg(
+            records=("text", "size"),
+            engagement=("engagement", "sum"),
+        )
+        .sort_values(
+            ["records", "engagement"],
+            ascending=False,
+        )
+        .head(15)
         .reset_index()
     )
-    st.dataframe(authors, use_container_width=True, hide_index=True)
+
+    st.dataframe(
+        sources,
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
-st.subheader("Post explorer")
+st.subheader("Record explorer")
+
 display_cols = [
     "timestamp",
     "platform",
@@ -980,44 +1262,97 @@ display_cols = [
     "hashtags",
     "source_url",
 ]
+
 st.dataframe(
-    filtered[display_cols].sort_values("timestamp", ascending=False),
+    filtered[display_cols]
+    .sort_values(
+        "timestamp",
+        ascending=False
+    ),
     use_container_width=True,
     hide_index=True,
 )
 
 
 st.subheader("Agent status")
+
 agent_status = pd.DataFrame(
     [
-        ["X Recent Search Collector", "Active", "One-page live X search"],
-        ["Supabase Connector", "Active", "Persistent storage"],
-        ["Sentiment Agent", "Active", "Sentiment classification"],
-        ["Emotion Agent", "Active", "Basic emotion signals"],
-        ["Semantic Topic Agent", "Active", "Conversation clustering"],
-        ["Narrative Agent", "Active", "Key themes and evidence"],
-        ["Trend Agent", "Active", "Anomaly detection"],
-        ["Risk Agent", "Active", "Multi-signal monitoring score"],
-        ["Influence / Network Agent", "Planned", "Next build"],
+        [
+            "CSV / X Sample Collector",
+            "Active",
+            "Manual or exported X-post data",
+        ],
+        [
+            "GDELT News Collector",
+            "Active",
+            "Free web/news coverage",
+        ],
+        [
+            "Supabase Connector",
+            "Active",
+            "Persistent storage",
+        ],
+        [
+            "Sentiment Agent",
+            "Active",
+            "Sentiment classification",
+        ],
+        [
+            "Emotion Agent",
+            "Active",
+            "Basic emotion signals",
+        ],
+        [
+            "Semantic Topic Agent",
+            "Active",
+            "Automatic clustering",
+        ],
+        [
+            "Narrative Agent",
+            "Active",
+            "Themes and representative evidence",
+        ],
+        [
+            "Trend Agent",
+            "Active",
+            "Volume / coverage anomalies",
+        ],
+        [
+            "Risk Agent",
+            "Active",
+            "Multi-signal monitoring score",
+        ],
     ],
     columns=["Component", "Status", "Role"],
 )
-st.dataframe(agent_status, use_container_width=True, hide_index=True)
+
+st.dataframe(
+    agent_status,
+    use_container_width=True,
+    hide_index=True,
+)
 
 
-with st.expander("Build 5 — X setup"):
+with st.expander("How to use the free ISRO workflow"):
     st.markdown(
         """
-        Add this only in **Streamlit Secrets**, never GitHub:
+        **Option A — X samples**
 
-        ```toml
-        X_BEARER_TOKEN = "YOUR_X_BEARER_TOKEN"
-        ```
+        Put manually collected or legitimately exported X posts
+        into the CSV template and upload it.
 
-        Recommended first test:
-        `Public conversation about ISRO`, 10–50 posts.
+        **Option B — Free web/news**
 
-        The collector intentionally requests only one page. It does not
-        automatically paginate.
+        Search GDELT for ISRO-related news coverage. No X token
+        is required.
+
+        **Combined mode**
+
+        Upload your X CSV and fetch GDELT news, then analyze both
+        together. Use the Source/platform filter to separate
+        `x_manual` from `web_news`.
+
+        You can save either or both sources into Supabase.
         """
     )
