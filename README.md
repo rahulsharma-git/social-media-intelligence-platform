@@ -1,19 +1,54 @@
-# Social Media Intelligence Platform — Build 4.1
+# Social Media Intelligence Platform — Build 5
 
-Small Supabase compatibility update.
+Build 5 adds live X Recent Search with ISRO monitoring presets.
 
-## Change
+## New data source
 
-The app now prefers Supabase's current server-side secret API key:
+**X Recent Search**
+
+Presets:
+- Public conversation about ISRO
+- Official `@isro` posts
+- Custom X query
+
+The first live collector intentionally requests only one API page (10–100 posts)
+to keep testing controlled.
+
+## Required Streamlit secret
+
+Add your X App Bearer Token in Streamlit Community Cloud:
+
+```toml
+X_BEARER_TOKEN = "YOUR_X_BEARER_TOKEN"
+```
+
+Do not commit the token to GitHub.
+
+## Existing Supabase secrets
 
 ```toml
 SUPABASE_URL = "https://YOUR_PROJECT.supabase.co"
 SUPABASE_SECRET_KEY = "sb_secret_..."
 ```
 
-The old `SUPABASE_SERVICE_KEY` variable remains supported as a legacy fallback.
+## Workflow
 
-Do not commit either secret key to GitHub. Store it only in Streamlit Community
-Cloud's Secrets settings.
+X Recent Search
+-> standardized social post records
+-> sentiment/emotion
+-> semantic clustering
+-> narrative intelligence
+-> trend/risk analysis
+-> optional Save to Supabase
 
-All Build 4 analytics and CSV features are unchanged.
+## ISRO public-conversation query
+
+```text
+(ISRO OR @isro OR #ISRO) lang:en -is:retweet
+```
+
+## ISRO official-account query
+
+```text
+from:isro -is:retweet
+```
