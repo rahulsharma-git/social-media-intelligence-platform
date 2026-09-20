@@ -1,21 +1,50 @@
-# Build 5.4 Free Stable
+# Social Media Intelligence Platform - Build 5.6.1 Free Stable
 
-This build explicitly fixes the Android CSV workflow while preserving the
-working free-news workflow.
+Build 5.6.1 retains the stable X/CSV and free-News workflows and adds a
+downloadable analytical PDF report.
 
-## CSV
-1. Choose file
-2. Tap **Load & analyze CSV**
-3. The normalized dataframe is stored in Streamlit session state
-4. You immediately see row count, engagement totals and preview
-5. Dashboard analyzes the active dataset
+## Dashboard additions
 
-There is also a **Test built-in CSV** button. If that works, the app's CSV
-pipeline is healthy even before choosing a phone file.
+- X: Top 10 positive briefs
+- X: Top 10 negative briefs
+- News: Top 10 positive briefs
+- News: Top 10 negative briefs
+- Expanded Legend & Methodology section
+- Dynamic cluster legend table
+- Generate + Download PDF report
 
-## News
-GDELT remains primary and Google News RSS remains the automatic free fallback.
+## PDF contents
 
-## Version check
-The app visibly says:
-`Build 5.4 Free Stable — VERIFIED CSV + News dual-source build`
+1. Executive overview
+2. Top sentiment briefs
+   - X positive
+   - X negative
+   - News positive
+   - News negative
+3. Cluster and narrative interpretation
+4. Detailed legends and methodology
+5. Annexure A - all X posts analyzed
+6. Annexure B - all News items analyzed, separated into:
+   - Positive
+   - Negative
+   - Neutral (included so every analyzed item is accounted for)
+
+For News, the free feeds usually provide the media source but not an
+individual article byline. The Author field is therefore shown as
+`Not provided by feed` when unavailable.
+
+## PDF dependency
+
+`reportlab` has been added to requirements.txt.
+
+## Existing workflows retained
+
+- Stable Android X/CSV loading
+- Built-in CSV test
+- GDELT news with automatic Google News RSS fallback
+- Combined X + News mode
+- Supabase persistence
+- Sentiment, emotion, clustering, narratives, trend/anomaly and monitoring score
+
+
+PDF font handling was updated to use Noto Sans for Latin text and a separate Devanagari font when available.

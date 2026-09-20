@@ -5,3 +5,4 @@ plotly
 vaderSentiment
 scikit-learn
 requests
+reportlab

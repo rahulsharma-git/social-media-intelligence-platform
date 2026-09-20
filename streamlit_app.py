@@ -17,6 +17,18 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import Normalizer
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, PageBreak,
+    Table, LongTable, TableStyle
+)
+from xml.sax.saxutils import escape
 
 
 st.set_page_config(
@@ -26,7 +38,7 @@ st.set_page_config(
 )
 
 st.title("📡 Social Media Intelligence Platform")
-st.caption("Build 5.4 Free Stable — VERIFIED CSV + News dual-source build")
+st.caption("Build 5.6.1 Free Stable — briefs + legends + verified PDF report")
 
 
 # =========================================================
@@ -827,6 +839,754 @@ def run_risk_agent(df, trend_df, narratives):
     }
 
 
+
+# =========================================================
+# TOP SENTIMENT BRIEFING HELPERS
+# =========================================================
+def brief_text(value, max_chars=180):
+    """Create a short local/extractive summary without a paid LLM."""
+    t = re.sub(r"https?://\S+", "", str(value or ""))
+    t = re.sub(r"\s+", " ", t).strip()
+
+    if not t:
+        return "No text available."
+
+    sentences = re.split(r"(?<=[.!?])\s+", t)
+    candidate = sentences[0].strip() if sentences else t
+
+    # Very short first sentences are usually not informative enough.
+    if len(candidate) < 45:
+        candidate = t
+
+    if len(candidate) > max_chars:
+        candidate = candidate[: max_chars - 1].rstrip() + "…"
+
+    return candidate
+
+
+def top_sentiment_items(df, polarity="positive", limit=10, news=False):
+    """Rank strongest positive/negative items for X or News."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    work = df.copy()
+
+    if polarity == "positive":
+        work = work[work["sentiment"].eq("Positive")].copy()
+        score_ascending = False
+    else:
+        work = work[work["sentiment"].eq("Negative")].copy()
+        score_ascending = True
+
+    if work.empty:
+        return work
+
+    if news:
+        # News has no meaningful social engagement in this free feed,
+        # so rank by sentiment strength and then recency.
+        work = work.sort_values(
+            ["sentiment_score", "timestamp"],
+            ascending=[score_ascending, False],
+        )
+    else:
+        # For X/manual-X, use engagement as a secondary ranking signal.
+        work = work.sort_values(
+            ["sentiment_score", "engagement", "timestamp"],
+            ascending=[score_ascending, False, False],
+        )
+
+    return work.head(limit).copy()
+
+
+def render_brief_list(df, polarity="positive", news=False):
+    items = top_sentiment_items(
+        df,
+        polarity=polarity,
+        limit=10,
+        news=news,
+    )
+
+    if items.empty:
+        st.info(f"No {polarity} items are available in the loaded data.")
+        return
+
+    for rank, (_, row) in enumerate(items.iterrows(), start=1):
+        summary = brief_text(row.get("text", ""))
+        source = str(row.get("username", "") or "Unknown")
+        score = float(row.get("sentiment_score", 0.0))
+        engagement = int(row.get("engagement", 0) or 0)
+
+        st.markdown(f"**{rank}. {summary}**")
+
+        if news:
+            st.caption(
+                f"Source: {source} · sentiment {score:+.2f}"
+            )
+        else:
+            st.caption(
+                f"Source/user: {source} · sentiment {score:+.2f} · "
+                f"engagement {engagement}"
+            )
+
+
+
+# =========================================================
+# PDF REPORTING
+# =========================================================
+def _report_clean_text(value):
+    """Normalize text for reliable PDF rendering."""
+    t = str(value or "")
+    t = t.replace("\u2013", "-").replace("\u2014", "-")
+    t = t.replace("\u2018", "'").replace("\u2019", "'")
+    t = t.replace("\u201c", '"').replace("\u201d", '"')
+    # Remove common emoji/symbol ranges that can render as tofu squares.
+    t = re.sub(
+        r"[\U0001F300-\U0001FAFF\U00002700-\U000027BF]",
+        "",
+        t,
+    )
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def _register_report_fonts():
+    """
+    Prefer a broad Latin Unicode font already installed on the host and
+    separately register Devanagari when available. No font file is bundled.
+    """
+    base_candidates = [
+        (
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+        ),
+        (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        ),
+        (
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        ),
+    ]
+
+    normal_name, bold_name = "Helvetica", "Helvetica-Bold"
+
+    for regular_path, bold_path in base_candidates:
+        if os.path.exists(regular_path) and os.path.exists(bold_path):
+            try:
+                pdfmetrics.registerFont(
+                    TTFont("SMI-Regular", regular_path)
+                )
+                pdfmetrics.registerFont(
+                    TTFont("SMI-Bold", bold_path)
+                )
+                normal_name, bold_name = "SMI-Regular", "SMI-Bold"
+                break
+            except Exception:
+                pass
+
+    deva_regular = (
+        "/usr/share/fonts/truetype/noto/"
+        "NotoSansDevanagari-Regular.ttf"
+    )
+    if os.path.exists(deva_regular):
+        try:
+            pdfmetrics.registerFont(
+                TTFont("SMI-Deva", deva_regular)
+            )
+        except Exception:
+            pass
+
+    return normal_name, bold_name
+
+
+def _report_para(text_value, style):
+    clean = _report_clean_text(text_value)
+
+    # Helvetica fallback cannot encode many scripts.
+    if style.fontName == "Helvetica":
+        clean = clean.encode("latin-1", "replace").decode("latin-1")
+
+    marked = escape(clean).replace("\n", "<br/>")
+
+    # Use a Devanagari font only for Devanagari runs, while retaining
+    # the broad Latin font for the rest of the paragraph.
+    if "SMI-Deva" in pdfmetrics.getRegisteredFontNames():
+        marked = re.sub(
+            r"([\u0900-\u097F]+)",
+            r'<font name="SMI-Deva">\1</font>',
+            marked,
+        )
+    else:
+        marked = re.sub(r"[\u0900-\u097F]+", "?", marked)
+
+    return Paragraph(marked, style)
+
+
+def _report_brief(value, max_chars=190):
+    t = _report_clean_text(value)
+    if not t:
+        return "No text available."
+
+    sentences = re.split(r"(?<=[.!?])\s+", t)
+    candidate = sentences[0].strip() if sentences else t
+    if len(candidate) < 45:
+        candidate = t
+
+    if len(candidate) > max_chars:
+        candidate = candidate[: max_chars - 1].rstrip() + "..."
+    return candidate
+
+
+def _report_top_items(dataframe, polarity, limit=10, news=False):
+    if dataframe is None or dataframe.empty:
+        return pd.DataFrame()
+
+    work = dataframe.copy()
+
+    if polarity == "Positive":
+        work = work[work["sentiment"].eq("Positive")].copy()
+        score_asc = False
+    else:
+        work = work[work["sentiment"].eq("Negative")].copy()
+        score_asc = True
+
+    if work.empty:
+        return work
+
+    if news:
+        return work.sort_values(
+            ["sentiment_score", "timestamp"],
+            ascending=[score_asc, False],
+        ).head(limit)
+
+    return work.sort_values(
+        ["sentiment_score", "engagement", "timestamp"],
+        ascending=[score_asc, False, False],
+    ).head(limit)
+
+
+def _report_monitoring_score(dataframe, trend_frame, narrative_frame):
+    if dataframe is None or dataframe.empty:
+        return 0
+
+    negative_pct = dataframe["sentiment"].eq("Negative").mean() * 100
+    latest_time = dataframe["timestamp"].max()
+
+    recent = dataframe[
+        dataframe["timestamp"] >= latest_time - pd.Timedelta(hours=12)
+    ]
+    previous = dataframe[
+        (dataframe["timestamp"] < latest_time - pd.Timedelta(hours=12))
+        & (
+            dataframe["timestamp"]
+            >= latest_time - pd.Timedelta(hours=24)
+        )
+    ]
+
+    growth = (
+        0
+        if len(previous) == 0
+        else ((len(recent) - len(previous)) / len(previous)) * 100
+    )
+
+    anomaly = (
+        float(trend_frame["anomaly_score"].max())
+        if trend_frame is not None and len(trend_frame)
+        else 0.0
+    )
+
+    narrative_growth = (
+        max(0.0, float(narrative_frame["12h_growth_pct"].max()))
+        if narrative_frame is not None and len(narrative_frame)
+        else 0.0
+    )
+
+    score = round(
+        0.45 * negative_pct
+        + 0.20 * max(0, min(growth, 100))
+        + 0.20 * max(0, min((anomaly - 1) * 50, 100))
+        + 0.15 * max(0, min(narrative_growth, 100))
+    )
+    return min(100, max(0, score))
+
+
+def build_pdf_report(report_df, narrative_df, trend_df):
+    """
+    Build a complete PDF from all currently loaded records.
+    Includes top sentiment briefs, methodology/legends, cluster definitions,
+    and annexures containing all X and News items.
+    """
+    buffer = io.BytesIO()
+    normal_font, bold_font = _register_report_fonts()
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=12 * mm,
+        leftMargin=12 * mm,
+        topMargin=15 * mm,
+        bottomMargin=16 * mm,
+        title="Social Media Intelligence Report",
+        author="Social Media Intelligence Platform",
+    )
+
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        "SMITitle",
+        parent=styles["Title"],
+        fontName=bold_font,
+        fontSize=18,
+        leading=22,
+        alignment=TA_CENTER,
+        spaceAfter=8,
+    )
+    h1 = ParagraphStyle(
+        "SMIH1",
+        parent=styles["Heading1"],
+        fontName=bold_font,
+        fontSize=13,
+        leading=16,
+        spaceBefore=7,
+        spaceAfter=5,
+    )
+    h2 = ParagraphStyle(
+        "SMIH2",
+        parent=styles["Heading2"],
+        fontName=bold_font,
+        fontSize=10.5,
+        leading=13,
+        spaceBefore=6,
+        spaceAfter=4,
+    )
+    body = ParagraphStyle(
+        "SMIBody",
+        parent=styles["BodyText"],
+        fontName=normal_font,
+        fontSize=8.5,
+        leading=11,
+        spaceAfter=4,
+    )
+    small = ParagraphStyle(
+        "SMISmall",
+        parent=body,
+        fontSize=7.2,
+        leading=9,
+    )
+    table_text = ParagraphStyle(
+        "SMITable",
+        parent=body,
+        fontSize=6.6,
+        leading=8,
+        spaceAfter=0,
+    )
+    table_head = ParagraphStyle(
+        "SMITableHead",
+        parent=table_text,
+        fontName=bold_font,
+        fontSize=6.6,
+        leading=8,
+    )
+
+    story = []
+
+    def p(value, style=body):
+        return _report_para(value, style)
+
+    def add_long_table(rows, widths, repeat_rows=1):
+        tbl = LongTable(
+            rows,
+            colWidths=widths,
+            repeatRows=repeat_rows,
+            hAlign="LEFT",
+        )
+        tbl.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E9EEF7")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#1F2937")),
+                    ("FONTNAME", (0, 0), (-1, 0), bold_font),
+                    ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#C9D2DF")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 3),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ]
+            )
+        )
+        story.append(tbl)
+        story.append(Spacer(1, 5))
+
+    generated = datetime.now(timezone.utc)
+    x_df = report_df[
+        report_df["platform"].isin(["x_manual", "x"])
+    ].copy()
+    news_df = report_df[
+        report_df["platform"].eq("web_news")
+    ].copy()
+
+    sent_counts = (
+        report_df["sentiment"]
+        .value_counts()
+        .reindex(["Positive", "Neutral", "Negative"], fill_value=0)
+    )
+
+    engagement_total = int(report_df["engagement"].sum())
+    monitoring_score = _report_monitoring_score(
+        report_df, trend_df, narrative_df
+    )
+
+    # Cover / report metadata
+    story.append(p("Social Media Intelligence Report", title_style))
+    story.append(
+        p(
+            "Automated analytical report generated from the records currently "
+            "loaded in the dashboard. Annexures contain the full analyzed X "
+            "and News item lists.",
+            body,
+        )
+    )
+    story.append(
+        p(
+            f"Generated: {generated.strftime('%Y-%m-%d %H:%M UTC')} | "
+            f"Total records: {len(report_df):,} | X records: {len(x_df):,} | "
+            f"News records: {len(news_df):,}",
+            small,
+        )
+    )
+    story.append(Spacer(1, 6))
+
+    # Executive summary
+    story.append(p("1. Executive overview", h1))
+    summary_rows = [
+        [p("Metric", table_head), p("Value", table_head)],
+        [p("Total analyzed records", table_text), p(f"{len(report_df):,}", table_text)],
+        [p("X/manual X records", table_text), p(f"{len(x_df):,}", table_text)],
+        [p("News records", table_text), p(f"{len(news_df):,}", table_text)],
+        [p("Positive", table_text), p(f"{int(sent_counts['Positive']):,}", table_text)],
+        [p("Neutral", table_text), p(f"{int(sent_counts['Neutral']):,}", table_text)],
+        [p("Negative", table_text), p(f"{int(sent_counts['Negative']):,}", table_text)],
+        [p("X engagement total", table_text), p(f"{engagement_total:,}", table_text)],
+        [p("Prototype monitoring score", table_text), p(f"{monitoring_score}/100", table_text)],
+        [p("Detected semantic clusters", table_text), p(f"{report_df['semantic_cluster'].nunique()}", table_text)],
+    ]
+    add_long_table(summary_rows, [62 * mm, 45 * mm])
+
+    # Top sentiment briefs
+    story.append(p("2. Top sentiment briefs", h1))
+    story.append(
+        p(
+            "X lists are ranked by sentiment strength, then engagement and "
+            "recency. News lists are ranked by headline sentiment strength and "
+            "recency. These are extractive briefs, not generative claims.",
+            small,
+        )
+    )
+
+    for label, frame, news_flag in [
+        ("X - Top 10 positive", x_df, False),
+        ("X - Top 10 negative", x_df, False),
+        ("News - Top 10 positive", news_df, True),
+        ("News - Top 10 negative", news_df, True),
+    ]:
+        polarity = "Positive" if "positive" in label.lower() else "Negative"
+        story.append(p(label, h2))
+        items = _report_top_items(
+            frame,
+            polarity=polarity,
+            limit=10,
+            news=news_flag,
+        )
+        if items.empty:
+            story.append(p(f"No {polarity.lower()} items were available.", body))
+        else:
+            for rank, (_, row) in enumerate(items.iterrows(), start=1):
+                brief = _report_brief(row.get("text", ""))
+                source = _report_clean_text(row.get("username", "Unknown"))
+                score = float(row.get("sentiment_score", 0.0))
+                if news_flag:
+                    meta = f"Source: {source} | Sentiment score: {score:+.2f}"
+                else:
+                    meta = (
+                        f"User/source: {source} | Sentiment score: {score:+.2f} | "
+                        f"Engagement: {int(row.get('engagement', 0) or 0)}"
+                    )
+                story.append(p(f"{rank}. {brief}", body))
+                story.append(p(meta, small))
+
+    # Cluster interpretation
+    story.append(p("3. Cluster and narrative interpretation", h1))
+    story.append(
+        p(
+            "Semantic clusters are automatically discovered groups of records "
+            "with similar text. Cluster numbers are arbitrary identifiers: "
+            "Cluster 0 is not better, worse, earlier, or more important than "
+            "Cluster 1. Cluster IDs may change when the dataset changes.",
+            body,
+        )
+    )
+    story.append(
+        p(
+            "The semantic map axes are latent dimensions created by the text "
+            "model. Their numeric values do not have a direct real-world unit. "
+            "Distance is the useful signal: points closer together tend to have "
+            "more similar wording/themes.",
+            body,
+        )
+    )
+
+    if narrative_df is not None and len(narrative_df):
+        cluster_rows = [
+            [
+                p("Cluster", table_head),
+                p("Narrative / key terms", table_head),
+                p("Records", table_head),
+                p("Negative %", table_head),
+                p("12h growth %", table_head),
+                p("Engagement", table_head),
+            ]
+        ]
+        for _, row in narrative_df.sort_values("cluster").iterrows():
+            cluster_rows.append(
+                [
+                    p(str(row.get("cluster", "")), table_text),
+                    p(
+                        f"{row.get('narrative', '')} | {row.get('top_terms', '')}",
+                        table_text,
+                    ),
+                    p(str(row.get("posts", "")), table_text),
+                    p(str(row.get("negative_pct", "")), table_text),
+                    p(str(row.get("12h_growth_pct", "")), table_text),
+                    p(str(row.get("engagement", "")), table_text),
+                ]
+            )
+        add_long_table(
+            cluster_rows,
+            [13 * mm, 75 * mm, 16 * mm, 18 * mm, 19 * mm, 18 * mm],
+        )
+    else:
+        story.append(p("No semantic narrative table was available.", body))
+
+    # Legends & methodology
+    story.append(p("4. Legends and methodology", h1))
+    legends = [
+        (
+            "Sentiment",
+            "VADER compound score from -1 to +1. Positive is >= +0.05; "
+            "Negative is <= -0.05; values between are Neutral. For News this "
+            "is headline-framing sentiment, not a measurement of public opinion. "
+            "Sarcasm and multilingual text can reduce accuracy."
+        ),
+        (
+            "Emotion",
+            "Lightweight keyword/rule signals such as Anger, Fear/Worry, Joy, "
+            "Sadness/Disappointment, Surprise and Relief. 'Other/Neutral' means "
+            "no configured emotional cue was found."
+        ),
+        (
+            "Engagement",
+            "For X/manual X: likes + reposts + replies. News feeds in this free "
+            "build do not provide comparable social engagement, so these fields "
+            "are normally zero for News."
+        ),
+        (
+            "Semantic cluster",
+            "An automatically discovered text-similarity group using TF-IDF, "
+            "latent semantic reduction and KMeans. Cluster numbers and colors "
+            "are identifiers only; they do not indicate severity or rank."
+        ),
+        (
+            "Narrative",
+            "A cluster label derived from its strongest terms plus a "
+            "representative record. It is an analytical shorthand, not a "
+            "verified factual claim."
+        ),
+        (
+            "12h growth",
+            "Change in record count in the most recent 12-hour window compared "
+            "with the preceding 12-hour window. Zero can also occur when there "
+            "is insufficient prior-window data."
+        ),
+        (
+            "Trend anomaly",
+            "Hourly record volume divided by a rolling six-hour baseline. "
+            "The prototype marks >= 2.0x baseline as an anomaly."
+        ),
+        (
+            "Monitoring score",
+            "Prototype composite: 45% negative share + 20% recent growth + "
+            "20% anomaly component + 15% fastest narrative growth. It is a "
+            "triage aid, not a validated probability or official risk rating."
+        ),
+        (
+            "Top-10 ranking",
+            "X: sentiment strength, then engagement, then recency. "
+            "News: headline sentiment strength, then recency."
+        ),
+        (
+            "News author field",
+            "The free GDELT/Google News feeds used here often supply a media "
+            "source but not the article byline. Where unavailable, the report "
+            "states 'Not provided by feed'."
+        ),
+    ]
+    legend_rows = [[p("Legend", table_head), p("Meaning", table_head)]]
+    for key, meaning in legends:
+        legend_rows.append([p(key, table_text), p(meaning, table_text)])
+    add_long_table(legend_rows, [38 * mm, 142 * mm])
+
+    # Annexure A
+    story.append(PageBreak())
+    story.append(p("Annexure A - All X posts analyzed", h1))
+    if x_df.empty:
+        story.append(p("No X/manual-X records were present in the loaded dataset.", body))
+    else:
+        x_rows = [
+            [
+                p("#", table_head),
+                p("Time (UTC)", table_head),
+                p("User/source", table_head),
+                p("Cluster", table_head),
+                p("Sentiment", table_head),
+                p("Score", table_head),
+                p("Eng.", table_head),
+                p("Post text", table_head),
+            ]
+        ]
+        for idx_num, (_, row) in enumerate(
+            x_df.sort_values("timestamp", ascending=False).iterrows(),
+            start=1,
+        ):
+            timestamp = pd.to_datetime(row["timestamp"], utc=True).strftime(
+                "%Y-%m-%d %H:%M"
+            )
+            x_rows.append(
+                [
+                    p(str(idx_num), table_text),
+                    p(timestamp, table_text),
+                    p(row.get("username", ""), table_text),
+                    p(row.get("semantic_cluster", ""), table_text),
+                    p(row.get("sentiment", ""), table_text),
+                    p(f"{float(row.get('sentiment_score', 0)):+.2f}", table_text),
+                    p(str(int(row.get("engagement", 0) or 0)), table_text),
+                    p(row.get("text", ""), table_text),
+                ]
+            )
+        add_long_table(
+            x_rows,
+            [
+                7 * mm,
+                25 * mm,
+                27 * mm,
+                12 * mm,
+                17 * mm,
+                13 * mm,
+                12 * mm,
+                77 * mm,
+            ],
+        )
+
+    # Annexure B
+    story.append(PageBreak())
+    story.append(p("Annexure B - News items analyzed", h1))
+    story.append(
+        p(
+            "News is grouped by the sentiment category assigned to each "
+            "headline. The free feeds generally expose the media source/agency "
+            "but not the individual article author.",
+            body,
+        )
+    )
+
+    if news_df.empty:
+        story.append(p("No News records were present in the loaded dataset.", body))
+    else:
+        for category in ["Positive", "Negative", "Neutral"]:
+            subset = news_df[
+                news_df["sentiment"].eq(category)
+            ].sort_values("timestamp", ascending=False)
+
+            story.append(
+                p(
+                    f"{category} News ({len(subset):,})",
+                    h2,
+                )
+            )
+
+            if subset.empty:
+                story.append(p(f"No {category.lower()} news items.", body))
+                continue
+
+            n_rows = [
+                [
+                    p("#", table_head),
+                    p("Time (UTC)", table_head),
+                    p("Title", table_head),
+                    p("Author", table_head),
+                    p("Media agency/source", table_head),
+                    p("Score", table_head),
+                ]
+            ]
+
+            for idx_num, (_, row) in enumerate(subset.iterrows(), start=1):
+                timestamp = pd.to_datetime(
+                    row["timestamp"], utc=True
+                ).strftime("%Y-%m-%d %H:%M")
+
+                n_rows.append(
+                    [
+                        p(str(idx_num), table_text),
+                        p(timestamp, table_text),
+                        p(row.get("text", ""), table_text),
+                        p("Not provided by feed", table_text),
+                        p(row.get("username", ""), table_text),
+                        p(
+                            f"{float(row.get('sentiment_score', 0)):+.2f}",
+                            table_text,
+                        ),
+                    ]
+                )
+
+            add_long_table(
+                n_rows,
+                [
+                    8 * mm,
+                    25 * mm,
+                    80 * mm,
+                    28 * mm,
+                    32 * mm,
+                    14 * mm,
+                ],
+            )
+
+    def page_footer(canvas, document):
+        canvas.saveState()
+        canvas.setFont(normal_font, 7)
+        canvas.setFillColor(colors.HexColor("#6B7280"))
+        canvas.drawString(
+            document.leftMargin,
+            8 * mm,
+            "Social Media Intelligence Platform - analytical report",
+        )
+        canvas.drawRightString(
+            A4[0] - document.rightMargin,
+            8 * mm,
+            f"Page {document.page}",
+        )
+        canvas.restoreState()
+
+    doc.build(
+        story,
+        onFirstPage=page_footer,
+        onLaterPages=page_footer,
+    )
+
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 # =========================================================
 # DATA SOURCE UI
 # =========================================================
@@ -1397,6 +2157,79 @@ with right:
     )
 
 
+
+# =========================================================
+# TOP 10 POSITIVE / NEGATIVE SUMMARIES
+# =========================================================
+st.subheader("📝 Top 10 positive & negative briefs")
+st.caption(
+    "Brief local summaries of the strongest sentiment items. "
+    "X rankings use sentiment + engagement; news rankings use "
+    "sentiment + recency. No paid LLM is required."
+)
+
+x_brief_df = filtered[
+    filtered["platform"].isin(["x_manual", "x"])
+].copy()
+
+news_brief_df = filtered[
+    filtered["platform"].eq("web_news")
+].copy()
+
+x_tab, news_tab = st.tabs(["X", "News"])
+
+with x_tab:
+    if x_brief_df.empty:
+        st.info(
+            "No X/manual-X records are currently loaded. "
+            "Upload an X CSV or use Combined mode."
+        )
+    else:
+        positive_tab, negative_tab = st.tabs(
+            ["🟢 Top positive", "🔴 Top negative"]
+        )
+
+        with positive_tab:
+            render_brief_list(
+                x_brief_df,
+                polarity="positive",
+                news=False,
+            )
+
+        with negative_tab:
+            render_brief_list(
+                x_brief_df,
+                polarity="negative",
+                news=False,
+            )
+
+with news_tab:
+    if news_brief_df.empty:
+        st.info(
+            "No news records are currently loaded. "
+            "Fetch free news or use Combined mode."
+        )
+    else:
+        positive_tab, negative_tab = st.tabs(
+            ["🟢 Top positive", "🔴 Top negative"]
+        )
+
+        with positive_tab:
+            render_brief_list(
+                news_brief_df,
+                polarity="positive",
+                news=True,
+            )
+
+        with negative_tab:
+            render_brief_list(
+                news_brief_df,
+                polarity="negative",
+                news=True,
+            )
+
+st.divider()
+
 st.subheader("🧠 Narrative intelligence")
 
 if len(filtered_narratives):
@@ -1526,6 +2359,159 @@ with right:
         sources,
         use_container_width=True,
         hide_index=True,
+    )
+
+
+
+# =========================================================
+# LEGEND / METHODOLOGY
+# =========================================================
+with st.expander("📚 Legend & methodology — what the clusters, sentiment and scores mean"):
+    st.markdown(
+        """
+        **Sentiment**
+        - VADER compound score ranges from **-1 to +1**.
+        - **Positive:** score ≥ +0.05
+        - **Neutral:** between -0.05 and +0.05
+        - **Negative:** score ≤ -0.05
+        - For **News**, this represents *headline framing*, not public opinion.
+        - Sarcasm and multilingual text can reduce accuracy.
+
+        **Emotion**
+        - Lightweight rule-based signals: Anger, Fear/Worry, Joy,
+          Sadness/Disappointment, Surprise and Relief.
+        - **Other/Neutral** means no configured emotional cue was detected.
+
+        **Semantic cluster**
+        - An automatically discovered group of textually similar records.
+        - Cluster numbers such as **0, 1, 2... are arbitrary IDs**, not ranks.
+        - A cluster color does **not** mean positive/negative or high/low risk.
+        - On the semantic map, points closer together tend to discuss
+          more similar themes.
+        - The X/Y axes are latent text dimensions and have no direct
+          real-world unit.
+
+        **Narrative**
+        - A shorthand label derived from a cluster's strongest key terms
+          and representative item. It should be treated as an analytical
+          summary, not as a verified factual claim.
+
+        **Engagement**
+        - X/manual X = **likes + reposts + replies**.
+        - Free News feeds do not provide equivalent social engagement.
+
+        **12h growth**
+        - Compares the latest 12-hour record count with the previous
+          12-hour period.
+
+        **Trend anomaly**
+        - Hourly volume divided by a rolling six-hour baseline.
+        - This prototype flags roughly **2× baseline or higher**.
+
+        **Monitoring score**
+        - Prototype triage score combining negative share, recent growth,
+          anomaly strength and narrative growth.
+        - It is **not** a validated probability or official risk rating.
+
+        **Top-10 sentiment briefs**
+        - X: ranked by sentiment strength, then engagement and recency.
+        - News: ranked by headline sentiment strength, then recency.
+        """
+    )
+
+    if len(filtered_narratives):
+        st.markdown("**Current cluster legend**")
+        legend_table = filtered_narratives[
+            [
+                "cluster",
+                "narrative",
+                "posts",
+                "negative_pct",
+                "12h_growth_pct",
+                "top_terms",
+            ]
+        ].copy()
+        legend_table.columns = [
+            "Cluster",
+            "Narrative",
+            "Records",
+            "Negative %",
+            "12h growth %",
+            "Key terms",
+        ]
+        st.dataframe(
+            legend_table.sort_values("Cluster"),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+
+# =========================================================
+# PDF REPORT DOWNLOAD
+# =========================================================
+st.subheader("📄 Download analytical PDF report")
+st.caption(
+    "The PDF uses all currently loaded records (before dashboard filters), "
+    "so its annexures are complete. It includes top positive/negative briefs, "
+    "cluster legends, methodology, all X posts analyzed, and all News items "
+    "grouped by sentiment category."
+)
+
+report_fingerprint = (
+    f"{len(df)}|"
+    f"{df['timestamp'].min() if len(df) else ''}|"
+    f"{df['timestamp'].max() if len(df) else ''}|"
+    f"{source_mode}"
+)
+
+if st.button(
+    "Generate PDF report",
+    type="primary",
+    key="generate_pdf_v56",
+):
+    try:
+        with st.spinner("Building PDF report..."):
+            report_bytes = build_pdf_report(
+                df,
+                narratives_df,
+                trend_df,
+            )
+        st.session_state["pdf_report_v56"] = report_bytes
+        st.session_state["pdf_report_fp_v56"] = report_fingerprint
+        st.session_state["pdf_report_name_v56"] = (
+            "social_media_intelligence_report_"
+            + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+            + ".pdf"
+        )
+        st.success(
+            "PDF report generated. Use the download button below."
+        )
+    except Exception as exc:
+        st.error(
+            "PDF report could not be generated: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+if (
+    st.session_state.get("pdf_report_v56")
+    and st.session_state.get("pdf_report_fp_v56")
+    == report_fingerprint
+):
+    st.download_button(
+        "⬇️ Download PDF report",
+        data=st.session_state["pdf_report_v56"],
+        file_name=st.session_state.get(
+            "pdf_report_name_v56",
+            "social_media_intelligence_report.pdf",
+        ),
+        mime="application/pdf",
+        key="download_pdf_v56",
+    )
+elif st.session_state.get("pdf_report_v56"):
+    st.info(
+        "The loaded dataset changed after the previous PDF was generated. "
+        "Tap **Generate PDF report** again."
     )
 
 
