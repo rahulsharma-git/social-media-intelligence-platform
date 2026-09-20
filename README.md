@@ -1,13 +1,28 @@
-# Social Media Intelligence Platform — Build 2
+# Social Media Intelligence Platform — Build 3
 
-This version introduces the first lightweight multi-agent intelligence pipeline.
+Build 3 adds automatic semantic clustering and Narrative Intelligence.
 
-## Agents included
+## Active agents
 
 - Sentiment Agent
 - Emotion Agent
+- Semantic Topic Agent
+- Narrative Agent
 - Trend / Anomaly Agent
 - Risk Agent
+
+## Semantic approach
+
+This build stays lightweight and free:
+
+1. TF-IDF text representation
+2. Truncated SVD for latent semantic analysis
+3. Vector normalization
+4. KMeans conversation clustering
+5. Narrative extraction from cluster terms and representative posts
+
+This avoids large transformer models so the app remains suitable for a free
+Streamlit Community Cloud deployment.
 
 ## Run locally
 
@@ -16,9 +31,9 @@ pip install -r requirements.txt
 streamlit run streamlit_app.py
 ```
 
-## Deployment
+## Next planned build
 
-Deploy `streamlit_app.py` through Streamlit Community Cloud.
-
-When you commit updates to GitHub, Streamlit Community Cloud normally rebuilds
-the deployed application automatically.
+- Influence Agent
+- author influence scoring
+- interaction/network model
+- community intelligence
