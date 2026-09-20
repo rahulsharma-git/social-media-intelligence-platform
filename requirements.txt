@@ -1,5 +1,7 @@
 streamlit
 pandas
+numpy
 plotly
 vaderSentiment
 scikit-learn
+requests

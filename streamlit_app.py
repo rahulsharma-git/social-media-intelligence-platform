@@ -1,3 +1,4 @@
+import hashlib
 import random
 import re
 from datetime import datetime, timedelta
@@ -5,6 +6,7 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import requests
 import streamlit as st
 from sklearn.cluster import KMeans
 from sklearn.decomposition import TruncatedSVD
@@ -22,12 +24,109 @@ st.set_page_config(
 
 st.title("📡 Social Media Intelligence Platform")
 st.caption(
-    "Build 3 — sentiment, emotion, anomalies, semantic clustering and narrative intelligence"
+    "Build 4 — persistent-data foundation, CSV ingestion, Supabase, semantic narratives and risk"
 )
 
 
 # =========================================================
-# SAMPLE DATA
+# STANDARD DATA MODEL
+# =========================================================
+STANDARD_COLUMNS = [
+    "external_id",
+    "platform",
+    "timestamp",
+    "username",
+    "text",
+    "hashtags",
+    "likes",
+    "reposts",
+    "replies",
+    "followers",
+    "source_url",
+    "topic_seed",
+]
+
+
+def deterministic_id(row):
+    material = "|".join([
+        str(row.get("platform", "unknown")),
+        str(row.get("username", "")),
+        str(row.get("timestamp", "")),
+        str(row.get("text", "")),
+    ])
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def normalize_posts(df):
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=STANDARD_COLUMNS)
+
+    result = df.copy()
+    result.columns = [str(c).strip().lower() for c in result.columns]
+
+    required = {"timestamp", "username", "text"}
+    missing = required - set(result.columns)
+    if missing:
+        raise ValueError(
+            "Missing required column(s): " + ", ".join(sorted(missing))
+        )
+
+    defaults = {
+        "external_id": "",
+        "platform": "x",
+        "hashtags": "",
+        "likes": 0,
+        "reposts": 0,
+        "replies": 0,
+        "followers": 0,
+        "source_url": "",
+        "topic_seed": "Unassigned",
+    }
+
+    for col, default in defaults.items():
+        if col not in result.columns:
+            result[col] = default
+
+    result["timestamp"] = pd.to_datetime(
+        result["timestamp"], errors="coerce", utc=True
+    )
+    result = result.dropna(subset=["timestamp", "username", "text"]).copy()
+
+    for col in ["likes", "reposts", "replies", "followers"]:
+        result[col] = (
+            pd.to_numeric(result[col], errors="coerce")
+            .fillna(0)
+            .clip(lower=0)
+            .astype(int)
+        )
+
+    for col in [
+        "external_id",
+        "platform",
+        "username",
+        "text",
+        "hashtags",
+        "source_url",
+        "topic_seed",
+    ]:
+        result[col] = result[col].fillna("").astype(str)
+
+    missing_ids = result["external_id"].str.strip().eq("")
+    if missing_ids.any():
+        result.loc[missing_ids, "external_id"] = result.loc[
+            missing_ids
+        ].apply(deterministic_id, axis=1)
+
+    return (
+        result[STANDARD_COLUMNS]
+        .drop_duplicates(subset=["external_id"])
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
+
+
+# =========================================================
+# DEMO COLLECTOR
 # =========================================================
 @st.cache_data
 def make_sample_data(n=320):
@@ -62,7 +161,6 @@ def make_sample_data(n=320):
         topic, text, tags = random.choice(templates)
         hours_ago = random.randint(0, 95)
 
-        # Simulate a recent issue spike so the monitoring system has something to detect.
         if hours_ago < 12 and random.random() < 0.72:
             topic, text, tags = random.choice([
                 ("Pricing", "I am angry about this price increase. Customers deserve better.", ["pricing", "angry"]),
@@ -71,28 +169,121 @@ def make_sample_data(n=320):
             ])
 
         ts = now - timedelta(hours=hours_ago, minutes=random.randint(0, 59))
-        likes = max(0, int(random.gauss(32, 26)))
-        reposts = max(0, int(random.gauss(9, 10)))
-        replies = max(0, int(random.gauss(6, 7)))
-        followers = max(25, int(random.lognormvariate(6.4, 1.05)))
-
         rows.append({
+            "external_id": "",
+            "platform": "demo",
             "timestamp": ts,
             "username": random.choice(users),
             "text": text,
             "topic_seed": topic,
             "hashtags": " ".join(f"#{t}" for t in tags),
-            "likes": likes,
-            "reposts": reposts,
-            "replies": replies,
-            "followers": followers,
+            "likes": max(0, int(random.gauss(32, 26))),
+            "reposts": max(0, int(random.gauss(9, 10))),
+            "replies": max(0, int(random.gauss(6, 7))),
+            "followers": max(25, int(random.lognormvariate(6.4, 1.05))),
+            "source_url": "",
         })
 
-    return pd.DataFrame(rows).sort_values("timestamp").reset_index(drop=True)
+    return normalize_posts(pd.DataFrame(rows))
 
 
 # =========================================================
-# SENTIMENT AGENT
+# SUPABASE REST CONNECTOR
+# =========================================================
+def get_supabase_config():
+    try:
+        url = str(st.secrets.get("SUPABASE_URL", "")).strip().rstrip("/")
+        key = str(st.secrets.get("SUPABASE_SERVICE_KEY", "")).strip()
+    except Exception:
+        url, key = "", ""
+    return url, key
+
+
+def supabase_enabled():
+    url, key = get_supabase_config()
+    return bool(url and key)
+
+
+def supabase_headers():
+    _, key = get_supabase_config()
+    return {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+
+
+def load_supabase_posts(limit=5000):
+    url, _ = get_supabase_config()
+    if not supabase_enabled():
+        raise RuntimeError("Supabase secrets are not configured.")
+
+    endpoint = f"{url}/rest/v1/social_posts"
+    params = {
+        "select": "external_id,platform,timestamp,username,text,hashtags,likes,reposts,replies,followers,source_url",
+        "order": "timestamp.desc",
+        "limit": str(limit),
+    }
+
+    response = requests.get(
+        endpoint,
+        headers=supabase_headers(),
+        params=params,
+        timeout=30,
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    if not data:
+        return pd.DataFrame(columns=STANDARD_COLUMNS)
+
+    df = pd.DataFrame(data)
+    df["topic_seed"] = "Unassigned"
+    return normalize_posts(df)
+
+
+def save_posts_to_supabase(df):
+    url, _ = get_supabase_config()
+    if not supabase_enabled():
+        raise RuntimeError("Supabase secrets are not configured.")
+
+    clean = normalize_posts(df)
+
+    records = []
+    for _, row in clean.iterrows():
+        records.append({
+            "external_id": row["external_id"],
+            "platform": row["platform"],
+            "timestamp": row["timestamp"].isoformat(),
+            "username": row["username"],
+            "text": row["text"],
+            "hashtags": row["hashtags"],
+            "likes": int(row["likes"]),
+            "reposts": int(row["reposts"]),
+            "replies": int(row["replies"]),
+            "followers": int(row["followers"]),
+            "source_url": row["source_url"] or None,
+        })
+
+    if not records:
+        return 0
+
+    endpoint = f"{url}/rest/v1/social_posts"
+    headers = supabase_headers()
+    headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
+
+    response = requests.post(
+        endpoint,
+        headers=headers,
+        json=records,
+        timeout=45,
+    )
+    response.raise_for_status()
+    return len(records)
+
+
+# =========================================================
+# INTELLIGENCE AGENTS
 # =========================================================
 @st.cache_data
 def run_sentiment_agent(df):
@@ -114,9 +305,6 @@ def run_sentiment_agent(df):
     return result
 
 
-# =========================================================
-# EMOTION AGENT
-# =========================================================
 @st.cache_data
 def run_emotion_agent(df):
     emotion_terms = {
@@ -142,10 +330,6 @@ def run_emotion_agent(df):
     return result
 
 
-# =========================================================
-# SEMANTIC TOPIC AGENT
-# LSA = TF-IDF -> SVD -> normalized latent semantic vectors -> KMeans
-# =========================================================
 @st.cache_data
 def run_semantic_topic_agent(df, requested_clusters=6):
     result = df.copy()
@@ -154,7 +338,7 @@ def run_semantic_topic_agent(df, requested_clusters=6):
         result["semantic_cluster"] = 0
         result["semantic_x"] = 0.0
         result["semantic_y"] = 0.0
-        return result, None, None, []
+        return result, None, None, np.array([])
 
     vectorizer = TfidfVectorizer(
         stop_words="english",
@@ -162,20 +346,29 @@ def run_semantic_topic_agent(df, requested_clusters=6):
         min_df=2,
         max_df=0.95,
     )
-    tfidf = vectorizer.fit_transform(result["text"])
+
+    try:
+        tfidf = vectorizer.fit_transform(result["text"])
+    except ValueError:
+        result["semantic_cluster"] = 0
+        result["semantic_x"] = 0.0
+        result["semantic_y"] = 0.0
+        return result, None, None, np.array([])
 
     max_components = min(12, tfidf.shape[0] - 1, tfidf.shape[1] - 1)
     if max_components < 2:
         result["semantic_cluster"] = 0
         result["semantic_x"] = 0.0
         result["semantic_y"] = 0.0
-        return result, vectorizer, tfidf, []
+        return result, vectorizer, tfidf, np.array(vectorizer.get_feature_names_out())
 
     svd = TruncatedSVD(n_components=max_components, random_state=42)
     latent = svd.fit_transform(tfidf)
     latent = Normalizer(copy=False).fit_transform(latent)
 
-    cluster_count = max(2, min(requested_clusters, len(result) // 8))
+    cluster_count = max(2, min(requested_clusters, max(2, len(result) // 8)))
+    cluster_count = min(cluster_count, len(result))
+
     model = KMeans(n_clusters=cluster_count, random_state=42, n_init=10)
     labels = model.fit_predict(latent)
 
@@ -187,11 +380,7 @@ def run_semantic_topic_agent(df, requested_clusters=6):
     return result, vectorizer, tfidf, feature_names
 
 
-# =========================================================
-# NARRATIVE AGENT
-# =========================================================
-# Do NOT cache this function directly.
-# It receives scikit-learn / scipy objects that Streamlit cannot reliably hash.
+# Do not cache: receives scipy/sklearn objects that Streamlit cannot reliably hash.
 def run_narrative_agent(df, vectorizer, tfidf, feature_names):
     if vectorizer is None or tfidf is None or len(feature_names) == 0:
         return pd.DataFrame()
@@ -204,21 +393,21 @@ def run_narrative_agent(df, vectorizer, tfidf, feature_names):
         cluster_df = df[mask].copy()
         cluster_matrix = tfidf[mask]
 
-        # Top terms for the narrative
         mean_tfidf = np.asarray(cluster_matrix.mean(axis=0)).ravel()
         top_indices = mean_tfidf.argsort()[::-1][:5]
         top_terms = [feature_names[i] for i in top_indices if mean_tfidf[i] > 0]
-        title_terms = top_terms[:3]
-        narrative_title = " / ".join(term.title() for term in title_terms) if title_terms else f"Cluster {cluster_id}"
 
-        # Representative post = closest post to the cluster mean vector
+        narrative_title = (
+            " / ".join(term.title() for term in top_terms[:3])
+            if top_terms
+            else f"Cluster {cluster_id}"
+        )
+
         centroid = np.asarray(cluster_matrix.mean(axis=0))
         similarities = cosine_similarity(cluster_matrix, centroid).ravel()
-        rep_local_index = int(np.argmax(similarities))
-        representative_post = cluster_df.iloc[rep_local_index]["text"]
+        representative_post = cluster_df.iloc[int(np.argmax(similarities))]["text"]
 
         negative_pct = cluster_df["sentiment"].eq("Negative").mean() * 100
-        avg_sentiment = cluster_df["sentiment_score"].mean()
         engagement = int(cluster_df["engagement"].sum())
 
         recent = cluster_df[
@@ -229,31 +418,30 @@ def run_narrative_agent(df, vectorizer, tfidf, feature_names):
             & (cluster_df["timestamp"] >= latest_time - pd.Timedelta(hours=24))
         ]
 
-        if len(previous) == 0:
-            growth_pct = 0.0
-        else:
-            growth_pct = ((len(recent) - len(previous)) / len(previous)) * 100
+        growth_pct = (
+            0.0
+            if len(previous) == 0
+            else ((len(recent) - len(previous)) / len(previous)) * 100
+        )
 
         narratives.append({
             "cluster": int(cluster_id),
             "narrative": narrative_title,
             "posts": len(cluster_df),
             "negative_pct": round(negative_pct, 1),
-            "avg_sentiment": round(float(avg_sentiment), 3),
             "engagement": engagement,
             "12h_growth_pct": round(float(growth_pct), 1),
             "top_terms": ", ".join(top_terms),
             "representative_post": representative_post,
         })
 
-    return pd.DataFrame(narratives).sort_values(
-        ["12h_growth_pct", "posts"], ascending=[False, False]
-    ).reset_index(drop=True)
+    return (
+        pd.DataFrame(narratives)
+        .sort_values(["12h_growth_pct", "posts"], ascending=[False, False])
+        .reset_index(drop=True)
+    )
 
 
-# =========================================================
-# TREND / ANOMALY AGENT
-# =========================================================
 def run_trend_agent(df):
     if df.empty:
         return pd.DataFrame(
@@ -262,111 +450,146 @@ def run_trend_agent(df):
 
     hourly = df.groupby(df["timestamp"].dt.floor("h")).size().reset_index(name="posts")
     hourly.columns = ["hour", "posts"]
+    hourly["rolling_avg"] = hourly["posts"].rolling(6, min_periods=2).mean().shift(1)
 
-    hourly["rolling_avg"] = (
-        hourly["posts"].rolling(6, min_periods=2).mean().shift(1)
-    )
-
-    def anomaly_score(row):
+    def score(row):
         baseline = row["rolling_avg"]
         if pd.isna(baseline) or baseline <= 0:
             return 0.0
         return row["posts"] / baseline
 
-    hourly["anomaly_score"] = hourly.apply(anomaly_score, axis=1)
+    hourly["anomaly_score"] = hourly.apply(score, axis=1)
     hourly["is_anomaly"] = hourly["anomaly_score"] >= 2.0
     return hourly
 
 
-# =========================================================
-# RISK AGENT
-# =========================================================
 def run_risk_agent(df, trend_df, narratives):
     if df.empty:
         return {
             "risk": 0,
             "negative_pct": 0,
             "recent_growth_pct": 0,
-            "anomaly_multiplier": 0,
-            "fastest_narrative_growth": 0,
         }
 
     negative_pct = df["sentiment"].eq("Negative").mean() * 100
-
     latest_time = df["timestamp"].max()
+
     recent = df[df["timestamp"] >= latest_time - pd.Timedelta(hours=12)]
     previous = df[
         (df["timestamp"] < latest_time - pd.Timedelta(hours=12))
         & (df["timestamp"] >= latest_time - pd.Timedelta(hours=24))
     ]
 
-    if len(previous) == 0:
-        growth_pct = 0
-    else:
-        growth_pct = ((len(recent) - len(previous)) / len(previous)) * 100
+    growth_pct = (
+        0
+        if len(previous) == 0
+        else ((len(recent) - len(previous)) / len(previous)) * 100
+    )
 
     anomaly_multiplier = (
         float(trend_df["anomaly_score"].max()) if len(trend_df) else 0
     )
 
-    fastest_narrative_growth = (
+    narrative_growth = (
         max(0.0, float(narratives["12h_growth_pct"].max()))
         if len(narratives)
         else 0.0
     )
 
-    growth_component = max(0, min(growth_pct, 100))
-    anomaly_component = max(0, min((anomaly_multiplier - 1) * 50, 100))
-    narrative_component = max(0, min(fastest_narrative_growth, 100))
-
     risk = round(
-        (0.45 * negative_pct)
-        + (0.20 * growth_component)
-        + (0.20 * anomaly_component)
-        + (0.15 * narrative_component)
+        0.45 * negative_pct
+        + 0.20 * max(0, min(growth_pct, 100))
+        + 0.20 * max(0, min((anomaly_multiplier - 1) * 50, 100))
+        + 0.15 * max(0, min(narrative_growth, 100))
     )
-    risk = min(100, max(0, risk))
 
     return {
-        "risk": risk,
+        "risk": min(100, max(0, risk)),
         "negative_pct": negative_pct,
         "recent_growth_pct": growth_pct,
-        "anomaly_multiplier": anomaly_multiplier,
-        "fastest_narrative_growth": fastest_narrative_growth,
     }
 
 
 # =========================================================
-# ORCHESTRATOR
-# =========================================================
-@st.cache_data
-def run_intelligence_pipeline():
-    raw = make_sample_data()
-    df = run_sentiment_agent(raw)
-    df = run_emotion_agent(df)
-    df["engagement"] = df["likes"] + df["reposts"] + df["replies"]
-
-    df, vectorizer, tfidf, feature_names = run_semantic_topic_agent(
-        df, requested_clusters=6
-    )
-    narratives = run_narrative_agent(df, vectorizer, tfidf, feature_names)
-    trend = run_trend_agent(df)
-    risk = run_risk_agent(df, trend, narratives)
-
-    return df, trend, narratives, risk
-
-
-df, trend_df, narratives_df, overall_risk = run_intelligence_pipeline()
-
-
-# =========================================================
-# SIDEBAR FILTERS
+# DATA SOURCE
 # =========================================================
 with st.sidebar:
-    st.header("Filters")
+    st.header("Data source")
+    source_mode = st.radio(
+        "Choose source",
+        ["Demo sample", "Upload CSV", "Supabase database"],
+    )
 
-    topics = sorted(df["topic_seed"].unique())
-    selected_topics = st.multiselect("Seed topics", topics, default=topics)
+raw_df = pd.DataFrame()
+
+if source_mode == "Demo sample":
+    raw_df = make_sample_data()
+
+elif source_mode == "Upload CSV":
+    uploaded = st.file_uploader("Upload social posts CSV", type=["csv"])
+
+    st.caption(
+        "Required columns: timestamp, username, text. "
+        "Optional: hashtags, likes, reposts, replies, followers, platform, source_url."
+    )
+
+    if uploaded is not None:
+        try:
+            raw_df = normalize_posts(pd.read_csv(uploaded))
+            st.success(f"Loaded {len(raw_df):,} valid posts from CSV.")
+        except Exception as exc:
+            st.error(f"CSV could not be loaded: {exc}")
+    else:
+        st.info("Choose a CSV file from your phone to begin.")
+
+elif source_mode == "Supabase database":
+    if not supabase_enabled():
+        st.warning(
+            "Supabase is not configured yet. Add SUPABASE_URL and "
+            "SUPABASE_SERVICE_KEY in Streamlit app secrets."
+        )
+    else:
+        try:
+            raw_df = load_supabase_posts()
+            st.success(f"Loaded {len(raw_df):,} posts from Supabase.")
+        except Exception as exc:
+            st.error(f"Could not load Supabase data: {exc}")
+
+
+if raw_df.empty:
+    st.info("No posts are available from the selected data source.")
+    st.stop()
+
+
+# Optional persistence action.
+if supabase_enabled() and source_mode != "Supabase database":
+    with st.sidebar:
+        if st.button("Save current posts to Supabase"):
+            try:
+                count = save_posts_to_supabase(raw_df)
+                st.success(f"Sent {count:,} posts to Supabase.")
+            except Exception as exc:
+                st.error(f"Save failed: {exc}")
+
+
+# =========================================================
+# RUN PIPELINE
+# =========================================================
+df = run_sentiment_agent(raw_df)
+df = run_emotion_agent(df)
+df["engagement"] = df["likes"] + df["reposts"] + df["replies"]
+
+df, vectorizer, tfidf, feature_names = run_semantic_topic_agent(df)
+narratives_df = run_narrative_agent(df, vectorizer, tfidf, feature_names)
+trend_df = run_trend_agent(df)
+
+
+# =========================================================
+# ANALYSIS FILTERS
+# =========================================================
+with st.sidebar:
+    st.divider()
+    st.header("Analysis filters")
 
     sentiments = ["Positive", "Neutral", "Negative"]
     selected_sentiments = st.multiselect(
@@ -374,9 +597,7 @@ with st.sidebar:
     )
 
     emotions = sorted(df["emotion"].unique())
-    selected_emotions = st.multiselect(
-        "Emotion", emotions, default=emotions
-    )
+    selected_emotions = st.multiselect("Emotion", emotions, default=emotions)
 
     clusters = sorted(df["semantic_cluster"].unique().tolist())
     selected_clusters = st.multiselect(
@@ -389,8 +610,7 @@ with st.sidebar:
 
 
 filtered = df[
-    df["topic_seed"].isin(selected_topics)
-    & df["sentiment"].isin(selected_sentiments)
+    df["sentiment"].isin(selected_sentiments)
     & df["emotion"].isin(selected_emotions)
     & df["semantic_cluster"].isin(selected_clusters)
 ].copy()
@@ -401,88 +621,53 @@ if search:
         | filtered["hashtags"].str.contains(re.escape(search), case=False, na=False)
     ]
 
-
-# Recalculate filtered narrative/trend summaries without rerunning clustering.
 filtered_trend = run_trend_agent(filtered)
-
 filtered_narratives = narratives_df[
     narratives_df["cluster"].isin(selected_clusters)
 ].copy()
-
 risk_data = run_risk_agent(filtered, filtered_trend, filtered_narratives)
 
 
 # =========================================================
-# EXECUTIVE KPIs
+# DASHBOARD
 # =========================================================
 c1, c2, c3, c4, c5, c6 = st.columns(6)
-
 c1.metric("Posts", f"{len(filtered):,}")
-c2.metric(
-    "Engagement",
-    f"{int(filtered['engagement'].sum()):,}" if len(filtered) else "0",
-)
+c2.metric("Engagement", f"{int(filtered['engagement'].sum()):,}")
 c3.metric("Negative", f"{risk_data['negative_pct']:.1f}%")
 c4.metric("12h growth", f"{risk_data['recent_growth_pct']:+.0f}%")
-c5.metric("Narratives", f"{len(filtered_narratives)}")
+c5.metric("Narratives", len(filtered_narratives))
 c6.metric("Risk", f"{risk_data['risk']}/100")
 
-risk = risk_data["risk"]
-
-if risk >= 65:
+if risk_data["risk"] >= 65:
     st.error("🔴 High monitoring priority")
-elif risk >= 40:
+elif risk_data["risk"] >= 40:
     st.warning("🟠 Moderate monitoring priority")
 else:
     st.success("🟢 Low monitoring priority")
 
 
-# =========================================================
-# ALERTS
-# =========================================================
 anomalies = filtered_trend[filtered_trend["is_anomaly"]]
-
 if len(anomalies):
     latest_anomaly = anomalies.sort_values("hour").iloc[-1]
     st.warning(
-        f"⚠️ Trend Agent: unusual activity detected — "
-        f"{latest_anomaly['posts']} posts in one hour, "
+        f"⚠️ Trend Agent: {latest_anomaly['posts']} posts in one hour, "
         f"{latest_anomaly['anomaly_score']:.1f}× rolling baseline."
     )
 
-if len(filtered_narratives):
-    fastest = filtered_narratives.sort_values(
-        "12h_growth_pct", ascending=False
-    ).iloc[0]
-    if fastest["12h_growth_pct"] > 50:
-        st.warning(
-            f"🧠 Narrative Agent: rapidly growing narrative — "
-            f"**{fastest['narrative']}** ({fastest['12h_growth_pct']:+.0f}% over the previous 12h window)."
-        )
 
-
-# =========================================================
-# MAIN CHARTS
-# =========================================================
 left, right = st.columns([2, 1])
 
 with left:
     st.subheader("Conversation trend")
-    if len(filtered_trend):
-        fig = px.line(
-            filtered_trend,
-            x="hour",
-            y=["posts", "rolling_avg"],
-            markers=True,
-        )
-        fig.update_layout(
-            xaxis_title=None,
-            yaxis_title="Posts",
-            legend_title_text="",
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No posts match the selected filters.")
+    fig = px.line(
+        filtered_trend,
+        x="hour",
+        y=["posts", "rolling_avg"],
+        markers=True,
+    )
+    fig.update_layout(xaxis_title=None, yaxis_title="Posts", legend_title_text="")
+    st.plotly_chart(fig, use_container_width=True)
 
 with right:
     st.subheader("Sentiment")
@@ -497,24 +682,12 @@ with right:
     st.plotly_chart(fig, use_container_width=True)
 
 
-# =========================================================
-# NARRATIVE INTELLIGENCE
-# =========================================================
 st.subheader("🧠 Narrative intelligence")
-
 if len(filtered_narratives):
-    narrative_view = filtered_narratives[
-        [
-            "narrative",
-            "posts",
-            "12h_growth_pct",
-            "negative_pct",
-            "engagement",
-            "top_terms",
-        ]
+    view = filtered_narratives[
+        ["narrative", "posts", "12h_growth_pct", "negative_pct", "engagement", "top_terms"]
     ].copy()
-
-    narrative_view.columns = [
+    view.columns = [
         "Narrative",
         "Posts",
         "12h growth %",
@@ -522,51 +695,30 @@ if len(filtered_narratives):
         "Engagement",
         "Key terms",
     ]
+    st.dataframe(view, use_container_width=True, hide_index=True)
 
-    st.dataframe(
-        narrative_view,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    chosen_narrative = st.selectbox(
+    chosen = st.selectbox(
         "Inspect a narrative",
         filtered_narratives["narrative"].tolist(),
     )
-
-    selected_row = filtered_narratives[
-        filtered_narratives["narrative"] == chosen_narrative
+    row = filtered_narratives[
+        filtered_narratives["narrative"] == chosen
     ].iloc[0]
-
-    st.markdown(f"**Representative post:** {selected_row['representative_post']}")
-    st.caption(
-        f"Key terms: {selected_row['top_terms']} · "
-        f"Negative: {selected_row['negative_pct']}% · "
-        f"12h growth: {selected_row['12h_growth_pct']:+.1f}%"
-    )
+    st.markdown(f"**Representative post:** {row['representative_post']}")
 else:
-    st.info("No narratives match the current filters.")
+    st.info("No narrative clusters are available.")
 
 
-# =========================================================
-# SEMANTIC MAP
-# =========================================================
 st.subheader("Semantic conversation map")
-st.caption(
-    "Posts that appear closer together have more similar latent text meaning. "
-    "Colors represent automatically discovered conversation clusters."
-)
-
 if len(filtered):
     plot_df = filtered.copy()
     plot_df["cluster_label"] = "Cluster " + plot_df["semantic_cluster"].astype(str)
-
     fig = px.scatter(
         plot_df,
         x="semantic_x",
         y="semantic_y",
         color="cluster_label",
-        hover_data=["topic_seed", "sentiment", "emotion", "text"],
+        hover_data=["sentiment", "emotion", "text"],
     )
     fig.update_layout(
         xaxis_title="Semantic dimension 1",
@@ -576,59 +728,14 @@ if len(filtered):
     st.plotly_chart(fig, use_container_width=True)
 
 
-# =========================================================
-# EMOTION / TOPIC
-# =========================================================
 left, right = st.columns(2)
 
 with left:
     st.subheader("Emotion intelligence")
-    emotion_counts = filtered["emotion"].value_counts().reset_index()
-    emotion_counts.columns = ["emotion", "posts"]
-
-    fig = px.bar(
-        emotion_counts,
-        x="emotion",
-        y="posts",
-    )
-    fig.update_layout(
-        xaxis_title=None,
-        yaxis_title="Posts",
-    )
+    emotions = filtered["emotion"].value_counts().reset_index()
+    emotions.columns = ["emotion", "posts"]
+    fig = px.bar(emotions, x="emotion", y="posts")
     st.plotly_chart(fig, use_container_width=True)
-
-with right:
-    st.subheader("Known topic comparison")
-    topic_summary = (
-        filtered.groupby("topic_seed")
-        .agg(
-            posts=("text", "size"),
-            engagement=("engagement", "sum"),
-            avg_sentiment=("sentiment_score", "mean"),
-        )
-        .sort_values("posts", ascending=False)
-        .reset_index()
-    )
-    st.dataframe(topic_summary, use_container_width=True, hide_index=True)
-
-
-# =========================================================
-# HASHTAGS / AUTHORS
-# =========================================================
-left, right = st.columns(2)
-
-with left:
-    st.subheader("Top hashtags")
-    hashtags = (
-        filtered["hashtags"]
-        .str.split()
-        .explode()
-        .value_counts()
-        .head(10)
-        .reset_index()
-    )
-    hashtags.columns = ["hashtag", "posts"]
-    st.bar_chart(hashtags.set_index("hashtag"))
 
 with right:
     st.subheader("Top authors")
@@ -646,38 +753,30 @@ with right:
     st.dataframe(authors, use_container_width=True, hide_index=True)
 
 
-# =========================================================
-# AGENT STATUS
-# =========================================================
 st.subheader("Agent status")
-
 agent_status = pd.DataFrame(
     [
-        ["Sentiment Agent", "Active", "Positive / neutral / negative"],
-        ["Emotion Agent", "Active", "Emotional signal classification"],
-        ["Semantic Topic Agent", "Active", "LSA + automatic clustering"],
-        ["Narrative Agent", "Active", "Narrative labels, growth and representative evidence"],
-        ["Trend Agent", "Active", "Volume anomalies against rolling baseline"],
-        ["Risk Agent", "Active", "Combines negativity, growth, anomaly and narrative signals"],
-        ["Influence Agent", "Planned", "Next build"],
-        ["Network Agent", "Planned", "Next build"],
+        ["Data Source Layer", "Active", "Demo, CSV or Supabase"],
+        ["Sentiment Agent", "Active", "Sentiment classification"],
+        ["Emotion Agent", "Active", "Basic emotional signals"],
+        ["Semantic Topic Agent", "Active", "Automatic conversation clustering"],
+        ["Narrative Agent", "Active", "Cluster evidence and growth"],
+        ["Trend Agent", "Active", "Volume anomalies"],
+        ["Risk Agent", "Active", "Multi-signal risk score"],
+        ["Live X Collector", "Planned", "Future connector"],
+        ["Influence / Network", "Planned", "Future build"],
     ],
-    columns=["Agent", "Status", "Role"],
+    columns=["Component", "Status", "Role"],
 )
-
 st.dataframe(agent_status, use_container_width=True, hide_index=True)
 
 
-# =========================================================
-# POST EXPLORER
-# =========================================================
 st.subheader("Post explorer")
-
 display_cols = [
     "timestamp",
+    "platform",
     "username",
     "text",
-    "topic_seed",
     "semantic_cluster",
     "sentiment",
     "sentiment_score",
@@ -685,7 +784,6 @@ display_cols = [
     "engagement",
     "hashtags",
 ]
-
 st.dataframe(
     filtered[display_cols].sort_values("timestamp", ascending=False),
     use_container_width=True,
@@ -693,30 +791,20 @@ st.dataframe(
 )
 
 
-with st.expander("How Build 3 works"):
+with st.expander("CSV format"):
+    st.code(
+        """timestamp,username,text,hashtags,likes,reposts,replies,followers,platform,source_url
+2026-09-20T10:30:00Z,user123,"Example post","#example",12,3,2,500,x,https://example.com/post"""
+    )
+
+with st.expander("Build 4 architecture"):
     st.markdown(
         """
-        **Semantic Topic Agent**
+        The analytics agents no longer depend on the data source.
 
-        The app converts post text into TF-IDF features, reduces those features
-        into latent semantic dimensions with SVD, normalizes the semantic vectors,
-        and then uses KMeans to discover conversation clusters automatically.
+        **Collector / data source → standardized post model → intelligence agents → dashboard**
 
-        **Narrative Agent**
-
-        For each discovered cluster it calculates:
-        - key phrases
-        - representative post
-        - conversation volume
-        - engagement
-        - negative sentiment percentage
-        - recent growth
-
-        This is intentionally an **open-source statistical Narrative Agent** rather
-        than a generative LLM. That keeps this build fast and deployable on a free
-        Streamlit instance.
-
-        A future build can use an LLM to rewrite these evidence-backed clusters
-        into more natural executive narrative summaries.
+        That allows a live X collector to be added later without rewriting the
+        sentiment, semantic, narrative, trend or risk layers.
         """
     )
