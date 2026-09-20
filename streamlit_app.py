@@ -190,7 +190,8 @@ def run_semantic_topic_agent(df, requested_clusters=6):
 # =========================================================
 # NARRATIVE AGENT
 # =========================================================
-@st.cache_data
+# Do NOT cache this function directly.
+# It receives scikit-learn / scipy objects that Streamlit cannot reliably hash.
 def run_narrative_agent(df, vectorizer, tfidf, feature_names):
     if vectorizer is None or tfidf is None or len(feature_names) == 0:
         return pd.DataFrame()
