@@ -46,3 +46,12 @@ SUPABASE_SECRET_KEY = "sb_secret_..."
 ```
 
 Do not commit secrets to GitHub.
+
+
+## Build 5.2 hotfix
+
+Free news collection now uses:
+1. GDELT first
+2. Automatic Google News RSS fallback if GDELT returns HTTP 429 or a transient failure
+
+No paid API key is required.

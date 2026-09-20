@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import requests
+import xml.etree.ElementTree as ET
+from urllib.parse import quote_plus
 import streamlit as st
 from sklearn.cluster import KMeans
 from sklearn.decomposition import TruncatedSVD
@@ -286,7 +288,9 @@ def save_posts_to_supabase(df):
 
 
 # =========================================================
-# FREE WEB / NEWS COLLECTOR — GDELT DOC 2.0
+# FREE WEB / NEWS COLLECTOR
+# Primary: GDELT DOC 2.0
+# Fallback: Google News RSS
 # =========================================================
 def parse_gdelt_date(value):
     if not value:
@@ -319,9 +323,13 @@ def fetch_gdelt_news(query, timespan="1week", max_records=50):
         },
         timeout=45,
         headers={
-            "User-Agent": "SocialMediaIntelligenceMVP/1.0"
+            "User-Agent": "Mozilla/5.0 SocialMediaIntelligenceMVP/1.0"
         },
     )
+
+    # Let the caller decide whether to fall back.
+    if response.status_code == 429:
+        raise RuntimeError("GDELT_RATE_LIMIT")
 
     if response.status_code != 200:
         raise RuntimeError(
@@ -332,7 +340,7 @@ def fetch_gdelt_news(query, timespan="1week", max_records=50):
         payload = response.json()
     except Exception as exc:
         raise RuntimeError(
-            "GDELT did not return valid JSON. Try again shortly."
+            "GDELT did not return valid JSON."
         ) from exc
 
     articles = payload.get("articles", []) or []
@@ -368,6 +376,102 @@ def fetch_gdelt_news(query, timespan="1week", max_records=50):
         })
 
     return normalize_posts(pd.DataFrame(rows))
+
+
+def fetch_google_news_rss(query, max_records=50):
+    max_records = int(max(10, min(100, max_records)))
+
+    # Google News RSS search does not require an API key.
+    rss_url = (
+        "https://news.google.com/rss/search?"
+        f"q={quote_plus(query)}"
+        "&hl=en-IN&gl=IN&ceid=IN:en"
+    )
+
+    response = requests.get(
+        rss_url,
+        timeout=45,
+        headers={
+            "User-Agent": "Mozilla/5.0 SocialMediaIntelligenceMVP/1.0"
+        },
+    )
+
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Google News RSS failed with HTTP {response.status_code}."
+        )
+
+    try:
+        root = ET.fromstring(response.content)
+    except Exception as exc:
+        raise RuntimeError(
+            "Google News RSS returned unreadable XML."
+        ) from exc
+
+    items = root.findall(".//item")
+    rows = []
+
+    for item in items[:max_records]:
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        pub_date = (item.findtext("pubDate") or "").strip()
+        source_node = item.find("source")
+        source = (
+            source_node.text.strip()
+            if source_node is not None and source_node.text
+            else "Google News"
+        )
+
+        ts = pd.to_datetime(pub_date, errors="coerce", utc=True)
+
+        if not title or pd.isna(ts):
+            continue
+
+        rows.append({
+            "external_id": hashlib.sha256(
+                (link or (source + "|" + title)).encode("utf-8")
+            ).hexdigest(),
+            "platform": "web_news",
+            "timestamp": ts,
+            "username": source,
+            "text": title,
+            "hashtags": "",
+            "likes": 0,
+            "reposts": 0,
+            "replies": 0,
+            "followers": 0,
+            "source_url": link,
+            "topic_seed": "ISRO News",
+        })
+
+    return normalize_posts(pd.DataFrame(rows))
+
+
+def fetch_free_news(query, timespan="1week", max_records=50):
+    """
+    Try GDELT first. If GDELT rate-limits the Streamlit host,
+    automatically fall back to Google News RSS.
+    """
+    try:
+        df = fetch_gdelt_news(
+            query=query,
+            timespan=timespan,
+            max_records=max_records,
+        )
+        return df, "GDELT"
+    except Exception as exc:
+        if str(exc) != "GDELT_RATE_LIMIT":
+            # For robustness, still try the free fallback if GDELT fails
+            # for any transient reason.
+            gdelt_error = str(exc)
+        else:
+            gdelt_error = "GDELT rate limit (HTTP 429)"
+
+        fallback = fetch_google_news_rss(
+            query=query,
+            max_records=max_records,
+        )
+        return fallback, f"Google News RSS fallback ({gdelt_error})"
 
 
 # =========================================================
@@ -836,6 +940,7 @@ if source_mode in [
     "Combine CSV + web/news",
 ]:
     st.subheader("Option B — Free web/news")
+    st.caption("Uses GDELT first and automatically falls back to Google News RSS if rate-limited.")
 
     query = st.text_input(
         "News query",
@@ -867,15 +972,16 @@ if source_mode in [
         type="primary"
     ):
         try:
-            fetched = fetch_gdelt_news(
+            fetched, provider = fetch_free_news(
                 query=query,
                 timespan=timespan_map[period_label],
                 max_records=max_records,
             )
             st.session_state["gdelt_posts"] = fetched
+            st.session_state["news_provider"] = provider
             news_df = fetched
             st.success(
-                f"Fetched {len(fetched):,} news items."
+                f"Fetched {len(fetched):,} news items via {provider}."
             )
         except Exception as exc:
             st.error(str(exc))
@@ -886,8 +992,9 @@ if source_mode in [
     )
 
     if len(news_df):
+        provider = st.session_state.get("news_provider", "Free news source")
         st.info(
-            f"Current news dataset: {len(news_df):,} items"
+            f"Current news dataset: {len(news_df):,} items · Source: {provider}"
         )
 
 
