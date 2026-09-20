@@ -1,6 +1,13 @@
-# Social Media Intelligence Platform
+# Social Media Intelligence Platform — Build 2
 
-Version 1 starter project for an agentic social-media intelligence dashboard.
+This version introduces the first lightweight multi-agent intelligence pipeline.
+
+## Agents included
+
+- Sentiment Agent
+- Emotion Agent
+- Trend / Anomaly Agent
+- Risk Agent
 
 ## Run locally
 
@@ -9,25 +16,9 @@ pip install -r requirements.txt
 streamlit run streamlit_app.py
 ```
 
-## Version 1 includes
+## Deployment
 
-- synthetic social-media sample data
-- sentiment analysis using VADER
-- conversation volume trend
-- engagement metrics
-- topic summary
-- hashtag analysis
-- author analysis
-- simple illustrative risk score
-- searchable post explorer
+Deploy `streamlit_app.py` through Streamlit Community Cloud.
 
-## Planned next steps
-
-1. Relevance agent
-2. Emotion classification
-3. Topic clustering
-4. Narrative detection
-5. Trend/anomaly agent
-6. Supabase persistence
-7. Agent orchestrator
-8. Live X collector
+When you commit updates to GitHub, Streamlit Community Cloud normally rebuilds
+the deployed application automatically.
