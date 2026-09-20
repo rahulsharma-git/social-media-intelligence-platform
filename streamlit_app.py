@@ -754,6 +754,7 @@ if source_mode in [
     uploaded = st.file_uploader(
         "Upload CSV",
         type=["csv"],
+        key="x_csv_upload",
         help=(
             "Required columns: timestamp, username, text. "
             "Other metrics are optional."
@@ -762,15 +763,70 @@ if source_mode in [
 
     if uploaded is not None:
         try:
-            csv_df = normalize_posts(
-                pd.read_csv(uploaded)
-            )
+            # Read into a temporary dataframe first so mobile users can
+            # immediately see that Streamlit actually received the file.
+            uploaded.seek(0)
+            preview_df = pd.read_csv(uploaded)
+
             st.success(
-                f"Loaded {len(csv_df):,} CSV records."
+                f"✅ File received: {uploaded.name} · "
+                f"{len(preview_df):,} rows · {len(preview_df.columns)} columns"
             )
+
+            st.caption("Uploaded file preview")
+            st.dataframe(
+                preview_df.head(8),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            missing_required = (
+                {"timestamp", "username", "text"}
+                - {str(c).strip().lower() for c in preview_df.columns}
+            )
+
+            if missing_required:
+                st.error(
+                    "Missing required column(s): "
+                    + ", ".join(sorted(missing_required))
+                )
+            else:
+                if st.button(
+                    "Analyze uploaded CSV",
+                    type="primary",
+                    key="analyze_csv_button",
+                ):
+                    normalized = normalize_posts(preview_df)
+                    st.session_state["csv_posts"] = normalized
+                    st.session_state["csv_filename"] = uploaded.name
+                    st.session_state["csv_ready"] = True
+
+                if st.session_state.get("csv_ready"):
+                    csv_df = st.session_state.get(
+                        "csv_posts",
+                        pd.DataFrame(columns=STANDARD_COLUMNS),
+                    )
+
+                    st.success(
+                        f"🧠 Ready for analysis: {len(csv_df):,} valid records"
+                    )
+
+                    if len(csv_df):
+                        d1, d2, d3, d4 = st.columns(4)
+                        d1.metric("Valid rows", f"{len(csv_df):,}")
+                        d2.metric("Likes", f"{int(csv_df['likes'].sum()):,}")
+                        d3.metric("Reposts", f"{int(csv_df['reposts'].sum()):,}")
+                        d4.metric("Replies", f"{int(csv_df['replies'].sum()):,}")
+
+                        st.caption(
+                            "Now scroll down: the intelligence dashboard "
+                            "is generated from this uploaded dataset."
+                        )
+
         except Exception as exc:
             st.error(
-                f"CSV could not be loaded: {exc}"
+                "CSV could not be loaded. "
+                f"Technical detail: {type(exc).__name__}: {exc}"
             )
 
 
@@ -901,9 +957,14 @@ if (
 
 if raw_df.empty:
     if source_mode == "CSV / manual X posts":
-        st.info(
-            "Upload your ISRO-related X CSV to begin."
-        )
+        if uploaded is not None and not st.session_state.get("csv_ready"):
+            st.info(
+                "The file is uploaded. Tap **Analyze uploaded CSV** above."
+            )
+        else:
+            st.info(
+                "Upload your ISRO-related X CSV to begin."
+            )
     elif source_mode == "Free web/news — GDELT":
         st.info(
             "Tap **Fetch free news** to begin."
@@ -922,24 +983,37 @@ if raw_df.empty:
 # =========================================================
 # RUN INTELLIGENCE PIPELINE
 # =========================================================
-df = run_sentiment_agent(raw_df)
-df = run_emotion_agent(df)
-df["engagement"] = (
-    df["likes"] + df["reposts"] + df["replies"]
-)
+try:
+    with st.spinner("Analyzing uploaded/loaded records..."):
+        df = run_sentiment_agent(raw_df)
+        df = run_emotion_agent(df)
+        df["engagement"] = (
+            df["likes"] + df["reposts"] + df["replies"]
+        )
 
-df, vectorizer, tfidf, feature_names = (
-    run_semantic_topic_agent(df)
-)
+        df, vectorizer, tfidf, feature_names = (
+            run_semantic_topic_agent(df)
+        )
 
-narratives_df = run_narrative_agent(
-    df,
-    vectorizer,
-    tfidf,
-    feature_names,
-)
+        narratives_df = run_narrative_agent(
+            df,
+            vectorizer,
+            tfidf,
+            feature_names,
+        )
 
-trend_df = run_trend_agent(df)
+        trend_df = run_trend_agent(df)
+
+    st.success(
+        f"✅ Intelligence analysis complete for {len(df):,} records."
+    )
+
+except Exception as exc:
+    st.error(
+        "The CSV loaded, but the intelligence pipeline failed. "
+        f"Technical detail: {type(exc).__name__}: {exc}"
+    )
+    st.stop()
 
 
 # =========================================================
