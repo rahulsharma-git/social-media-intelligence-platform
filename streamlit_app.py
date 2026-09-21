@@ -7,6 +7,9 @@ import random
 import re
 import struct
 import wave
+import smtplib
+import ssl
+from email.message import EmailMessage
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -49,7 +52,7 @@ st.set_page_config(
 )
 
 st.title("📡 Social Media Intelligence Platform")
-st.caption("Build 5.8 Free Monitoring — auto PDF + IST timestamps")
+st.caption("Build 5.9 Free Monitoring — separate routine & alert email lists")
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -228,6 +231,133 @@ def get_secret(name, fallback=""):
         return str(st.secrets.get(name, fallback)).strip()
     except Exception:
         return fallback
+
+
+def get_secret_value(name, fallback=None):
+    """Return a Streamlit secret without coercing lists to strings."""
+    try:
+        return st.secrets.get(name, fallback)
+    except Exception:
+        return fallback
+
+
+def parse_recipient_secret(name):
+    """
+    Accept either:
+      REPORT_RECIPIENTS_30MIN = "a@example.com,b@example.com"
+    or:
+      REPORT_RECIPIENTS_30MIN = ["a@example.com", "b@example.com"]
+    """
+    raw = get_secret_value(name, "")
+
+    if raw is None:
+        return []
+
+    if isinstance(raw, (list, tuple)):
+        values = [str(x).strip() for x in raw]
+    else:
+        values = [
+            x.strip()
+            for x in re.split(r"[,;\n]+", str(raw))
+        ]
+
+    recipients = []
+    seen = set()
+    for value in values:
+        if not value or "@" not in value:
+            continue
+        key = value.lower()
+        if key not in seen:
+            seen.add(key)
+            recipients.append(value)
+
+    return recipients
+
+
+def get_email_config():
+    sender = get_secret("SMTP_EMAIL")
+    password = get_secret("SMTP_APP_PASSWORD")
+    routine_recipients = parse_recipient_secret(
+        "REPORT_RECIPIENTS_30MIN"
+    )
+    alert_recipients = parse_recipient_secret(
+        "ALERT_RECIPIENTS"
+    )
+
+    return {
+        "sender": sender,
+        "password": password,
+        "routine_recipients": routine_recipients,
+        "alert_recipients": alert_recipients,
+    }
+
+
+def smtp_configured():
+    cfg = get_email_config()
+    return bool(cfg["sender"] and cfg["password"])
+
+
+def send_email_message(
+    recipients,
+    subject,
+    body,
+    pdf_bytes=None,
+    pdf_filename=None,
+):
+    """
+    Send through Gmail SMTP using a Gmail App Password.
+    No normal Gmail password should be stored in the app.
+    """
+    cfg = get_email_config()
+    sender = cfg["sender"]
+    password = cfg["password"]
+
+    recipients = [
+        str(x).strip()
+        for x in recipients
+        if str(x).strip()
+    ]
+
+    if not sender or not password:
+        raise RuntimeError(
+            "SMTP_EMAIL / SMTP_APP_PASSWORD are not configured "
+            "in Streamlit Secrets."
+        )
+
+    if not recipients:
+        raise RuntimeError(
+            "No valid recipients are configured for this email type."
+        )
+
+    message = EmailMessage()
+    message["From"] = sender
+    message["To"] = ", ".join(recipients)
+    message["Subject"] = subject
+    message.set_content(body)
+
+    if pdf_bytes is not None:
+        message.add_attachment(
+            pdf_bytes,
+            maintype="application",
+            subtype="pdf",
+            filename=(
+                pdf_filename
+                or "social_media_intelligence_report.pdf"
+            ),
+        )
+
+    context = ssl.create_default_context()
+
+    with smtplib.SMTP_SSL(
+        "smtp.gmail.com",
+        465,
+        context=context,
+        timeout=30,
+    ) as smtp:
+        smtp.login(sender, password)
+        smtp.send_message(message)
+
+    return len(recipients)
 
 
 def get_supabase_config():
@@ -2027,6 +2157,50 @@ with st.sidebar:
         "device depends on browser security settings."
     )
 
+    st.divider()
+    st.header("Automatic email")
+
+    email_cfg = get_email_config()
+
+    routine_email_enabled = st.toggle(
+        "Email PDF every 30 minutes",
+        value=bool(email_cfg["routine_recipients"]),
+        help=(
+            "Sends the generated PDF to REPORT_RECIPIENTS_30MIN "
+            "once per active 30-minute monitoring cycle."
+        ),
+    )
+
+    alert_email_enabled = st.toggle(
+        "Email PDF only on negativity alert",
+        value=bool(email_cfg["alert_recipients"]),
+        help=(
+            "Sends an alert PDF only when negativity crosses upward "
+            "through the configured threshold."
+        ),
+    )
+
+    st.caption(
+        f"30-min recipients: {len(email_cfg['routine_recipients'])} · "
+        f"Alert-only recipients: {len(email_cfg['alert_recipients'])}"
+    )
+
+    if not smtp_configured():
+        st.warning(
+            "Email sender is not configured. Add SMTP_EMAIL and "
+            "SMTP_APP_PASSWORD in Streamlit Secrets."
+        )
+
+    if routine_email_enabled and not email_cfg["routine_recipients"]:
+        st.warning(
+            "REPORT_RECIPIENTS_30MIN is empty."
+        )
+
+    if alert_email_enabled and not email_cfg["alert_recipients"]:
+        st.warning(
+            "ALERT_RECIPIENTS is empty."
+        )
+
     if st.button("Test alarm sound", key="test_alarm_v57"):
         _play_alarm_sound()
         st.caption("Alarm test sent to the browser.")
@@ -2466,7 +2640,21 @@ try:
         if not alert_latched:
             if sound_alerts:
                 _play_alarm_sound()
+
             st.session_state["negativity_alert_latched_v57"] = True
+
+            # One unique alert event per upward threshold crossing.
+            alert_event_id = (
+                datetime.now(IST).strftime("%Y%m%d_%H%M%S_IST")
+                + f"|neg={overall_negative_pct:.2f}"
+                + f"|threshold={alert_threshold:.2f}"
+            )
+            st.session_state["pending_alert_email_event_v59"] = (
+                alert_event_id
+            )
+            st.session_state["pending_alert_negative_pct_v59"] = (
+                float(overall_negative_pct)
+            )
     else:
         st.session_state["negativity_alert_latched_v57"] = False
 
@@ -3153,7 +3341,7 @@ def _attempt_browser_pdf_download(pdf_bytes, filename):
 st.subheader("📄 Analytical PDF report")
 st.caption(
     "The report uses all currently loaded records before dashboard filters. "
-    "Build 5.8 generates it automatically when the dataset changes and on "
+    "Build 5.9 generates it automatically when the dataset changes and on "
     "each 30-minute monitoring cycle. All report timestamps are IST."
 )
 
@@ -3193,7 +3381,25 @@ def _make_report_now():
 
 
 # Automatic generation: once per dataset/cycle, not on every widget rerun.
-if auto_pdf and st.session_state.get("pdf_report_cycle_v58") != cycle_key:
+pending_alert_event = st.session_state.get(
+    "pending_alert_email_event_v59"
+)
+alert_event_unsent = bool(
+    pending_alert_event
+    and st.session_state.get(
+        "alert_email_sent_event_v59"
+    ) != pending_alert_event
+)
+
+email_needs_pdf = (
+    (routine_email_enabled and auto_monitor)
+    or (alert_email_enabled and alert_event_unsent)
+)
+
+if (
+    (auto_pdf or email_needs_pdf)
+    and st.session_state.get("pdf_report_cycle_v58") != cycle_key
+):
     try:
         with st.spinner("Automatically building the latest PDF report..."):
             auto_bytes, auto_name = _make_report_now()
@@ -3211,6 +3417,186 @@ if auto_pdf and st.session_state.get("pdf_report_cycle_v58") != cycle_key:
             "Automatic PDF generation failed: "
             f"{type(exc).__name__}: {exc}"
         )
+
+
+
+# =========================================================
+# AUTOMATIC EMAIL DELIVERY
+# =========================================================
+email_cfg = get_email_config()
+current_pdf = st.session_state.get("pdf_report_v58")
+current_pdf_name = st.session_state.get(
+    "pdf_report_name_v58",
+    "social_media_intelligence_report_IST.pdf",
+)
+current_generated_at = st.session_state.get(
+    "pdf_report_generated_v58",
+    datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+)
+
+# Routine recipients: once per active 30-minute cycle.
+routine_cycle_key = (
+    f"refresh={refresh_tick}|source={source_mode}"
+    if auto_monitor
+    else None
+)
+
+if (
+    routine_email_enabled
+    and auto_monitor
+    and email_cfg["routine_recipients"]
+    and smtp_configured()
+    and current_pdf
+    and routine_cycle_key
+    and st.session_state.get(
+        "routine_email_sent_cycle_v59"
+    ) != routine_cycle_key
+):
+    try:
+        routine_subject = (
+            "ISRO Social Intelligence Report — "
+            + datetime.now(IST).strftime(
+                "%d %b %Y %H:%M IST"
+            )
+        )
+        routine_body = (
+            "Automated 30-minute Social Media Intelligence report.\n\n"
+            f"Generated: {current_generated_at}\n"
+            f"Data source mode: {source_mode}\n"
+            f"Analyzed records: {len(df):,}\n"
+            f"Negativity: {overall_negative_pct:.1f}%\n"
+            f"Alert threshold: {alert_threshold:.1f}%\n\n"
+            "The analytical PDF is attached."
+        )
+
+        sent_count = send_email_message(
+            email_cfg["routine_recipients"],
+            routine_subject,
+            routine_body,
+            pdf_bytes=current_pdf,
+            pdf_filename=current_pdf_name,
+        )
+
+        st.session_state["routine_email_sent_cycle_v59"] = (
+            routine_cycle_key
+        )
+        st.session_state["last_routine_email_v59"] = (
+            datetime.now(IST).strftime(
+                "%Y-%m-%d %H:%M:%S IST"
+            )
+        )
+        st.success(
+            f"30-minute PDF emailed to {sent_count} recipient(s)."
+        )
+    except Exception as exc:
+        st.error(
+            "30-minute email failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+
+# Alert-only recipients: once per upward threshold crossing.
+pending_alert_event = st.session_state.get(
+    "pending_alert_email_event_v59"
+)
+alert_event_unsent = bool(
+    pending_alert_event
+    and st.session_state.get(
+        "alert_email_sent_event_v59"
+    ) != pending_alert_event
+)
+
+if (
+    alert_email_enabled
+    and alert_event_unsent
+    and email_cfg["alert_recipients"]
+    and smtp_configured()
+):
+    try:
+        # Build a PDF immediately if the currently cached report is missing.
+        if not current_pdf:
+            current_pdf, current_pdf_name = _make_report_now()
+
+        alert_negative_pct = float(
+            st.session_state.get(
+                "pending_alert_negative_pct_v59",
+                overall_negative_pct,
+            )
+        )
+
+        alert_subject = (
+            f"ALERT: ISRO negativity {alert_negative_pct:.1f}% — "
+            + datetime.now(IST).strftime(
+                "%d %b %Y %H:%M IST"
+            )
+        )
+        alert_body = (
+            "Negativity threshold alert from the Social Media "
+            "Intelligence Platform.\n\n"
+            f"Alert time: "
+            f"{datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}\n"
+            f"Negativity: {alert_negative_pct:.1f}%\n"
+            f"Configured threshold: {alert_threshold:.1f}%\n"
+            f"Data source mode: {source_mode}\n"
+            f"Analyzed records: {len(df):,}\n\n"
+            "The current analytical PDF is attached.\n\n"
+            "This monitoring score and sentiment classification are "
+            "analytical signals, not verified facts or probabilities."
+        )
+
+        sent_count = send_email_message(
+            email_cfg["alert_recipients"],
+            alert_subject,
+            alert_body,
+            pdf_bytes=current_pdf,
+            pdf_filename=current_pdf_name,
+        )
+
+        st.session_state["alert_email_sent_event_v59"] = (
+            pending_alert_event
+        )
+        st.session_state["last_alert_email_v59"] = (
+            datetime.now(IST).strftime(
+                "%Y-%m-%d %H:%M:%S IST"
+            )
+        )
+        st.success(
+            f"Alert PDF emailed to {sent_count} alert recipient(s)."
+        )
+    except Exception as exc:
+        st.error(
+            "Alert email failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+
+with st.expander("Email delivery status"):
+    st.write(
+        "30-minute PDF recipients:",
+        ", ".join(email_cfg["routine_recipients"])
+        if email_cfg["routine_recipients"]
+        else "None configured",
+    )
+    st.write(
+        "Alert-only recipients:",
+        ", ".join(email_cfg["alert_recipients"])
+        if email_cfg["alert_recipients"]
+        else "None configured",
+    )
+    st.write(
+        "Last 30-minute email:",
+        st.session_state.get(
+            "last_routine_email_v59",
+            "Not sent in this session",
+        ),
+    )
+    st.write(
+        "Last alert email:",
+        st.session_state.get(
+            "last_alert_email_v59",
+            "Not sent in this session",
+        ),
+    )
 
 
 # Manual regeneration remains available as a fallback.

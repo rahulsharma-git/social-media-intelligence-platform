@@ -1,30 +1,65 @@
-# Social Media Intelligence Platform — Build 5.8 Free Monitoring
+# Social Media Intelligence Platform — Build 5.9 Free Monitoring
 
-Build 5.8 adds:
+Build 5.9 adds two independent automatic email recipient groups.
 
-- Automatic PDF generation when the loaded dataset changes
-- Automatic PDF regeneration on every 30-minute monitoring cycle
-- Optional zero-click browser download attempt
-- Always-ready manual download fallback
-- All normalized timestamps displayed/stored in India Standard Time (IST, Asia/Kolkata)
-- PDF report generation time and annexure timestamps in IST
-- PDF filenames include IST date/time
-- Historic negativity buckets and monitoring snapshots use IST
+## Streamlit Secrets
 
-## Browser download limitation
+Add these in Streamlit Community Cloud -> App settings -> Secrets:
 
-Browsers can block downloads that were not triggered by a user gesture,
-especially on Android/iOS. The app attempts automatic download when enabled,
-but this cannot be guaranteed by Streamlit. Automatic PDF generation itself
-does not require a click, and the newest generated PDF remains ready in the
-dashboard for download.
+```toml
+SMTP_EMAIL = "yourgmail@gmail.com"
+SMTP_APP_PASSWORD = "your-16-character-gmail-app-password"
 
-## Existing Build 5.7 features retained
+# Receives the normal PDF every active 30-minute monitoring cycle.
+REPORT_RECIPIENTS_30MIN = "routine1@example.com,routine2@example.com"
 
-- 30-minute active-session monitoring
-- News refresh
-- Historic negativity chart
-- 35% configurable negativity alarm
-- Sound alert
+# Receives a PDF only when negativity crosses upward through the alarm threshold.
+ALERT_RECIPIENTS = "alert1@example.com,alert2@example.com"
+```
+
+The recipient settings may also be TOML arrays:
+
+```toml
+REPORT_RECIPIENTS_30MIN = [
+  "routine1@example.com",
+  "routine2@example.com"
+]
+
+ALERT_RECIPIENTS = [
+  "alert1@example.com",
+  "alert2@example.com"
+]
+```
+
+## Email behavior
+
+### 30-minute report list
+Recipients in `REPORT_RECIPIENTS_30MIN` receive the PDF once per active
+30-minute monitoring cycle.
+
+### Alert-only list
+Recipients in `ALERT_RECIPIENTS` receive an alert PDF only when negativity
+crosses upward through the configured threshold (35% by default). They do not
+receive the normal 30-minute report unless their address is also placed in
+`REPORT_RECIPIENTS_30MIN`.
+
+The same address may be present in both lists if desired.
+
+## Important hosting limitation
+
+The in-app 30-minute cycle runs while the Streamlit session is active.
+Streamlit Community Cloud may sleep an unused app, so this is not a guaranteed
+24/7 scheduler. Alert emails can only be sent when the app is actively running
+and analyzing data.
+
+## Existing features retained
+
+- IST timestamps throughout the dashboard/PDF
+- Automatic PDF generation
+- Browser auto-download attempt plus manual fallback
 - PDF charts and annexures
-- X CSV + News combined analysis
+- Historic negativity
+- 35% configurable negativity threshold
+- Sound alarm
+- X CSV + News analysis
+- GDELT -> Google News RSS fallback
