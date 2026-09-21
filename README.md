@@ -1,50 +1,42 @@
-# Social Media Intelligence Platform - Build 5.6.1 Free Stable
+# Social Media Intelligence Platform - Build 5.7 Free Monitoring
 
-Build 5.6.1 retains the stable X/CSV and free-News workflows and adds a
-downloadable analytical PDF report.
+Build 5.7 retains the stable X/CSV and free-News workflows and adds:
 
-## Dashboard additions
+- Charts embedded in the downloadable PDF report
+- More dashboard charts
+- 30-minute automatic active-session refresh
+- Automatic News refresh every 30 minutes when News/Combined mode is active
+- Historic negativity plot in 30-minute buckets
+- In-session 30-minute negativity snapshots
+- Configurable negativity threshold (default 35%)
+- Sound alarm once when negativity crosses above the threshold
+- Alarm re-arms after negativity falls back to or below the threshold
 
-- X: Top 10 positive briefs
-- X: Top 10 negative briefs
-- News: Top 10 positive briefs
-- News: Top 10 negative briefs
-- Expanded Legend & Methodology section
-- Dynamic cluster legend table
-- Generate + Download PDF report
+## PDF charts
 
-## PDF contents
+The report now includes:
 
-1. Executive overview
-2. Top sentiment briefs
-   - X positive
-   - X negative
-   - News positive
-   - News negative
-3. Cluster and narrative interpretation
-4. Detailed legends and methodology
-5. Annexure A - all X posts analyzed
-6. Annexure B - all News items analyzed, separated into:
-   - Positive
-   - Negative
-   - Neutral (included so every analyzed item is accounted for)
+- Sentiment distribution
+- Historic negativity trend with threshold
+- Conversation/coverage volume over time
+- Sentiment mix by source
+- Emotion signals
+- Semantic cluster volume
+- Negative share by cluster
+- Top sources/authors
+- Semantic conversation map
 
-For News, the free feeds usually provide the media source but not an
-individual article byline. The Author field is therefore shown as
-`Not provided by feed` when unavailable.
+The existing Top-10 briefs, methodology, cluster legend, X annexure and News annexure are retained.
 
-## PDF dependency
+## 30-minute automation limitation
 
-`reportlab` has been added to requirements.txt.
+`streamlit-autorefresh` reruns the active browser/app session every 30 minutes.
+On Streamlit Community Cloud the app can sleep when nobody is using it, so this
+is not a guaranteed 24/7 background scheduler. A separate scheduler would be
+needed for unattended monitoring while the app is asleep.
 
-## Existing workflows retained
+## Sound alert
 
-- Stable Android X/CSV loading
-- Built-in CSV test
-- GDELT news with automatic Google News RSS fallback
-- Combined X + News mode
-- Supabase persistence
-- Sentiment, emotion, clustering, narratives, trend/anomaly and monitoring score
-
-
-PDF font handling was updated to use Noto Sans for Latin text and a separate Devanagari font when available.
+The alarm is generated locally as a WAV tone and played in the browser. Some
+mobile browsers block autoplay until the user has interacted with the page.
+Use **Test alarm sound** once after opening the app if needed.

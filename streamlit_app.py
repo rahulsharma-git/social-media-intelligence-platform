@@ -1,17 +1,26 @@
+import base64
 import hashlib
 import io
+import math
 import os
 import random
 import re
+import struct
+import wave
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import plotly.express as px
 import requests
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus
 import streamlit as st
+import streamlit.components.v1 as components
+from streamlit_autorefresh import st_autorefresh
 from sklearn.cluster import KMeans
 from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -27,7 +36,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, PageBreak,
-    Table, LongTable, TableStyle
+    Table, LongTable, TableStyle, Image as RLImage
 )
 from xml.sax.saxutils import escape
 
@@ -39,7 +48,7 @@ st.set_page_config(
 )
 
 st.title("📡 Social Media Intelligence Platform")
-st.caption("Build 5.6.2 Free Stable — PDF generation hotfix")
+st.caption("Build 5.7 Free Monitoring — 30-min automation + PDF charts + negativity alarm")
 
 
 # =========================================================
@@ -931,6 +940,320 @@ def render_brief_list(df, polarity="positive", news=False):
 
 
 
+
+# =========================================================
+# MONITORING / HISTORIC NEGATIVITY HELPERS
+# =========================================================
+def compute_negativity_history(dataframe, freq="30min"):
+    """Return 30-minute negativity history for Overall, X and News."""
+    cols = ["bucket", "series", "negative_pct", "records"]
+    if dataframe is None or dataframe.empty:
+        return pd.DataFrame(columns=cols)
+
+    work = dataframe.copy()
+    work["timestamp"] = pd.to_datetime(
+        work["timestamp"], errors="coerce", utc=True
+    )
+    work = work.dropna(subset=["timestamp"]).copy()
+    if work.empty:
+        return pd.DataFrame(columns=cols)
+
+    work["bucket"] = work["timestamp"].dt.floor(freq)
+    work["is_negative"] = work["sentiment"].eq("Negative").astype(int)
+
+    pieces = []
+
+    def add_series(frame, label):
+        if frame.empty:
+            return
+        g = (
+            frame.groupby("bucket")
+            .agg(
+                records=("text", "size"),
+                negative_pct=("is_negative", "mean"),
+            )
+            .reset_index()
+        )
+        g["negative_pct"] = g["negative_pct"] * 100
+        g["series"] = label
+        pieces.append(g[cols])
+
+    add_series(work, "Overall")
+    add_series(
+        work[work["platform"].isin(["x_manual", "x"])],
+        "X",
+    )
+    add_series(
+        work[work["platform"].eq("web_news")],
+        "News",
+    )
+
+    if not pieces:
+        return pd.DataFrame(columns=cols)
+
+    return pd.concat(pieces, ignore_index=True).sort_values(
+        ["bucket", "series"]
+    )
+
+
+def _make_alarm_wav(duration_seconds=1.6, sample_rate=22050):
+    """Generate a short two-tone WAV alarm entirely in memory."""
+    output = io.BytesIO()
+    total = int(duration_seconds * sample_rate)
+
+    with wave.open(output, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+
+        frames = bytearray()
+        for i in range(total):
+            t = i / sample_rate
+            # Alternating tone blocks create a noticeable alarm pattern.
+            block = int(t / 0.20) % 2
+            freq = 880 if block == 0 else 660
+            envelope = 0.55
+            sample = int(
+                32767 * envelope * math.sin(2 * math.pi * freq * t)
+            )
+            frames.extend(struct.pack("<h", sample))
+
+        wav_file.writeframes(bytes(frames))
+
+    return output.getvalue()
+
+
+def _play_alarm_sound():
+    wav_bytes = _make_alarm_wav()
+    encoded = base64.b64encode(wav_bytes).decode("ascii")
+    components.html(
+        f"""
+        <audio autoplay>
+          <source src="data:audio/wav;base64,{encoded}" type="audio/wav">
+        </audio>
+        """,
+        height=0,
+    )
+
+
+def _record_monitor_snapshot(negative_pct):
+    """Keep one in-session monitoring snapshot per 30-minute bucket."""
+    now = pd.Timestamp.now(tz="UTC")
+    bucket = now.floor("30min")
+    history = st.session_state.get("monitor_snapshots_v57", [])
+
+    if not history or history[-1]["bucket"] != bucket.isoformat():
+        history.append(
+            {
+                "bucket": bucket.isoformat(),
+                "negative_pct": float(negative_pct),
+            }
+        )
+        history = history[-336:]  # one week at 30-minute intervals
+        st.session_state["monitor_snapshots_v57"] = history
+
+    return pd.DataFrame(history)
+
+
+# =========================================================
+# PDF CHART HELPERS
+# =========================================================
+def _fig_to_png_buffer(fig):
+    buf = io.BytesIO()
+    fig.savefig(
+        buf,
+        format="png",
+        dpi=150,
+        bbox_inches="tight",
+        facecolor="white",
+    )
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def _pdf_chart_sentiment(dataframe):
+    counts = (
+        dataframe["sentiment"]
+        .value_counts()
+        .reindex(["Positive", "Neutral", "Negative"], fill_value=0)
+    )
+    fig, ax = plt.subplots(figsize=(7.4, 3.4))
+    ax.bar(counts.index, counts.values)
+    ax.set_title("Sentiment distribution")
+    ax.set_ylabel("Records")
+    ax.grid(axis="y", alpha=0.2)
+    fig.tight_layout()
+    return _fig_to_png_buffer(fig)
+
+
+def _pdf_chart_volume(dataframe):
+    hourly = (
+        dataframe.groupby(dataframe["timestamp"].dt.floor("h"))
+        .size()
+        .reset_index(name="records")
+    )
+    if hourly.empty:
+        return None
+    fig, ax = plt.subplots(figsize=(7.4, 3.4))
+    ax.plot(hourly["timestamp"], hourly["records"], marker="o")
+    ax.set_title("Conversation / coverage volume over time")
+    ax.set_ylabel("Records per hour")
+    ax.tick_params(axis="x", rotation=30)
+    ax.grid(alpha=0.2)
+    fig.tight_layout()
+    return _fig_to_png_buffer(fig)
+
+
+def _pdf_chart_negativity(dataframe, threshold=35.0):
+    hist = compute_negativity_history(dataframe)
+    if hist.empty:
+        return None
+    fig, ax = plt.subplots(figsize=(7.4, 3.5))
+    for label, group in hist.groupby("series"):
+        ax.plot(
+            group["bucket"],
+            group["negative_pct"],
+            marker="o",
+            label=label,
+        )
+    ax.axhline(
+        threshold,
+        linestyle="--",
+        label=f"Alert threshold ({threshold:.0f}%)",
+    )
+    ax.set_ylim(0, 100)
+    ax.set_title("Historic negativity - 30 minute buckets")
+    ax.set_ylabel("Negative share (%)")
+    ax.tick_params(axis="x", rotation=30)
+    ax.legend(loc="best", fontsize=8)
+    ax.grid(alpha=0.2)
+    fig.tight_layout()
+    return _fig_to_png_buffer(fig)
+
+
+def _pdf_chart_emotions(dataframe):
+    counts = dataframe["emotion"].value_counts().head(10)
+    if counts.empty:
+        return None
+    fig, ax = plt.subplots(figsize=(7.4, 3.5))
+    ax.barh(counts.index[::-1], counts.values[::-1])
+    ax.set_title("Emotion signals")
+    ax.set_xlabel("Records")
+    ax.grid(axis="x", alpha=0.2)
+    fig.tight_layout()
+    return _fig_to_png_buffer(fig)
+
+
+def _pdf_chart_clusters(dataframe):
+    counts = dataframe["semantic_cluster"].value_counts().sort_index()
+    if counts.empty:
+        return None
+    fig, ax = plt.subplots(figsize=(7.4, 3.4))
+    ax.bar([f"C{x}" for x in counts.index], counts.values)
+    ax.set_title("Semantic cluster volume")
+    ax.set_ylabel("Records")
+    ax.grid(axis="y", alpha=0.2)
+    fig.tight_layout()
+    return _fig_to_png_buffer(fig)
+
+
+def _pdf_chart_cluster_negativity(dataframe):
+    stats = (
+        dataframe.groupby("semantic_cluster")["sentiment"]
+        .apply(lambda s: s.eq("Negative").mean() * 100)
+        .sort_index()
+    )
+    if stats.empty:
+        return None
+    fig, ax = plt.subplots(figsize=(7.4, 3.4))
+    ax.bar([f"C{x}" for x in stats.index], stats.values)
+    ax.set_ylim(0, 100)
+    ax.set_title("Negative share by semantic cluster")
+    ax.set_ylabel("Negative share (%)")
+    ax.grid(axis="y", alpha=0.2)
+    fig.tight_layout()
+    return _fig_to_png_buffer(fig)
+
+
+def _pdf_chart_platform_sentiment(dataframe):
+    work = dataframe.copy()
+    work["source_group"] = np.where(
+        work["platform"].isin(["x_manual", "x"]),
+        "X",
+        np.where(
+            work["platform"].eq("web_news"),
+            "News",
+            work["platform"],
+        ),
+    )
+    table = pd.crosstab(work["source_group"], work["sentiment"])
+    table = table.reindex(
+        columns=["Positive", "Neutral", "Negative"],
+        fill_value=0,
+    )
+    if table.empty:
+        return None
+    fig, ax = plt.subplots(figsize=(7.4, 3.5))
+    bottom = np.zeros(len(table))
+    x = np.arange(len(table.index))
+    for col in table.columns:
+        vals = table[col].to_numpy()
+        ax.bar(x, vals, bottom=bottom, label=col)
+        bottom += vals
+    ax.set_xticks(x)
+    ax.set_xticklabels(table.index)
+    ax.set_title("Sentiment mix by source type")
+    ax.set_ylabel("Records")
+    ax.legend(fontsize=8)
+    ax.grid(axis="y", alpha=0.2)
+    fig.tight_layout()
+    return _fig_to_png_buffer(fig)
+
+
+def _pdf_chart_top_sources(dataframe):
+    source_stats = (
+        dataframe.groupby("username")
+        .agg(records=("text", "size"), engagement=("engagement", "sum"))
+        .sort_values(["records", "engagement"], ascending=False)
+        .head(12)
+        .sort_values("records")
+    )
+    if source_stats.empty:
+        return None
+    fig, ax = plt.subplots(figsize=(7.4, 4.0))
+    ax.barh(source_stats.index, source_stats["records"])
+    ax.set_title("Top sources / authors by record volume")
+    ax.set_xlabel("Records")
+    ax.grid(axis="x", alpha=0.2)
+    fig.tight_layout()
+    return _fig_to_png_buffer(fig)
+
+
+def _pdf_chart_semantic_map(dataframe):
+    if not {"semantic_x", "semantic_y", "semantic_cluster"}.issubset(
+        dataframe.columns
+    ):
+        return None
+    fig, ax = plt.subplots(figsize=(7.4, 4.0))
+    for cluster, group in dataframe.groupby("semantic_cluster"):
+        ax.scatter(
+            group["semantic_x"],
+            group["semantic_y"],
+            s=18,
+            alpha=0.7,
+            label=f"C{cluster}",
+        )
+    ax.set_title("Semantic conversation map")
+    ax.set_xlabel("Semantic dimension 1")
+    ax.set_ylabel("Semantic dimension 2")
+    if dataframe["semantic_cluster"].nunique() <= 10:
+        ax.legend(fontsize=7, ncol=2)
+    ax.grid(alpha=0.15)
+    fig.tight_layout()
+    return _fig_to_png_buffer(fig)
+
+
 # =========================================================
 # PDF REPORTING
 # =========================================================
@@ -1112,7 +1435,7 @@ def _report_monitoring_score(dataframe, trend_frame, narrative_frame):
     return min(100, max(0, score))
 
 
-def build_pdf_report(report_df, narrative_df, trend_df):
+def build_pdf_report(report_df, narrative_df, trend_df, alert_threshold=35.0):
     """
     Build a complete PDF from all currently loaded records.
     Includes top sentiment briefs, methodology/legends, cluster definitions,
@@ -1271,12 +1594,47 @@ def build_pdf_report(report_df, narrative_df, trend_df):
         [p("Negative", table_text), p(f"{int(sent_counts['Negative']):,}", table_text)],
         [p("X engagement total", table_text), p(f"{engagement_total:,}", table_text)],
         [p("Prototype monitoring score", table_text), p(f"{monitoring_score}/100", table_text)],
+        [p("Negativity sound-alert threshold", table_text), p(f"{alert_threshold:.0f}%", table_text)],
         [p("Detected semantic clusters", table_text), p(f"{report_df['semantic_cluster'].nunique()}", table_text)],
     ]
     add_long_table(summary_rows, [62 * mm, 45 * mm])
 
+    # Charts
+    story.append(p("2. Charts and monitoring visuals", h1))
+    story.append(
+        p(
+            "The following charts are generated directly from the same "
+            "records used for the analytical tables and annexures.",
+            small,
+        )
+    )
+
+    chart_specs = [
+        ("Sentiment distribution", _pdf_chart_sentiment(report_df)),
+        ("Historic negativity", _pdf_chart_negativity(report_df, alert_threshold)),
+        ("Conversation / coverage volume", _pdf_chart_volume(report_df)),
+        ("Sentiment mix by source", _pdf_chart_platform_sentiment(report_df)),
+        ("Emotion signals", _pdf_chart_emotions(report_df)),
+        ("Semantic cluster volume", _pdf_chart_clusters(report_df)),
+        ("Negativity by cluster", _pdf_chart_cluster_negativity(report_df)),
+        ("Top sources / authors", _pdf_chart_top_sources(report_df)),
+        ("Semantic conversation map", _pdf_chart_semantic_map(report_df)),
+    ]
+
+    for chart_title, chart_buffer in chart_specs:
+        if chart_buffer is None:
+            continue
+        story.append(p(chart_title, h2))
+        chart_image = RLImage(
+            chart_buffer,
+            width=180 * mm,
+            height=82 * mm,
+        )
+        story.append(chart_image)
+        story.append(Spacer(1, 5))
+
     # Top sentiment briefs
-    story.append(p("2. Top sentiment briefs", h1))
+    story.append(p("3. Top sentiment briefs", h1))
     story.append(
         p(
             "X lists are ranked by sentiment strength, then engagement and "
@@ -1318,7 +1676,7 @@ def build_pdf_report(report_df, narrative_df, trend_df):
                 story.append(p(meta, small))
 
     # Cluster interpretation
-    story.append(p("3. Cluster and narrative interpretation", h1))
+    story.append(p("4. Cluster and narrative interpretation", h1))
     story.append(
         p(
             "Semantic clusters are automatically discovered groups of records "
@@ -1371,7 +1729,7 @@ def build_pdf_report(report_df, narrative_df, trend_df):
         story.append(p("No semantic narrative table was available.", body))
 
     # Legends & methodology
-    story.append(p("4. Legends and methodology", h1))
+    story.append(p("5. Legends and methodology", h1))
     legends = [
         (
             "Sentiment",
@@ -1420,6 +1778,17 @@ def build_pdf_report(report_df, narrative_df, trend_df):
             "Prototype composite: 45% negative share + 20% recent growth + "
             "20% anomaly component + 15% fastest narrative growth. It is a "
             "triage aid, not a validated probability or official risk rating."
+        ),
+        (
+            "Automatic monitoring",
+            "When enabled, the active Streamlit session refreshes every 30 minutes. "
+            "News is refreshed automatically; CSV data is re-analysed; Supabase is reloaded. "
+            "Streamlit Community Cloud may sleep when no session is active, so this is not a guaranteed 24/7 scheduler."
+        ),
+        (
+            "Negativity alert",
+            f"A sound alarm is triggered once when overall loaded-data negativity crosses above {alert_threshold:.0f}%. "
+            "The alarm re-arms only after negativity falls back to or below the threshold. Browser autoplay policies may require prior interaction."
         ),
         (
             "Top-10 ranking",
@@ -1603,6 +1972,50 @@ with st.sidebar:
             "Supabase database",
             "Demo sample",
         ],
+    )
+
+    st.divider()
+    st.header("30-minute monitoring")
+    auto_monitor = st.toggle(
+        "Auto refresh every 30 minutes",
+        value=True,
+        help=(
+            "Re-runs the active app session every 30 minutes. "
+            "News is fetched again automatically when News is selected."
+        ),
+    )
+    alert_threshold = st.slider(
+        "Negativity alarm threshold (%)",
+        min_value=10,
+        max_value=90,
+        value=35,
+        step=5,
+    )
+    sound_alerts = st.toggle(
+        "Enable sound alarm",
+        value=True,
+    )
+
+    if st.button("Test alarm sound", key="test_alarm_v57"):
+        _play_alarm_sound()
+        st.caption("Alarm test sent to the browser.")
+
+    if auto_monitor:
+        refresh_tick = st_autorefresh(
+            interval=30 * 60 * 1000,
+            limit=None,
+            key="monitor_refresh_v57",
+        )
+        st.caption(
+            f"Automatic cycle: #{refresh_tick}. "
+            "Runs while this app session is active."
+        )
+    else:
+        refresh_tick = 0
+
+    st.caption(
+        "Free Streamlit hosting can sleep when nobody is using the app, "
+        "so active-session auto refresh is not guaranteed 24/7 background execution."
     )
 
 
@@ -1804,10 +2217,21 @@ if source_mode in [
         step=10,
     )
 
-    if st.button(
+    manual_news_fetch = st.button(
         "Fetch free news",
         type="primary"
-    ):
+    )
+
+    now_epoch = datetime.now(timezone.utc).timestamp()
+    last_news_fetch = float(
+        st.session_state.get("last_news_fetch_epoch_v57", 0.0)
+    )
+    auto_news_due = (
+        auto_monitor
+        and (now_epoch - last_news_fetch >= 30 * 60)
+    )
+
+    if manual_news_fetch or auto_news_due:
         try:
             fetched, provider = fetch_free_news(
                 query=query,
@@ -1816,11 +2240,23 @@ if source_mode in [
             )
             st.session_state["gdelt_posts"] = fetched
             st.session_state["news_provider"] = provider
-            news_df = fetched
-            st.success(
-                f"Fetched {len(fetched):,} news items via {provider}."
+            st.session_state["last_news_fetch_epoch_v57"] = now_epoch
+            st.session_state["last_news_fetch_iso_v57"] = (
+                datetime.now(timezone.utc).isoformat()
             )
+            news_df = fetched
+            if manual_news_fetch:
+                st.success(
+                    f"Fetched {len(fetched):,} news items via {provider}."
+                )
+            else:
+                st.success(
+                    f"30-minute auto refresh fetched {len(fetched):,} "
+                    f"news items via {provider}."
+                )
         except Exception as exc:
+            # Prevent a failing endpoint from being hammered on every widget rerun.
+            st.session_state["last_news_fetch_epoch_v57"] = now_epoch
             st.error(str(exc))
 
     news_df = st.session_state.get(
@@ -1830,8 +2266,11 @@ if source_mode in [
 
     if len(news_df):
         provider = st.session_state.get("news_provider", "Free news source")
+        last_iso = st.session_state.get("last_news_fetch_iso_v57", "")
+        refresh_note = f" · refreshed {last_iso}" if last_iso else ""
         st.info(
-            f"Current news dataset: {len(news_df):,} items · Source: {provider}"
+            f"Current news dataset: {len(news_df):,} items · "
+            f"Source: {provider}{refresh_note}"
         )
 
 
@@ -1976,6 +2415,29 @@ try:
     st.success(
         f"✅ Intelligence analysis complete for {len(df):,} loaded records."
     )
+
+    overall_negative_pct = (
+        df["sentiment"].eq("Negative").mean() * 100
+        if len(df)
+        else 0.0
+    )
+    snapshot_df = _record_monitor_snapshot(overall_negative_pct)
+
+    alert_latched = bool(
+        st.session_state.get("negativity_alert_latched_v57", False)
+    )
+
+    if overall_negative_pct > alert_threshold:
+        st.error(
+            f"🚨 NEGATIVITY ALERT: {overall_negative_pct:.1f}% negative, "
+            f"above the {alert_threshold:.0f}% threshold."
+        )
+        if not alert_latched:
+            if sound_alerts:
+                _play_alarm_sound()
+            st.session_state["negativity_alert_latched_v57"] = True
+    else:
+        st.session_state["negativity_alert_latched_v57"] = False
 
 except Exception as exc:
     st.error(
@@ -2157,6 +2619,162 @@ with right:
         use_container_width=True,
     )
 
+
+
+
+# =========================================================
+# EXTENDED MONITORING CHARTS
+# =========================================================
+st.subheader("📈 Extended monitoring charts")
+
+neg_history = compute_negativity_history(df)
+if len(neg_history):
+    neg_fig = px.line(
+        neg_history,
+        x="bucket",
+        y="negative_pct",
+        color="series",
+        markers=True,
+        hover_data={"records": True, "negative_pct": ":.1f"},
+        title="Historic negativity - 30 minute buckets",
+    )
+    neg_fig.add_hline(
+        y=alert_threshold,
+        line_dash="dash",
+        annotation_text=f"Alarm threshold {alert_threshold:.0f}%",
+    )
+    neg_fig.update_yaxes(
+        title="Negative share (%)",
+        range=[0, 100],
+    )
+    neg_fig.update_xaxes(title=None)
+    st.plotly_chart(neg_fig, use_container_width=True)
+
+if len(snapshot_df) >= 2:
+    snap_plot = snapshot_df.copy()
+    snap_plot["bucket"] = pd.to_datetime(
+        snap_plot["bucket"], errors="coerce", utc=True
+    )
+    snap_fig = px.line(
+        snap_plot,
+        x="bucket",
+        y="negative_pct",
+        markers=True,
+        title="Live 30-minute monitoring snapshots (this app session)",
+    )
+    snap_fig.add_hline(
+        y=alert_threshold,
+        line_dash="dash",
+        annotation_text=f"Alarm threshold {alert_threshold:.0f}%",
+    )
+    snap_fig.update_yaxes(title="Negative share (%)", range=[0, 100])
+    snap_fig.update_xaxes(title=None)
+    st.plotly_chart(snap_fig, use_container_width=True)
+
+source_mix_df = filtered.copy()
+source_mix_df["source_group"] = np.where(
+    source_mix_df["platform"].isin(["x_manual", "x"]),
+    "X",
+    np.where(
+        source_mix_df["platform"].eq("web_news"),
+        "News",
+        source_mix_df["platform"],
+    ),
+)
+source_mix = (
+    source_mix_df.groupby(["source_group", "sentiment"])
+    .size()
+    .reset_index(name="records")
+)
+
+chart_left, chart_right = st.columns(2)
+with chart_left:
+    st.markdown("**Sentiment mix by source**")
+    if len(source_mix):
+        st.plotly_chart(
+            px.bar(
+                source_mix,
+                x="source_group",
+                y="records",
+                color="sentiment",
+                barmode="stack",
+            ),
+            use_container_width=True,
+        )
+
+with chart_right:
+    st.markdown("**Semantic cluster volume**")
+    cluster_volume = (
+        filtered.groupby("semantic_cluster")
+        .size()
+        .reset_index(name="records")
+    )
+    if len(cluster_volume):
+        cluster_volume["cluster"] = (
+            "Cluster " + cluster_volume["semantic_cluster"].astype(str)
+        )
+        st.plotly_chart(
+            px.bar(
+                cluster_volume,
+                x="cluster",
+                y="records",
+            ),
+            use_container_width=True,
+        )
+
+chart_left, chart_right = st.columns(2)
+with chart_left:
+    st.markdown("**Negative share by cluster**")
+    cluster_neg = (
+        filtered.groupby("semantic_cluster")["sentiment"]
+        .apply(lambda s: s.eq("Negative").mean() * 100)
+        .reset_index(name="negative_pct")
+    )
+    if len(cluster_neg):
+        cluster_neg["cluster"] = (
+            "Cluster " + cluster_neg["semantic_cluster"].astype(str)
+        )
+        cluster_neg_fig = px.bar(
+            cluster_neg,
+            x="cluster",
+            y="negative_pct",
+        )
+        cluster_neg_fig.update_yaxes(
+            title="Negative share (%)",
+            range=[0, 100],
+        )
+        st.plotly_chart(
+            cluster_neg_fig,
+            use_container_width=True,
+        )
+
+with chart_right:
+    st.markdown("**Top sources / authors by record volume**")
+    source_volume = (
+        filtered.groupby(["platform", "username"])
+        .size()
+        .reset_index(name="records")
+        .sort_values("records", ascending=False)
+        .head(12)
+        .sort_values("records")
+    )
+    if len(source_volume):
+        st.plotly_chart(
+            px.bar(
+                source_volume,
+                x="records",
+                y="username",
+                orientation="h",
+                hover_data=["platform"],
+            ),
+            use_container_width=True,
+        )
+
+st.caption(
+    "The historic negativity chart uses the timestamps inside the loaded "
+    "records. The live snapshot chart records each 30-minute monitoring cycle "
+    "for the current active app session."
+)
 
 
 # =========================================================
@@ -2417,6 +3035,17 @@ with st.expander("📚 Legend & methodology — what the clusters, sentiment and
         **Top-10 sentiment briefs**
         - X: ranked by sentiment strength, then engagement and recency.
         - News: ranked by headline sentiment strength, then recency.
+
+        **30-minute monitoring**
+        - When enabled, the active Streamlit session reruns every 30 minutes.
+        - News is automatically fetched again; Supabase is reloaded; CSV data is re-analysed.
+        - Free Streamlit hosting may sleep when nobody is using the app, so this is not a guaranteed always-on scheduler.
+
+        **Negativity alarm**
+        - Overall negativity is calculated across all currently loaded records.
+        - A sound alert is triggered when negativity crosses above the configured threshold (default **35%**).
+        - It sounds once per crossing and re-arms only after negativity falls back to or below the threshold.
+        - Mobile browser autoplay rules may require you to interact with the page first.
         """
     )
 
@@ -2455,15 +3084,15 @@ st.subheader("📄 Download analytical PDF report")
 st.caption(
     "The PDF uses all currently loaded records (before dashboard filters), "
     "so its annexures are complete. It includes top positive/negative briefs, "
-    "cluster legends, methodology, all X posts analyzed, and all News items "
-    "grouped by sentiment category."
+    "charts, historic negativity, cluster legends, methodology, all X posts "
+    "analyzed, and all News items grouped by sentiment category."
 )
 
 report_fingerprint = (
     f"{len(df)}|"
     f"{df['timestamp'].min() if len(df) else ''}|"
     f"{df['timestamp'].max() if len(df) else ''}|"
-    f"{source_mode}"
+    f"{source_mode}|{alert_threshold}"
 )
 
 if st.button(
@@ -2477,6 +3106,7 @@ if st.button(
                 df,
                 narratives_df,
                 trend_df,
+                alert_threshold=alert_threshold,
             )
         st.session_state["pdf_report_v56"] = report_bytes
         st.session_state["pdf_report_fp_v56"] = report_fingerprint

@@ -6,3 +6,5 @@ vaderSentiment
 scikit-learn
 requests
 reportlab
+matplotlib
+streamlit-autorefresh
