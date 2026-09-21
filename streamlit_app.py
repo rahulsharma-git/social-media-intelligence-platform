@@ -7,6 +7,7 @@ import random
 import re
 import struct
 import wave
+import zipfile
 import smtplib
 import ssl
 from email.message import EmailMessage
@@ -52,7 +53,7 @@ st.set_page_config(
 )
 
 st.title("📡 Social Media Intelligence Platform")
-st.caption("Build 5.9 Free Monitoring — separate routine & alert email lists")
+st.caption("Build 5.11 Free Monitoring — reliable IST slot scheduler + email retry")
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -303,10 +304,12 @@ def send_email_message(
     body,
     pdf_bytes=None,
     pdf_filename=None,
+    extra_attachments=None,
 ):
     """
     Send through Gmail SMTP using a Gmail App Password.
-    No normal Gmail password should be stored in the app.
+    Supports the main analytical PDF plus additional attachments such as
+    the numbered Web News evidence ZIP.
     """
     cfg = get_email_config()
     sender = cfg["sender"]
@@ -329,21 +332,55 @@ def send_email_message(
             "No valid recipients are configured for this email type."
         )
 
+    attachments = []
+    if pdf_bytes is not None:
+        attachments.append((
+            pdf_filename or "social_media_intelligence_report.pdf",
+            pdf_bytes,
+            "application",
+            "pdf",
+        ))
+
+    for item in (extra_attachments or []):
+        if len(item) != 4:
+            raise ValueError(
+                "Each extra attachment must be "
+                "(filename, bytes, maintype, subtype)."
+            )
+        filename, payload, maintype, subtype = item
+        if payload is not None:
+            attachments.append((
+                str(filename),
+                payload,
+                str(maintype),
+                str(subtype),
+            ))
+
+    # MIME/base64 encoding increases message size. Keep raw attachments under
+    # a conservative threshold so Gmail is less likely to reject the message.
+    raw_attachment_bytes = sum(
+        len(payload) for _, payload, _, _ in attachments
+    )
+    safe_raw_limit = 18 * 1024 * 1024
+    if raw_attachment_bytes > safe_raw_limit:
+        raise RuntimeError(
+            "Email attachments exceed the app's 18 MB safe raw-size limit. "
+            "Reduce the number/size of Web News evidence PDFs or download "
+            "the evidence ZIP from the dashboard."
+        )
+
     message = EmailMessage()
     message["From"] = sender
     message["To"] = ", ".join(recipients)
     message["Subject"] = subject
     message.set_content(body)
 
-    if pdf_bytes is not None:
+    for filename, payload, maintype, subtype in attachments:
         message.add_attachment(
-            pdf_bytes,
-            maintype="application",
-            subtype="pdf",
-            filename=(
-                pdf_filename
-                or "social_media_intelligence_report.pdf"
-            ),
+            payload,
+            maintype=maintype,
+            subtype=subtype,
+            filename=filename,
         )
 
     context = ssl.create_default_context()
@@ -1568,6 +1605,293 @@ def _report_monitoring_score(dataframe, trend_frame, narrative_frame):
     return min(100, max(0, score))
 
 
+def _prepare_news_evidence_frame(report_df):
+    """Return Web News rows with stable evidence numbers (newest first)."""
+    if report_df is None or report_df.empty:
+        return pd.DataFrame()
+
+    news = report_df[
+        report_df["platform"].eq("web_news")
+    ].copy()
+
+    if news.empty:
+        news["_evidence_no"] = pd.Series(dtype="int64")
+        return news
+
+    news = news.sort_values(
+        ["timestamp", "username", "text"],
+        ascending=[False, True, True],
+        kind="stable",
+    ).reset_index(drop=True)
+    news["_evidence_no"] = range(1, len(news) + 1)
+    return news
+
+
+def _safe_evidence_filename(value, max_len=42):
+    value = _report_clean_text(value)
+    value = re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_")
+    if not value:
+        value = "news_source"
+    return value[:max_len].rstrip("_") or "news_source"
+
+
+def _narrative_for_cluster(narrative_df, cluster_id):
+    if narrative_df is None or narrative_df.empty:
+        return "Not available"
+    try:
+        cluster_value = int(cluster_id)
+    except Exception:
+        return "Not available"
+
+    match = narrative_df[
+        narrative_df["cluster"].eq(cluster_value)
+    ]
+    if match.empty:
+        return "Not available"
+    return _report_clean_text(match.iloc[0].get("narrative", "")) or "Not available"
+
+
+def build_news_evidence_pdf(row, evidence_no, narrative_label="Not available"):
+    """
+    Build one compact evidence sheet for a Web News feed item.
+    This intentionally documents feed metadata/headline only; it does not
+    reproduce the full copyrighted news article.
+    """
+    buffer = io.BytesIO()
+    normal_font, bold_font = _register_report_fonts()
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=16 * mm,
+        leftMargin=16 * mm,
+        topMargin=16 * mm,
+        bottomMargin=16 * mm,
+        title=f"Web News Evidence {int(evidence_no):03d}",
+        author="Social Media Intelligence Platform",
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "EvidenceTitle",
+        parent=styles["Title"],
+        fontName=bold_font,
+        fontSize=16,
+        leading=20,
+        alignment=TA_CENTER,
+        spaceAfter=8,
+    )
+    h1 = ParagraphStyle(
+        "EvidenceH1",
+        parent=styles["Heading1"],
+        fontName=bold_font,
+        fontSize=11,
+        leading=14,
+        spaceBefore=7,
+        spaceAfter=5,
+    )
+    body = ParagraphStyle(
+        "EvidenceBody",
+        parent=styles["BodyText"],
+        fontName=normal_font,
+        fontSize=9,
+        leading=12,
+        spaceAfter=5,
+    )
+    small = ParagraphStyle(
+        "EvidenceSmall",
+        parent=body,
+        fontSize=7.5,
+        leading=9.5,
+    )
+    label_style = ParagraphStyle(
+        "EvidenceLabel",
+        parent=small,
+        fontName=bold_font,
+    )
+
+    def p(value, style=body):
+        return _report_para(value, style)
+
+    timestamp = pd.to_datetime(
+        row.get("timestamp"), errors="coerce", utc=True
+    )
+    if pd.isna(timestamp):
+        timestamp_text = "Unavailable"
+    else:
+        timestamp_text = timestamp.tz_convert(IST).strftime(
+            "%Y-%m-%d %H:%M:%S IST"
+        )
+
+    source = _report_clean_text(row.get("username", "")) or "Unknown source"
+    headline = _report_clean_text(row.get("text", "")) or "No headline available"
+    source_url = _report_clean_text(row.get("source_url", "")) or "Not provided by feed"
+    sentiment = _report_clean_text(row.get("sentiment", "")) or "Unclassified"
+    try:
+        sentiment_score = float(row.get("sentiment_score", 0) or 0)
+    except Exception:
+        sentiment_score = 0.0
+    emotion = _report_clean_text(row.get("emotion", "")) or "Other/Neutral"
+    cluster = row.get("semantic_cluster", "Not available")
+
+    story = [
+        p(f"Web News Evidence #{int(evidence_no):03d}", title_style),
+        p(
+            "Feed evidence sheet - generated from the news headline and "
+            "metadata available to the Social Media Intelligence Platform. "
+            "It is not a PDF copy of the full publisher article.",
+            small,
+        ),
+        Spacer(1, 6),
+        p("Headline", h1),
+        p(headline, body),
+        Spacer(1, 4),
+    ]
+
+    metadata = [
+        [p("Field", label_style), p("Value", label_style)],
+        [p("Evidence number", label_style), p(f"{int(evidence_no):03d}", small)],
+        [p("Time", label_style), p(timestamp_text, small)],
+        [p("Media agency/source", label_style), p(source, small)],
+        [p("Author", label_style), p("Not provided by feed", small)],
+        [p("Sentiment", label_style), p(sentiment, small)],
+        [p("Sentiment score", label_style), p(f"{sentiment_score:+.3f}", small)],
+        [p("Emotion signal", label_style), p(emotion, small)],
+        [p("Semantic cluster", label_style), p(str(cluster), small)],
+        [p("Narrative", label_style), p(narrative_label, small)],
+    ]
+
+    tbl = Table(metadata, colWidths=[43 * mm, 125 * mm], hAlign="LEFT")
+    tbl.setStyle(
+        TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E9EEF7")),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#C9D2DF")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ])
+    )
+    story.extend([
+        tbl,
+        Spacer(1, 8),
+        p("Source URL", h1),
+        p(source_url, small),
+        Spacer(1, 6),
+        p("Interpretation note", h1),
+        p(
+            "Sentiment is calculated from headline framing using VADER. "
+            "It does not represent verified public opinion, publisher intent, "
+            "or the truth/falsity of the underlying claim. Semantic cluster "
+            "and narrative labels are automated analytical groupings.",
+            small,
+        ),
+        p(
+            "Generated: "
+            + datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+            small,
+        ),
+    ])
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def build_news_evidence_zip(report_df, narrative_df):
+    """
+    Build a ZIP containing one numbered evidence PDF per Web News item plus
+    a manifest.csv that maps evidence numbers to source metadata.
+    """
+    news = _prepare_news_evidence_frame(report_df)
+    zip_buffer = io.BytesIO()
+    manifest_rows = []
+
+    with zipfile.ZipFile(
+        zip_buffer,
+        mode="w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=9,
+    ) as archive:
+        if news.empty:
+            archive.writestr(
+                "README.txt",
+                "No web_news records were present in this analysis cycle.\n",
+            )
+        else:
+            for _, row in news.iterrows():
+                evidence_no = int(row["_evidence_no"])
+                sentiment = (
+                    _report_clean_text(row.get("sentiment", "neutral"))
+                    or "neutral"
+                ).lower()
+                source_slug = _safe_evidence_filename(
+                    row.get("username", "news_source")
+                )
+                filename = (
+                    f"{evidence_no:03d}_{sentiment}_{source_slug}.pdf"
+                )
+                narrative_label = _narrative_for_cluster(
+                    narrative_df,
+                    row.get("semantic_cluster", ""),
+                )
+                pdf_bytes = build_news_evidence_pdf(
+                    row,
+                    evidence_no,
+                    narrative_label=narrative_label,
+                )
+                archive.writestr(filename, pdf_bytes)
+
+                timestamp = pd.to_datetime(
+                    row.get("timestamp"), errors="coerce", utc=True
+                )
+                if pd.isna(timestamp):
+                    timestamp_text = ""
+                else:
+                    timestamp_text = timestamp.tz_convert(IST).strftime(
+                        "%Y-%m-%d %H:%M:%S IST"
+                    )
+
+                manifest_rows.append({
+                    "evidence_no": f"{evidence_no:03d}",
+                    "time_ist": timestamp_text,
+                    "sentiment": _report_clean_text(row.get("sentiment", "")),
+                    "sentiment_score": row.get("sentiment_score", 0),
+                    "semantic_cluster": row.get("semantic_cluster", ""),
+                    "narrative": narrative_label,
+                    "media_source": _report_clean_text(row.get("username", "")),
+                    "author": "Not provided by feed",
+                    "headline": _report_clean_text(row.get("text", "")),
+                    "source_url": _report_clean_text(row.get("source_url", "")),
+                    "pdf_filename": filename,
+                })
+
+        manifest_df = pd.DataFrame(
+            manifest_rows,
+            columns=[
+                "evidence_no",
+                "time_ist",
+                "sentiment",
+                "sentiment_score",
+                "semantic_cluster",
+                "narrative",
+                "media_source",
+                "author",
+                "headline",
+                "source_url",
+                "pdf_filename",
+            ],
+        )
+        archive.writestr(
+            "manifest.csv",
+            manifest_df.to_csv(index=False).encode("utf-8-sig"),
+        )
+
+    zip_buffer.seek(0)
+    return zip_buffer.getvalue(), int(len(news))
+
+
 def build_pdf_report(report_df, narrative_df, trend_df, alert_threshold=35.0):
     """
     Build a complete PDF from all currently loaded records.
@@ -1680,9 +2004,7 @@ def build_pdf_report(report_df, narrative_df, trend_df, alert_threshold=35.0):
     x_df = report_df[
         report_df["platform"].isin(["x_manual", "x"])
     ].copy()
-    news_df = report_df[
-        report_df["platform"].eq("web_news")
-    ].copy()
+    news_df = _prepare_news_evidence_frame(report_df)
 
     sent_counts = (
         report_df["sentiment"]
@@ -1998,9 +2320,10 @@ def build_pdf_report(report_df, narrative_df, trend_df, alert_threshold=35.0):
     story.append(p("Annexure B - News items analyzed", h1))
     story.append(
         p(
-            "News is grouped by the sentiment category assigned to each "
-            "headline. The free feeds generally expose the media source/agency "
-            "but not the individual article author.",
+            "News is grouped by headline sentiment. Evidence numbers match "
+            "the individual PDFs inside the Web News evidence ZIP attached "
+            "to automated emails. Free feeds generally expose the media "
+            "source/agency but not the individual article author.",
             body,
         )
     )
@@ -2035,7 +2358,8 @@ def build_pdf_report(report_df, narrative_df, trend_df, alert_threshold=35.0):
                 ]
             ]
 
-            for idx_num, (_, row) in enumerate(subset.iterrows(), start=1):
+            for _, row in subset.iterrows():
+                evidence_no = int(row.get("_evidence_no", 0) or 0)
                 timestamp = (
                     pd.to_datetime(row["timestamp"], utc=True)
                     .tz_convert(IST)
@@ -2044,7 +2368,7 @@ def build_pdf_report(report_df, narrative_df, trend_df, alert_threshold=35.0):
 
                 n_rows.append(
                     [
-                        p(str(idx_num), table_text),
+                        p(f"{evidence_no:03d}", table_text),
                         p(timestamp, table_text),
                         p(row.get("text", ""), table_text),
                         p("Not provided by feed", table_text),
@@ -2157,6 +2481,20 @@ with st.sidebar:
         "device depends on browser security settings."
     )
 
+    news_evidence_zip_enabled = st.toggle(
+        "Create Web News evidence ZIP",
+        value=True,
+        help=(
+            "Creates one numbered evidence-sheet PDF for every web_news "
+            "record plus a manifest.csv. The ZIP is attached to both "
+            "routine and alert emails."
+        ),
+    )
+    st.caption(
+        "Evidence PDFs document feed headlines/metadata and analysis. "
+        "They do not reproduce full publisher articles."
+    )
+
     st.divider()
     st.header("Automatic email")
 
@@ -2166,8 +2504,9 @@ with st.sidebar:
         "Email PDF every 30 minutes",
         value=bool(email_cfg["routine_recipients"]),
         help=(
-            "Sends the generated PDF to REPORT_RECIPIENTS_30MIN "
-            "once per active 30-minute monitoring cycle."
+            "Sends the generated PDF to REPORT_RECIPIENTS_30MIN at fixed "
+            "IST half-hour slots (:00 and :30) while the app is awake. "
+            "Failed sends retry every ~5 minutes within the slot."
         ),
     )
 
@@ -2205,22 +2544,37 @@ with st.sidebar:
         _play_alarm_sound()
         st.caption("Alarm test sent to the browser.")
 
+    # Build 5.11 uses a short heartbeat but schedules work by fixed
+    # India Standard Time half-hour slots (:00 and :30). This avoids the
+    # drift caused by scheduling from the moment the browser session opened.
+    scheduler_now_ist = datetime.now(IST)
+    monitor_slot_start = scheduler_now_ist.replace(
+        minute=(scheduler_now_ist.minute // 30) * 30,
+        second=0,
+        microsecond=0,
+    )
+    monitor_slot_end = monitor_slot_start + timedelta(minutes=30)
+    monitor_slot_key = monitor_slot_start.strftime("%Y%m%d_%H%M_IST")
+
     if auto_monitor:
         refresh_tick = st_autorefresh(
-            interval=30 * 60 * 1000,
+            interval=60 * 1000,
             limit=None,
-            key="monitor_refresh_v57",
+            key="monitor_heartbeat_v511",
         )
         st.caption(
-            f"Automatic cycle: #{refresh_tick}. "
-            "Runs while this app session is active."
+            "Scheduler heartbeat: every 60 seconds · "
+            f"current slot {monitor_slot_start.strftime('%H:%M')}–"
+            f"{monitor_slot_end.strftime('%H:%M')} IST · "
+            f"next scheduled slot {monitor_slot_end.strftime('%H:%M')} IST."
         )
     else:
         refresh_tick = 0
 
     st.caption(
-        "Free Streamlit hosting can sleep when nobody is using the app, "
-        "so active-session auto refresh is not guaranteed 24/7 background execution."
+        "The 60-second heartbeat improves timing and retry behavior while the "
+        "app is awake. Streamlit Community Cloud can still sleep an inactive "
+        "app, so this in-app scheduler is not a guaranteed 24/7 background job."
     )
 
 
@@ -2431,12 +2785,21 @@ if source_mode in [
     last_news_fetch = float(
         st.session_state.get("last_news_fetch_epoch_v57", 0.0)
     )
+    last_news_slot = st.session_state.get(
+        "last_news_fetch_slot_v511", ""
+    )
+    last_news_attempt = float(
+        st.session_state.get("last_news_attempt_epoch_v511", 0.0)
+    )
+    news_retry_ready = (now_epoch - last_news_attempt) >= 5 * 60
     auto_news_due = (
         auto_monitor
-        and (now_epoch - last_news_fetch >= 30 * 60)
+        and last_news_slot != monitor_slot_key
+        and news_retry_ready
     )
 
     if manual_news_fetch or auto_news_due:
+        st.session_state["last_news_attempt_epoch_v511"] = now_epoch
         try:
             fetched, provider = fetch_free_news(
                 query=query,
@@ -2449,6 +2812,8 @@ if source_mode in [
             st.session_state["last_news_fetch_iso_v57"] = (
                 datetime.now(IST).isoformat()
             )
+            st.session_state["last_news_fetch_slot_v511"] = monitor_slot_key
+            st.session_state["last_news_fetch_error_v511"] = ""
             news_df = fetched
             if manual_news_fetch:
                 st.success(
@@ -2460,9 +2825,16 @@ if source_mode in [
                     f"news items via {provider}."
                 )
         except Exception as exc:
-            # Prevent a failing endpoint from being hammered on every widget rerun.
-            st.session_state["last_news_fetch_epoch_v57"] = now_epoch
-            st.error(str(exc))
+            # Do not mark the half-hour slot as successfully refreshed.
+            # The 60-second heartbeat will retry after the 5-minute cooldown.
+            st.session_state["last_news_fetch_error_v511"] = (
+                f"{type(exc).__name__}: {exc}"
+            )
+            st.error(
+                "News refresh failed; cached news will be used for this run. "
+                "Automatic retry is scheduled in about 5 minutes. "
+                f"Technical detail: {type(exc).__name__}: {exc}"
+            )
 
     news_df = st.session_state.get(
         "gdelt_posts",
@@ -3341,7 +3713,7 @@ def _attempt_browser_pdf_download(pdf_bytes, filename):
 st.subheader("📄 Analytical PDF report")
 st.caption(
     "The report uses all currently loaded records before dashboard filters. "
-    "Build 5.9 generates it automatically when the dataset changes and on "
+    "Build 5.10 generates it automatically when the dataset changes and on "
     "each 30-minute monitoring cycle. All report timestamps are IST."
 )
 
@@ -3349,16 +3721,19 @@ report_fingerprint = (
     f"{len(df)}|"
     f"{df['timestamp'].min() if len(df) else ''}|"
     f"{df['timestamp'].max() if len(df) else ''}|"
-    f"{source_mode}|{alert_threshold}"
+    f"{source_mode}|{alert_threshold}|evidence={news_evidence_zip_enabled}"
 )
 
 cycle_key = (
-    f"{report_fingerprint}|cycle={refresh_tick}"
+    f"{report_fingerprint}|slot={monitor_slot_key}"
     if auto_monitor
     else report_fingerprint
 )
 
 def _make_report_now():
+    generation_time = datetime.now(IST)
+    generation_stamp = generation_time.strftime("%Y%m%d_%H%M%S_IST")
+
     report_bytes = build_pdf_report(
         df,
         narratives_df,
@@ -3367,16 +3742,34 @@ def _make_report_now():
     )
     report_name = (
         "social_media_intelligence_report_"
-        + datetime.now(IST).strftime("%Y%m%d_%H%M%S_IST")
+        + generation_stamp
         + ".pdf"
     )
+
+    evidence_zip_bytes = None
+    evidence_zip_name = None
+    evidence_count = 0
+    if news_evidence_zip_enabled:
+        evidence_zip_bytes, evidence_count = build_news_evidence_zip(
+            df,
+            narratives_df,
+        )
+        evidence_zip_name = (
+            "ISRO_WebNews_Evidence_"
+            + generation_stamp
+            + ".zip"
+        )
+
     st.session_state["pdf_report_v58"] = report_bytes
     st.session_state["pdf_report_fp_v58"] = report_fingerprint
     st.session_state["pdf_report_cycle_v58"] = cycle_key
     st.session_state["pdf_report_name_v58"] = report_name
     st.session_state["pdf_report_generated_v58"] = (
-        datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        generation_time.strftime("%Y-%m-%d %H:%M:%S IST")
     )
+    st.session_state["news_evidence_zip_v510"] = evidence_zip_bytes
+    st.session_state["news_evidence_zip_name_v510"] = evidence_zip_name
+    st.session_state["news_evidence_count_v510"] = evidence_count
     return report_bytes, report_name
 
 
@@ -3433,12 +3826,37 @@ current_generated_at = st.session_state.get(
     "pdf_report_generated_v58",
     datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
 )
+current_evidence_zip = st.session_state.get("news_evidence_zip_v510")
+current_evidence_zip_name = st.session_state.get(
+    "news_evidence_zip_name_v510",
+    "ISRO_WebNews_Evidence_IST.zip",
+)
+current_evidence_count = int(
+    st.session_state.get("news_evidence_count_v510", 0) or 0
+)
 
-# Routine recipients: once per active 30-minute cycle.
+def _current_evidence_attachments():
+    if news_evidence_zip_enabled and current_evidence_zip:
+        return [(
+            current_evidence_zip_name,
+            current_evidence_zip,
+            "application",
+            "zip",
+        )]
+    return []
+
+# Routine recipients: once per fixed IST half-hour slot (:00 / :30).
 routine_cycle_key = (
-    f"refresh={refresh_tick}|source={source_mode}"
+    f"slot={monitor_slot_key}|source={source_mode}"
     if auto_monitor
     else None
+)
+
+routine_last_attempt_epoch = float(
+    st.session_state.get("routine_email_last_attempt_epoch_v511", 0.0)
+)
+routine_retry_ready = (
+    datetime.now(IST).timestamp() - routine_last_attempt_epoch >= 5 * 60
 )
 
 if (
@@ -3448,11 +3866,18 @@ if (
     and smtp_configured()
     and current_pdf
     and routine_cycle_key
+    and routine_retry_ready
     and st.session_state.get(
         "routine_email_sent_cycle_v59"
     ) != routine_cycle_key
 ):
     try:
+        st.session_state["routine_email_last_attempt_epoch_v511"] = (
+            datetime.now(IST).timestamp()
+        )
+        st.session_state["routine_email_last_attempt_v511"] = (
+            datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        )
         routine_subject = (
             "ISRO Social Intelligence Report — "
             + datetime.now(IST).strftime(
@@ -3465,8 +3890,15 @@ if (
             f"Data source mode: {source_mode}\n"
             f"Analyzed records: {len(df):,}\n"
             f"Negativity: {overall_negative_pct:.1f}%\n"
-            f"Alert threshold: {alert_threshold:.1f}%\n\n"
-            "The analytical PDF is attached."
+            f"Alert threshold: {alert_threshold:.1f}%\n"
+            f"Web News evidence PDFs: {current_evidence_count}\n\n"
+            "Attachments:\n"
+            "1. Main analytical PDF\n"
+            + (
+                "2. Numbered Web News evidence ZIP (PDFs + manifest.csv)"
+                if news_evidence_zip_enabled and current_evidence_zip
+                else "2. Web News evidence ZIP not generated for this cycle"
+            )
         )
 
         sent_count = send_email_message(
@@ -3475,6 +3907,7 @@ if (
             routine_body,
             pdf_bytes=current_pdf,
             pdf_filename=current_pdf_name,
+            extra_attachments=_current_evidence_attachments(),
         )
 
         st.session_state["routine_email_sent_cycle_v59"] = (
@@ -3485,13 +3918,18 @@ if (
                 "%Y-%m-%d %H:%M:%S IST"
             )
         )
+        st.session_state["last_routine_email_error_v511"] = ""
         st.success(
             f"30-minute PDF emailed to {sent_count} recipient(s)."
         )
     except Exception as exc:
-        st.error(
-            "30-minute email failed: "
+        st.session_state["last_routine_email_error_v511"] = (
             f"{type(exc).__name__}: {exc}"
+        )
+        st.error(
+            "30-minute email failed. The app will retry in about 5 minutes "
+            "while this monitoring session remains awake. "
+            f"Technical detail: {type(exc).__name__}: {exc}"
         )
 
 
@@ -3506,16 +3944,42 @@ alert_event_unsent = bool(
     ) != pending_alert_event
 )
 
+alert_last_attempt_epoch = float(
+    st.session_state.get("alert_email_last_attempt_epoch_v511", 0.0)
+)
+alert_retry_ready = (
+    datetime.now(IST).timestamp() - alert_last_attempt_epoch >= 5 * 60
+)
+
 if (
     alert_email_enabled
     and alert_event_unsent
     and email_cfg["alert_recipients"]
     and smtp_configured()
+    and alert_retry_ready
 ):
     try:
+        st.session_state["alert_email_last_attempt_epoch_v511"] = (
+            datetime.now(IST).timestamp()
+        )
+        st.session_state["alert_email_last_attempt_v511"] = (
+            datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        )
         # Build a PDF immediately if the currently cached report is missing.
         if not current_pdf:
             current_pdf, current_pdf_name = _make_report_now()
+            current_evidence_zip = st.session_state.get(
+                "news_evidence_zip_v510"
+            )
+            current_evidence_zip_name = st.session_state.get(
+                "news_evidence_zip_name_v510",
+                "ISRO_WebNews_Evidence_IST.zip",
+            )
+            current_evidence_count = int(
+                st.session_state.get(
+                    "news_evidence_count_v510", 0
+                ) or 0
+            )
 
         alert_negative_pct = float(
             st.session_state.get(
@@ -3538,8 +4002,11 @@ if (
             f"Negativity: {alert_negative_pct:.1f}%\n"
             f"Configured threshold: {alert_threshold:.1f}%\n"
             f"Data source mode: {source_mode}\n"
-            f"Analyzed records: {len(df):,}\n\n"
-            "The current analytical PDF is attached.\n\n"
+            f"Analyzed records: {len(df):,}\n"
+            f"Web News evidence PDFs: {current_evidence_count}\n\n"
+            "The current analytical PDF is attached. "
+            "When enabled, a ZIP containing one numbered Web News evidence "
+            "PDF per feed item plus manifest.csv is also attached.\n\n"
             "This monitoring score and sentiment classification are "
             "analytical signals, not verified facts or probabilities."
         )
@@ -3550,6 +4017,7 @@ if (
             alert_body,
             pdf_bytes=current_pdf,
             pdf_filename=current_pdf_name,
+            extra_attachments=_current_evidence_attachments(),
         )
 
         st.session_state["alert_email_sent_event_v59"] = (
@@ -3560,17 +4028,25 @@ if (
                 "%Y-%m-%d %H:%M:%S IST"
             )
         )
+        st.session_state["last_alert_email_error_v511"] = ""
         st.success(
             f"Alert PDF emailed to {sent_count} alert recipient(s)."
         )
     except Exception as exc:
-        st.error(
-            "Alert email failed: "
+        st.session_state["last_alert_email_error_v511"] = (
             f"{type(exc).__name__}: {exc}"
+        )
+        st.error(
+            "Alert email failed. The app will retry in about 5 minutes "
+            "while this monitoring session remains awake. "
+            f"Technical detail: {type(exc).__name__}: {exc}"
         )
 
 
 with st.expander("Email delivery status"):
+    st.write("Current IST time:", datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"))
+    st.write("Current 30-minute slot:", monitor_slot_key)
+    st.write("Next scheduled slot:", monitor_slot_end.strftime("%Y-%m-%d %H:%M:%S IST"))
     st.write(
         "30-minute PDF recipients:",
         ", ".join(email_cfg["routine_recipients"])
@@ -3597,6 +4073,57 @@ with st.expander("Email delivery status"):
             "Not sent in this session",
         ),
     )
+    st.write(
+        "Last routine send attempt:",
+        st.session_state.get(
+            "routine_email_last_attempt_v511",
+            "No attempt in this session",
+        ),
+    )
+    st.write(
+        "Last routine send error:",
+        st.session_state.get(
+            "last_routine_email_error_v511",
+            "None",
+        ) or "None",
+    )
+    st.write(
+        "Last alert send attempt:",
+        st.session_state.get(
+            "alert_email_last_attempt_v511",
+            "No attempt in this session",
+        ),
+    )
+    st.write(
+        "Last alert send error:",
+        st.session_state.get(
+            "last_alert_email_error_v511",
+            "None",
+        ) or "None",
+    )
+    st.write(
+        "Last successful news refresh:",
+        st.session_state.get(
+            "last_news_fetch_iso_v57",
+            "Not refreshed in this session",
+        ),
+    )
+    st.write(
+        "Last news refresh error:",
+        st.session_state.get(
+            "last_news_fetch_error_v511",
+            "None",
+        ) or "None",
+    )
+    st.write(
+        "Web News evidence PDFs in latest ZIP:",
+        current_evidence_count,
+    )
+    if current_evidence_zip:
+        st.write(
+            "Evidence ZIP size:",
+            f"{len(current_evidence_zip) / (1024 * 1024):.2f} MB",
+        )
 
 
 # Manual regeneration remains available as a fallback.
@@ -3646,6 +4173,23 @@ if (
         mime="application/pdf",
         key="download_pdf_v58",
     )
+
+    if st.session_state.get("news_evidence_zip_v510"):
+        st.download_button(
+            "🗂️ Download Web News evidence ZIP",
+            data=st.session_state["news_evidence_zip_v510"],
+            file_name=st.session_state.get(
+                "news_evidence_zip_name_v510",
+                "ISRO_WebNews_Evidence_IST.zip",
+            ),
+            mime="application/zip",
+            key="download_news_evidence_zip_v510",
+        )
+        st.caption(
+            f"Evidence ZIP contains "
+            f"{int(st.session_state.get('news_evidence_count_v510', 0) or 0)} "
+            "numbered Web News evidence PDF(s) plus manifest.csv."
+        )
 else:
     st.info(
         "The PDF will be generated automatically when analyzed data is available."
