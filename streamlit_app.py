@@ -307,19 +307,33 @@ def send_email_message(
     extra_attachments=None,
 ):
     """
-    Send through Gmail SMTP using a Gmail App Password.
-    Supports the main analytical PDF plus additional attachments such as
-    the numbered Web News evidence ZIP.
+    Send ONE independent message per recipient through Gmail SMTP.
+
+    This deliberately avoids a shared multi-recipient To: envelope. It makes
+    recipient-level delivery observable and prevents one recipient's SMTP
+    refusal from hiding the status of the others.
+
+    Returns:
+        {
+            "sent": ["a@example.com", ...],
+            "failed": {"b@example.com": "error text", ...},
+        }
     """
     cfg = get_email_config()
     sender = cfg["sender"]
     password = cfg["password"]
 
-    recipients = [
-        str(x).strip()
-        for x in recipients
-        if str(x).strip()
-    ]
+    # Normalize and de-duplicate while preserving order.
+    clean_recipients = []
+    seen = set()
+    for raw in recipients:
+        address = str(raw).strip()
+        if not address or "@" not in address:
+            continue
+        key = address.lower()
+        if key not in seen:
+            seen.add(key)
+            clean_recipients.append(address)
 
     if not sender or not password:
         raise RuntimeError(
@@ -327,7 +341,7 @@ def send_email_message(
             "in Streamlit Secrets."
         )
 
-    if not recipients:
+    if not clean_recipients:
         raise RuntimeError(
             "No valid recipients are configured for this email type."
         )
@@ -369,21 +383,9 @@ def send_email_message(
             "the evidence ZIP from the dashboard."
         )
 
-    message = EmailMessage()
-    message["From"] = sender
-    message["To"] = ", ".join(recipients)
-    message["Subject"] = subject
-    message.set_content(body)
-
-    for filename, payload, maintype, subtype in attachments:
-        message.add_attachment(
-            payload,
-            maintype=maintype,
-            subtype=subtype,
-            filename=filename,
-        )
-
     context = ssl.create_default_context()
+    sent = []
+    failed = {}
 
     with smtplib.SMTP_SSL(
         "smtp.gmail.com",
@@ -392,9 +394,48 @@ def send_email_message(
         timeout=30,
     ) as smtp:
         smtp.login(sender, password)
-        smtp.send_message(message)
 
-    return len(recipients)
+        for recipient in clean_recipients:
+            try:
+                message = EmailMessage()
+                message["From"] = sender
+                message["To"] = recipient
+                message["Subject"] = subject
+                message.set_content(body)
+
+                for filename, payload, maintype, subtype in attachments:
+                    message.add_attachment(
+                        payload,
+                        maintype=maintype,
+                        subtype=subtype,
+                        filename=filename,
+                    )
+
+                # Explicit SMTP envelope recipient: one recipient per message.
+                refused = smtp.send_message(
+                    message,
+                    from_addr=sender,
+                    to_addrs=[recipient],
+                )
+
+                if refused:
+                    failed[recipient] = (
+                        "SMTP server refused this recipient: "
+                        + str(refused)
+                    )
+                else:
+                    sent.append(recipient)
+
+            except Exception as exc:
+                failed[recipient] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+    return {
+        "sent": sent,
+        "failed": failed,
+    }
+
 
 
 def get_supabase_config():
@@ -2523,6 +2564,10 @@ with st.sidebar:
         f"30-min recipients: {len(email_cfg['routine_recipients'])} · "
         f"Alert-only recipients: {len(email_cfg['alert_recipients'])}"
     )
+    st.caption(
+        "Build 5.12 sends a separate Gmail message to each recipient "
+        "and tracks delivery independently."
+    )
 
     if not smtp_configured():
         st.warning(
@@ -3901,8 +3946,34 @@ if (
             )
         )
 
-        sent_count = send_email_message(
-            email_cfg["routine_recipients"],
+        # Reset per-recipient completion tracking when a new
+        # 30-minute slot begins.
+        if (
+            st.session_state.get(
+                "routine_delivery_cycle_v512"
+            ) != routine_cycle_key
+        ):
+            st.session_state["routine_delivery_cycle_v512"] = (
+                routine_cycle_key
+            )
+            st.session_state["routine_delivered_v512"] = []
+
+        delivered = {
+            str(x).lower()
+            for x in st.session_state.get(
+                "routine_delivered_v512",
+                [],
+            )
+        }
+
+        pending_recipients = [
+            address
+            for address in email_cfg["routine_recipients"]
+            if address.lower() not in delivered
+        ]
+
+        delivery = send_email_message(
+            pending_recipients,
             routine_subject,
             routine_body,
             pdf_bytes=current_pdf,
@@ -3910,18 +3981,53 @@ if (
             extra_attachments=_current_evidence_attachments(),
         )
 
-        st.session_state["routine_email_sent_cycle_v59"] = (
-            routine_cycle_key
+        delivered.update(
+            address.lower()
+            for address in delivery["sent"]
         )
-        st.session_state["last_routine_email_v59"] = (
-            datetime.now(IST).strftime(
-                "%Y-%m-%d %H:%M:%S IST"
+        st.session_state["routine_delivered_v512"] = sorted(
+            delivered
+        )
+
+        all_expected = {
+            address.lower()
+            for address in email_cfg["routine_recipients"]
+        }
+
+        if delivered >= all_expected:
+            st.session_state["routine_email_sent_cycle_v59"] = (
+                routine_cycle_key
             )
-        )
-        st.session_state["last_routine_email_error_v511"] = ""
-        st.success(
-            f"30-minute PDF emailed to {sent_count} recipient(s)."
-        )
+            st.session_state["last_routine_email_v59"] = (
+                datetime.now(IST).strftime(
+                    "%Y-%m-%d %H:%M:%S IST"
+                )
+            )
+            st.session_state["last_routine_email_error_v511"] = ""
+            st.success(
+                "30-minute PDF delivered individually to "
+                f"{len(delivered)} recipient(s)."
+            )
+        else:
+            failed_text = "; ".join(
+                f"{addr}: {err}"
+                for addr, err in delivery["failed"].items()
+            )
+            st.session_state["last_routine_email_error_v511"] = (
+                failed_text
+                or "Some recipients are still pending delivery."
+            )
+            st.warning(
+                "Routine email was only partially delivered. "
+                "Successful recipients will NOT be re-sent on retry. "
+                "The remaining recipient(s) will be retried in about "
+                "5 minutes. "
+                + (
+                    f"Details: {failed_text}"
+                    if failed_text
+                    else ""
+                )
+            )
     except Exception as exc:
         st.session_state["last_routine_email_error_v511"] = (
             f"{type(exc).__name__}: {exc}"
@@ -4011,8 +4117,34 @@ if (
             "analytical signals, not verified facts or probabilities."
         )
 
-        sent_count = send_email_message(
-            email_cfg["alert_recipients"],
+        # Reset per-recipient completion tracking for each new
+        # threshold-crossing alert event.
+        if (
+            st.session_state.get(
+                "alert_delivery_event_v512"
+            ) != pending_alert_event
+        ):
+            st.session_state["alert_delivery_event_v512"] = (
+                pending_alert_event
+            )
+            st.session_state["alert_delivered_v512"] = []
+
+        delivered = {
+            str(x).lower()
+            for x in st.session_state.get(
+                "alert_delivered_v512",
+                [],
+            )
+        }
+
+        pending_recipients = [
+            address
+            for address in email_cfg["alert_recipients"]
+            if address.lower() not in delivered
+        ]
+
+        delivery = send_email_message(
+            pending_recipients,
             alert_subject,
             alert_body,
             pdf_bytes=current_pdf,
@@ -4020,18 +4152,53 @@ if (
             extra_attachments=_current_evidence_attachments(),
         )
 
-        st.session_state["alert_email_sent_event_v59"] = (
-            pending_alert_event
+        delivered.update(
+            address.lower()
+            for address in delivery["sent"]
         )
-        st.session_state["last_alert_email_v59"] = (
-            datetime.now(IST).strftime(
-                "%Y-%m-%d %H:%M:%S IST"
+        st.session_state["alert_delivered_v512"] = sorted(
+            delivered
+        )
+
+        all_expected = {
+            address.lower()
+            for address in email_cfg["alert_recipients"]
+        }
+
+        if delivered >= all_expected:
+            st.session_state["alert_email_sent_event_v59"] = (
+                pending_alert_event
             )
-        )
-        st.session_state["last_alert_email_error_v511"] = ""
-        st.success(
-            f"Alert PDF emailed to {sent_count} alert recipient(s)."
-        )
+            st.session_state["last_alert_email_v59"] = (
+                datetime.now(IST).strftime(
+                    "%Y-%m-%d %H:%M:%S IST"
+                )
+            )
+            st.session_state["last_alert_email_error_v511"] = ""
+            st.success(
+                "Alert PDF delivered individually to "
+                f"{len(delivered)} alert recipient(s)."
+            )
+        else:
+            failed_text = "; ".join(
+                f"{addr}: {err}"
+                for addr, err in delivery["failed"].items()
+            )
+            st.session_state["last_alert_email_error_v511"] = (
+                failed_text
+                or "Some alert recipients are still pending delivery."
+            )
+            st.warning(
+                "Alert email was only partially delivered. "
+                "Successful recipients will NOT be re-sent on retry. "
+                "The remaining recipient(s) will be retried in about "
+                "5 minutes. "
+                + (
+                    f"Details: {failed_text}"
+                    if failed_text
+                    else ""
+                )
+            )
     except Exception as exc:
         st.session_state["last_alert_email_error_v511"] = (
             f"{type(exc).__name__}: {exc}"
@@ -4058,6 +4225,34 @@ with st.expander("Email delivery status"):
         ", ".join(email_cfg["alert_recipients"])
         if email_cfg["alert_recipients"]
         else "None configured",
+    )
+    st.write(
+        "Parsed routine recipient count:",
+        len(email_cfg["routine_recipients"]),
+    )
+    st.write(
+        "Routine recipients delivered in current slot:",
+        ", ".join(
+            st.session_state.get(
+                "routine_delivered_v512",
+                [],
+            )
+        )
+        or "None yet",
+    )
+    st.write(
+        "Parsed alert recipient count:",
+        len(email_cfg["alert_recipients"]),
+    )
+    st.write(
+        "Alert recipients delivered in current event:",
+        ", ".join(
+            st.session_state.get(
+                "alert_delivered_v512",
+                [],
+            )
+        )
+        or "None yet",
     )
     st.write(
         "Last 30-minute email:",
