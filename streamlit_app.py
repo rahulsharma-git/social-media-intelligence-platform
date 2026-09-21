@@ -8,6 +8,7 @@ import re
 import struct
 import wave
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -48,7 +49,9 @@ st.set_page_config(
 )
 
 st.title("📡 Social Media Intelligence Platform")
-st.caption("Build 5.7 Free Monitoring — 30-min automation + PDF charts + negativity alarm")
+st.caption("Build 5.8 Free Monitoring — auto PDF + IST timestamps")
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
 # =========================================================
@@ -113,7 +116,7 @@ def normalize_posts(df):
 
     result["timestamp"] = pd.to_datetime(
         result["timestamp"], errors="coerce", utc=True
-    )
+    ).dt.tz_convert(IST)
     result = result.dropna(subset=["timestamp", "username", "text"]).copy()
 
     for col in ["likes", "reposts", "replies", "followers"]:
@@ -953,7 +956,7 @@ def compute_negativity_history(dataframe, freq="30min"):
     work = dataframe.copy()
     work["timestamp"] = pd.to_datetime(
         work["timestamp"], errors="coerce", utc=True
-    )
+    ).dt.tz_convert(IST)
     work = work.dropna(subset=["timestamp"]).copy()
     if work.empty:
         return pd.DataFrame(columns=cols)
@@ -1038,7 +1041,7 @@ def _play_alarm_sound():
 
 def _record_monitor_snapshot(negative_pct):
     """Keep one in-session monitoring snapshot per 30-minute bucket."""
-    now = pd.Timestamp.now(tz="UTC")
+    now = pd.Timestamp.now(tz="Asia/Kolkata")
     bucket = now.floor("30min")
     history = st.session_state.get("monitor_snapshots_v57", [])
 
@@ -1123,7 +1126,7 @@ def _pdf_chart_negativity(dataframe, threshold=35.0):
         label=f"Alert threshold ({threshold:.0f}%)",
     )
     ax.set_ylim(0, 100)
-    ax.set_title("Historic negativity - 30 minute buckets")
+    ax.set_title("Historic negativity - 30 minute buckets (IST)")
     ax.set_ylabel("Negative share (%)")
     ax.tick_params(axis="x", rotation=30)
     ax.legend(loc="best", fontsize=8)
@@ -1543,7 +1546,7 @@ def build_pdf_report(report_df, narrative_df, trend_df, alert_threshold=35.0):
         story.append(tbl)
         story.append(Spacer(1, 5))
 
-    generated = datetime.now(timezone.utc)
+    generated = datetime.now(IST)
     x_df = report_df[
         report_df["platform"].isin(["x_manual", "x"])
     ].copy()
@@ -1574,7 +1577,7 @@ def build_pdf_report(report_df, narrative_df, trend_df, alert_threshold=35.0):
     )
     story.append(
         p(
-            f"Generated: {generated.strftime('%Y-%m-%d %H:%M UTC')} | "
+            f"Generated: {generated.strftime('%Y-%m-%d %H:%M:%S IST')} | "
             f"Total records: {len(report_df):,} | X records: {len(x_df):,} | "
             f"News records: {len(news_df):,}",
             small,
@@ -1816,7 +1819,7 @@ def build_pdf_report(report_df, narrative_df, trend_df, alert_threshold=35.0):
         x_rows = [
             [
                 p("#", table_head),
-                p("Time (UTC)", table_head),
+                p("Time (IST)", table_head),
                 p("User/source", table_head),
                 p("Cluster", table_head),
                 p("Sentiment", table_head),
@@ -1829,8 +1832,10 @@ def build_pdf_report(report_df, narrative_df, trend_df, alert_threshold=35.0):
             x_df.sort_values("timestamp", ascending=False).iterrows(),
             start=1,
         ):
-            timestamp = pd.to_datetime(row["timestamp"], utc=True).strftime(
-                "%Y-%m-%d %H:%M"
+            timestamp = (
+                pd.to_datetime(row["timestamp"], utc=True)
+                .tz_convert(IST)
+                .strftime("%Y-%m-%d %H:%M:%S IST")
             )
             x_rows.append(
                 [
@@ -1892,7 +1897,7 @@ def build_pdf_report(report_df, narrative_df, trend_df, alert_threshold=35.0):
             n_rows = [
                 [
                     p("#", table_head),
-                    p("Time (UTC)", table_head),
+                    p("Time (IST)", table_head),
                     p("Title", table_head),
                     p("Author", table_head),
                     p("Media agency/source", table_head),
@@ -1901,9 +1906,11 @@ def build_pdf_report(report_df, narrative_df, trend_df, alert_threshold=35.0):
             ]
 
             for idx_num, (_, row) in enumerate(subset.iterrows(), start=1):
-                timestamp = pd.to_datetime(
-                    row["timestamp"], utc=True
-                ).strftime("%Y-%m-%d %H:%M")
+                timestamp = (
+                    pd.to_datetime(row["timestamp"], utc=True)
+                    .tz_convert(IST)
+                    .strftime("%Y-%m-%d %H:%M:%S IST")
+                )
 
                 n_rows.append(
                     [
@@ -1994,6 +2001,30 @@ with st.sidebar:
     sound_alerts = st.toggle(
         "Enable sound alarm",
         value=True,
+    )
+
+    st.divider()
+    st.header("Automatic PDF")
+    auto_pdf = st.toggle(
+        "Auto-generate PDF every cycle",
+        value=True,
+        help=(
+            "Generates a fresh PDF automatically when the dataset changes "
+            "or the 30-minute monitoring cycle advances."
+        ),
+    )
+    auto_pdf_download = st.toggle(
+        "Attempt automatic browser download",
+        value=True,
+        help=(
+            "The app will attempt to start the PDF download automatically. "
+            "Some mobile/desktop browsers block downloads that were not "
+            "started by a user tap."
+        ),
+    )
+    st.caption(
+        "Automatic PDF generation is reliable. Automatic download to the "
+        "device depends on browser security settings."
     )
 
     if st.button("Test alarm sound", key="test_alarm_v57"):
@@ -2222,7 +2253,7 @@ if source_mode in [
         type="primary"
     )
 
-    now_epoch = datetime.now(timezone.utc).timestamp()
+    now_epoch = datetime.now(IST).timestamp()
     last_news_fetch = float(
         st.session_state.get("last_news_fetch_epoch_v57", 0.0)
     )
@@ -2242,7 +2273,7 @@ if source_mode in [
             st.session_state["news_provider"] = provider
             st.session_state["last_news_fetch_epoch_v57"] = now_epoch
             st.session_state["last_news_fetch_iso_v57"] = (
-                datetime.now(timezone.utc).isoformat()
+                datetime.now(IST).isoformat()
             )
             news_df = fetched
             if manual_news_fetch:
@@ -2636,7 +2667,7 @@ if len(neg_history):
         color="series",
         markers=True,
         hover_data={"records": True, "negative_pct": ":.1f"},
-        title="Historic negativity - 30 minute buckets",
+        title="Historic negativity - 30 minute buckets (IST)",
     )
     neg_fig.add_hline(
         y=alert_threshold,
@@ -3077,15 +3108,53 @@ with st.expander("📚 Legend & methodology — what the clusters, sentiment and
 
 
 
+
+def _attempt_browser_pdf_download(pdf_bytes, filename):
+    """
+    Attempt a zero-click browser download.
+    Browser security may block this, especially on mobile.
+    """
+    encoded = base64.b64encode(pdf_bytes).decode("ascii")
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", filename)
+    components.html(
+        f"""
+        <script>
+        (() => {{
+            try {{
+                const b64 = "{encoded}";
+                const binary = atob(b64);
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) {{
+                    bytes[i] = binary.charCodeAt(i);
+                }}
+                const blob = new Blob([bytes], {{type: "application/pdf"}});
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = "{safe_name}";
+                a.style.display = "none";
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                setTimeout(() => URL.revokeObjectURL(url), 5000);
+            }} catch (e) {{
+                console.log("Automatic PDF download was blocked:", e);
+            }}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
 # =========================================================
 # PDF REPORT DOWNLOAD
 # =========================================================
-st.subheader("📄 Download analytical PDF report")
+st.subheader("📄 Analytical PDF report")
 st.caption(
-    "The PDF uses all currently loaded records (before dashboard filters), "
-    "so its annexures are complete. It includes top positive/negative briefs, "
-    "charts, historic negativity, cluster legends, methodology, all X posts "
-    "analyzed, and all News items grouped by sentiment category."
+    "The report uses all currently loaded records before dashboard filters. "
+    "Build 5.8 generates it automatically when the dataset changes and on "
+    "each 30-minute monitoring cycle. All report timestamps are IST."
 )
 
 report_fingerprint = (
@@ -3095,28 +3164,71 @@ report_fingerprint = (
     f"{source_mode}|{alert_threshold}"
 )
 
+cycle_key = (
+    f"{report_fingerprint}|cycle={refresh_tick}"
+    if auto_monitor
+    else report_fingerprint
+)
+
+def _make_report_now():
+    report_bytes = build_pdf_report(
+        df,
+        narratives_df,
+        trend_df,
+        alert_threshold=alert_threshold,
+    )
+    report_name = (
+        "social_media_intelligence_report_"
+        + datetime.now(IST).strftime("%Y%m%d_%H%M%S_IST")
+        + ".pdf"
+    )
+    st.session_state["pdf_report_v58"] = report_bytes
+    st.session_state["pdf_report_fp_v58"] = report_fingerprint
+    st.session_state["pdf_report_cycle_v58"] = cycle_key
+    st.session_state["pdf_report_name_v58"] = report_name
+    st.session_state["pdf_report_generated_v58"] = (
+        datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+    )
+    return report_bytes, report_name
+
+
+# Automatic generation: once per dataset/cycle, not on every widget rerun.
+if auto_pdf and st.session_state.get("pdf_report_cycle_v58") != cycle_key:
+    try:
+        with st.spinner("Automatically building the latest PDF report..."):
+            auto_bytes, auto_name = _make_report_now()
+
+        if auto_pdf_download:
+            _attempt_browser_pdf_download(auto_bytes, auto_name)
+
+        st.success(
+            "Latest PDF generated automatically at "
+            + st.session_state["pdf_report_generated_v58"]
+            + "."
+        )
+    except Exception as exc:
+        st.error(
+            "Automatic PDF generation failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+
+# Manual regeneration remains available as a fallback.
 if st.button(
-    "Generate PDF report",
-    type="primary",
-    key="generate_pdf_v56",
+    "Regenerate PDF now",
+    key="regenerate_pdf_v58",
 ):
     try:
         with st.spinner("Building PDF report..."):
-            report_bytes = build_pdf_report(
-                df,
-                narratives_df,
-                trend_df,
-                alert_threshold=alert_threshold,
-            )
-        st.session_state["pdf_report_v56"] = report_bytes
-        st.session_state["pdf_report_fp_v56"] = report_fingerprint
-        st.session_state["pdf_report_name_v56"] = (
-            "social_media_intelligence_report_"
-            + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
-            + ".pdf"
-        )
+            manual_bytes, manual_name = _make_report_now()
+
+        if auto_pdf_download:
+            _attempt_browser_pdf_download(manual_bytes, manual_name)
+
         st.success(
-            "PDF report generated. Use the download button below."
+            "PDF regenerated at "
+            + st.session_state["pdf_report_generated_v58"]
+            + "."
         )
     except Exception as exc:
         st.error(
@@ -3124,29 +3236,37 @@ if st.button(
             f"{type(exc).__name__}: {exc}"
         )
 
+
 if (
-    st.session_state.get("pdf_report_v56")
-    and st.session_state.get("pdf_report_fp_v56")
-    == report_fingerprint
+    st.session_state.get("pdf_report_v58")
+    and st.session_state.get("pdf_report_fp_v58") == report_fingerprint
 ):
+    generated_at = st.session_state.get(
+        "pdf_report_generated_v58",
+        "unknown time",
+    )
+    st.info(
+        f"Latest report ready · generated {generated_at}. "
+        "If your browser blocked the automatic download, use the button below."
+    )
+
     st.download_button(
-        "⬇️ Download PDF report",
-        data=st.session_state["pdf_report_v56"],
+        "⬇️ Download latest PDF report",
+        data=st.session_state["pdf_report_v58"],
         file_name=st.session_state.get(
-            "pdf_report_name_v56",
-            "social_media_intelligence_report.pdf",
+            "pdf_report_name_v58",
+            "social_media_intelligence_report_IST.pdf",
         ),
         mime="application/pdf",
-        key="download_pdf_v56",
+        key="download_pdf_v58",
     )
-elif st.session_state.get("pdf_report_v56"):
+else:
     st.info(
-        "The loaded dataset changed after the previous PDF was generated. "
-        "Tap **Generate PDF report** again."
+        "The PDF will be generated automatically when analyzed data is available."
     )
 
 
-st.subheader("Record explorer")
+st.subheader("Record explorer — timestamps in IST")
 
 display_cols = [
     "timestamp",
