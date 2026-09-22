@@ -46,16 +46,30 @@ from reportlab.platypus import (
 from xml.sax.saxutils import escape
 
 
-st.set_page_config(
-    page_title="Social Media Intelligence",
-    page_icon="📡",
-    layout="wide",
-)
+if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
+    st.set_page_config(
+        page_title="Social Media Intelligence",
+        page_icon="📡",
+        layout="wide",
+    )
 
-st.title("📡 Social Media Intelligence Platform")
-st.caption("Build 5.11 Free Monitoring — reliable IST slot scheduler + email retry")
+    st.title("📡 Social Media Intelligence Platform")
+    st.caption(
+        "Build 5.13 / Build 13 — GitHub background scheduler + "
+        "consistent sentiment colors"
+    )
 
 IST = ZoneInfo("Asia/Kolkata")
+
+# User-defined sentiment palette used consistently in dashboard + PDF.
+POSITIVE_BLUE = "#1f77b4"
+NEGATIVE_RED = "#d62728"
+NEUTRAL_GREY = "#9e9e9e"
+SENTIMENT_COLORS = {
+    "Positive": POSITIVE_BLUE,
+    "Negative": NEGATIVE_RED,
+    "Neutral": NEUTRAL_GREY,
+}
 
 
 # =========================================================
@@ -529,6 +543,47 @@ def save_posts_to_supabase(df):
     )
     response.raise_for_status()
     return len(records)
+
+
+
+
+def load_background_monitoring_runs(limit=336):
+    """Load browser-independent GitHub Actions monitoring history from Supabase."""
+    if not supabase_enabled():
+        return pd.DataFrame()
+
+    url, _ = get_supabase_config()
+    response = requests.get(
+        f"{url}/rest/v1/monitoring_runs",
+        headers=supabase_headers(),
+        params={
+            "select": (
+                "slot_key,run_timestamp,source_records,x_records,news_records,"
+                "positive_pct,neutral_pct,negative_pct,alert_threshold,"
+                "alert_triggered,pdf_filename,routine_email_sent,"
+                "alert_email_sent,status,error"
+            ),
+            "order": "run_timestamp.desc",
+            "limit": str(int(max(1, min(2000, limit)))),
+        },
+        timeout=20,
+    )
+
+    # Table is optional until supabase_build513.sql has been run.
+    if response.status_code in (404, 400):
+        return pd.DataFrame()
+    response.raise_for_status()
+
+    payload = response.json() or []
+    if not payload:
+        return pd.DataFrame()
+
+    frame = pd.DataFrame(payload)
+    frame["run_timestamp"] = pd.to_datetime(
+        frame["run_timestamp"], errors="coerce", utc=True
+    ).dt.tz_convert(IST)
+    frame = frame.dropna(subset=["run_timestamp"]).copy()
+    return frame.sort_values("run_timestamp").reset_index(drop=True)
 
 
 # =========================================================
@@ -1290,7 +1345,11 @@ def _pdf_chart_sentiment(dataframe):
         .reindex(["Positive", "Neutral", "Negative"], fill_value=0)
     )
     fig, ax = plt.subplots(figsize=(7.4, 3.4))
-    ax.bar(counts.index, counts.values)
+    ax.bar(
+        counts.index,
+        counts.values,
+        color=[SENTIMENT_COLORS[label] for label in counts.index],
+    )
     ax.set_title("Sentiment distribution")
     ax.set_ylabel("Records")
     ax.grid(axis="y", alpha=0.2)
@@ -1321,16 +1380,21 @@ def _pdf_chart_negativity(dataframe, threshold=35.0):
     if hist.empty:
         return None
     fig, ax = plt.subplots(figsize=(7.4, 3.5))
-    for label, group in hist.groupby("series"):
+    line_styles = ["-", "--", ":", "-."]
+    marker_styles = ["o", "s", "^", "D"]
+    for idx, (label, group) in enumerate(hist.groupby("series")):
         ax.plot(
             group["bucket"],
             group["negative_pct"],
-            marker="o",
+            marker=marker_styles[idx % len(marker_styles)],
+            linestyle=line_styles[idx % len(line_styles)],
+            color=NEGATIVE_RED,
             label=label,
         )
     ax.axhline(
         threshold,
         linestyle="--",
+        color=NEUTRAL_GREY,
         label=f"Alert threshold ({threshold:.0f}%)",
     )
     ax.set_ylim(0, 100)
@@ -1378,7 +1442,11 @@ def _pdf_chart_cluster_negativity(dataframe):
     if stats.empty:
         return None
     fig, ax = plt.subplots(figsize=(7.4, 3.4))
-    ax.bar([f"C{x}" for x in stats.index], stats.values)
+    ax.bar(
+        [f"C{x}" for x in stats.index],
+        stats.values,
+        color=NEGATIVE_RED,
+    )
     ax.set_ylim(0, 100)
     ax.set_title("Negative share by semantic cluster")
     ax.set_ylabel("Negative share (%)")
@@ -1410,7 +1478,13 @@ def _pdf_chart_platform_sentiment(dataframe):
     x = np.arange(len(table.index))
     for col in table.columns:
         vals = table[col].to_numpy()
-        ax.bar(x, vals, bottom=bottom, label=col)
+        ax.bar(
+            x,
+            vals,
+            bottom=bottom,
+            label=col,
+            color=SENTIMENT_COLORS.get(col, NEUTRAL_GREY),
+        )
         bottom += vals
     ax.set_xticks(x)
     ax.set_xticklabels(table.index)
@@ -2277,9 +2351,9 @@ def build_pdf_report(report_df, narrative_df, trend_df, alert_threshold=35.0):
         ),
         (
             "Automatic monitoring",
-            "When enabled, the active Streamlit session refreshes every 30 minutes. "
-            "News is refreshed automatically; CSV data is re-analysed; Supabase is reloaded. "
-            "Streamlit Community Cloud may sleep when no session is active, so this is not a guaranteed 24/7 scheduler."
+            "Build 5.13 supports a browser-independent GitHub Actions worker every 30 minutes. "
+            "It can reload Supabase, refresh free News, run analysis, generate the PDF and email it even when Chrome is minimized or closed. "
+            "The Streamlit browser heartbeat remains only as an optional fallback."
         ),
         (
             "Negativity alert",
@@ -2459,2044 +2533,2117 @@ def build_pdf_report(report_df, narrative_df, trend_df, alert_threshold=35.0):
     return buffer.getvalue()
 
 
-# =========================================================
-# DATA SOURCE UI
-# =========================================================
-with st.sidebar:
-    st.header("Data source")
+if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
+    # =========================================================
+    # DATA SOURCE UI
+    # =========================================================
+    with st.sidebar:
+        st.header("Data source")
 
-    source_mode = st.radio(
-        "Choose source",
-        [
-            "CSV / manual X posts",
-            "Free web/news",
-            "Combine CSV + web/news",
-            "Supabase database",
-            "Demo sample",
-        ],
-    )
-
-    st.divider()
-    st.header("30-minute monitoring")
-    auto_monitor = st.toggle(
-        "Auto refresh every 30 minutes",
-        value=True,
-        help=(
-            "Re-runs the active app session every 30 minutes. "
-            "News is fetched again automatically when News is selected."
-        ),
-    )
-    alert_threshold = st.slider(
-        "Negativity alarm threshold (%)",
-        min_value=10,
-        max_value=90,
-        value=35,
-        step=5,
-    )
-    sound_alerts = st.toggle(
-        "Enable sound alarm",
-        value=True,
-    )
-
-    st.divider()
-    st.header("Automatic PDF")
-    auto_pdf = st.toggle(
-        "Auto-generate PDF every cycle",
-        value=True,
-        help=(
-            "Generates a fresh PDF automatically when the dataset changes "
-            "or the 30-minute monitoring cycle advances."
-        ),
-    )
-    auto_pdf_download = st.toggle(
-        "Attempt automatic browser download",
-        value=True,
-        help=(
-            "The app will attempt to start the PDF download automatically. "
-            "Some mobile/desktop browsers block downloads that were not "
-            "started by a user tap."
-        ),
-    )
-    st.caption(
-        "Automatic PDF generation is reliable. Automatic download to the "
-        "device depends on browser security settings."
-    )
-
-    news_evidence_zip_enabled = st.toggle(
-        "Create Web News evidence ZIP",
-        value=True,
-        help=(
-            "Creates one numbered evidence-sheet PDF for every web_news "
-            "record plus a manifest.csv. The ZIP is attached to both "
-            "routine and alert emails."
-        ),
-    )
-    st.caption(
-        "Evidence PDFs document feed headlines/metadata and analysis. "
-        "They do not reproduce full publisher articles."
-    )
-
-    st.divider()
-    st.header("Automatic email")
-
-    email_cfg = get_email_config()
-
-    routine_email_enabled = st.toggle(
-        "Email PDF every 30 minutes",
-        value=bool(email_cfg["routine_recipients"]),
-        help=(
-            "Sends the generated PDF to REPORT_RECIPIENTS_30MIN at fixed "
-            "IST half-hour slots (:00 and :30) while the app is awake. "
-            "Failed sends retry every ~5 minutes within the slot."
-        ),
-    )
-
-    alert_email_enabled = st.toggle(
-        "Email PDF only on negativity alert",
-        value=bool(email_cfg["alert_recipients"]),
-        help=(
-            "Sends an alert PDF only when negativity crosses upward "
-            "through the configured threshold."
-        ),
-    )
-
-    st.caption(
-        f"30-min recipients: {len(email_cfg['routine_recipients'])} · "
-        f"Alert-only recipients: {len(email_cfg['alert_recipients'])}"
-    )
-    st.caption(
-        "Build 5.12 sends a separate Gmail message to each recipient "
-        "and tracks delivery independently."
-    )
-
-    if not smtp_configured():
-        st.warning(
-            "Email sender is not configured. Add SMTP_EMAIL and "
-            "SMTP_APP_PASSWORD in Streamlit Secrets."
+        source_mode = st.radio(
+            "Choose source",
+            [
+                "CSV / manual X posts",
+                "Free web/news",
+                "Combine CSV + web/news",
+                "Supabase database",
+                "Demo sample",
+            ],
         )
 
-    if routine_email_enabled and not email_cfg["routine_recipients"]:
-        st.warning(
-            "REPORT_RECIPIENTS_30MIN is empty."
+        st.divider()
+        st.header("30-minute monitoring")
+        st.success(
+            "Primary scheduler in Build 5.13: GitHub Actions background worker. "
+            "It does not depend on Chrome staying active."
+        )
+        auto_monitor = st.toggle(
+            "Browser fallback auto-refresh",
+            value=False,
+            help=(
+                "Optional fallback only. The browser-based timer stops when the "
+                "session sleeps; use the included GitHub Actions workflow for "
+                "reliable background execution."
+            ),
+        )
+        alert_threshold = st.slider(
+            "Negativity alarm threshold (%)",
+            min_value=10,
+            max_value=90,
+            value=35,
+            step=5,
+        )
+        sound_alerts = st.toggle(
+            "Enable sound alarm",
+            value=True,
         )
 
-    if alert_email_enabled and not email_cfg["alert_recipients"]:
-        st.warning(
-            "ALERT_RECIPIENTS is empty."
+        st.divider()
+        st.header("Automatic PDF")
+        auto_pdf = st.toggle(
+            "Auto-generate PDF every cycle",
+            value=True,
+            help=(
+                "Generates a fresh PDF automatically when the dataset changes "
+                "or the 30-minute monitoring cycle advances."
+            ),
         )
-
-    if st.button("Test alarm sound", key="test_alarm_v57"):
-        _play_alarm_sound()
-        st.caption("Alarm test sent to the browser.")
-
-    # Build 5.11 uses a short heartbeat but schedules work by fixed
-    # India Standard Time half-hour slots (:00 and :30). This avoids the
-    # drift caused by scheduling from the moment the browser session opened.
-    scheduler_now_ist = datetime.now(IST)
-    monitor_slot_start = scheduler_now_ist.replace(
-        minute=(scheduler_now_ist.minute // 30) * 30,
-        second=0,
-        microsecond=0,
-    )
-    monitor_slot_end = monitor_slot_start + timedelta(minutes=30)
-    monitor_slot_key = monitor_slot_start.strftime("%Y%m%d_%H%M_IST")
-
-    if auto_monitor:
-        refresh_tick = st_autorefresh(
-            interval=60 * 1000,
-            limit=None,
-            key="monitor_heartbeat_v511",
+        auto_pdf_download = st.toggle(
+            "Attempt automatic browser download",
+            value=True,
+            help=(
+                "The app will attempt to start the PDF download automatically. "
+                "Some mobile/desktop browsers block downloads that were not "
+                "started by a user tap."
+            ),
         )
         st.caption(
-            "Scheduler heartbeat: every 60 seconds · "
-            f"current slot {monitor_slot_start.strftime('%H:%M')}–"
-            f"{monitor_slot_end.strftime('%H:%M')} IST · "
-            f"next scheduled slot {monitor_slot_end.strftime('%H:%M')} IST."
-        )
-    else:
-        refresh_tick = 0
-
-    st.caption(
-        "The 60-second heartbeat improves timing and retry behavior while the "
-        "app is awake. Streamlit Community Cloud can still sleep an inactive "
-        "app, so this in-app scheduler is not a guaranteed 24/7 background job."
-    )
-
-
-csv_df = pd.DataFrame(columns=STANDARD_COLUMNS)
-news_df = st.session_state.get(
-    "gdelt_posts",
-    pd.DataFrame(columns=STANDARD_COLUMNS)
-)
-
-
-# ---------- CSV controls ----------
-if source_mode in [
-    "CSV / manual X posts",
-    "Combine CSV + web/news",
-]:
-    st.subheader("Option A — X / CSV")
-    st.caption(
-        "Build 5.4 uses an explicit Load & analyze step and stores the "
-        "validated CSV in session state, so mobile browser reruns cannot lose it."
-    )
-
-    st.download_button(
-        "Download CSV template",
-        data=CSV_TEMPLATE,
-        file_name="isro_x_template.csv",
-        mime="text/csv",
-    )
-
-    uploaded = st.file_uploader(
-        "Choose X CSV file",
-        type=["csv"],
-        key="x_csv_upload_v54",
-    )
-
-    c_load, c_test, c_clear = st.columns(3)
-
-    with c_load:
-        load_clicked = st.button(
-            "Load & analyze CSV",
-            type="primary",
-            key="load_csv_v54",
-            disabled=(uploaded is None),
+            "Automatic PDF generation is reliable. Automatic download to the "
+            "device depends on browser security settings."
         )
 
-    with c_test:
-        test_clicked = st.button(
-            "Test built-in CSV",
-            key="test_csv_v54",
+        news_evidence_zip_enabled = st.toggle(
+            "Create Web News evidence ZIP",
+            value=True,
+            help=(
+                "Creates one numbered evidence-sheet PDF for every web_news "
+                "record plus a manifest.csv. The ZIP is attached to both "
+                "routine and alert emails."
+            ),
+        )
+        st.caption(
+            "Evidence PDFs document feed headlines/metadata and analysis. "
+            "They do not reproduce full publisher articles."
         )
 
-    with c_clear:
-        clear_clicked = st.button(
-            "Clear CSV",
-            key="clear_csv_v54",
+        st.divider()
+        st.header("Automatic email")
+
+        email_cfg = get_email_config()
+
+        routine_email_enabled = st.toggle(
+            "In-app email fallback every 30 minutes",
+            value=False,
+            help=(
+                "Optional browser-session fallback. The GitHub Actions worker "
+                "is the recommended 30-minute email scheduler in Build 5.13."
+            ),
         )
 
-    if clear_clicked:
-        st.session_state.pop("active_csv_df_v54", None)
-        st.session_state.pop("active_csv_name_v54", None)
-        st.session_state.pop("active_csv_error_v54", None)
+        alert_email_enabled = st.toggle(
+            "In-app alert email fallback",
+            value=False,
+            help=(
+                "Sends an alert PDF only when negativity crosses upward "
+                "through the configured threshold."
+            ),
+        )
 
-    if test_clicked:
-        try:
-            test_raw = pd.read_csv(io.StringIO(BUILTIN_ISRO_SAMPLE))
-            test_norm = normalize_posts(test_raw)
-            st.session_state["active_csv_df_v54"] = test_norm
-            st.session_state["active_csv_name_v54"] = "built-in ISRO test CSV"
-            st.session_state.pop("active_csv_error_v54", None)
-        except Exception as exc:
-            st.session_state["active_csv_error_v54"] = (
-                f"{type(exc).__name__}: {exc}"
+        st.caption(
+            f"30-min recipients: {len(email_cfg['routine_recipients'])} · "
+            f"Alert-only recipients: {len(email_cfg['alert_recipients'])}"
+        )
+        st.caption(
+            "Build 5.13 keeps these in-app controls only as fallback. "
+            "Background emails are sent by GitHub Actions using GitHub Secrets."
+        )
+
+        if not smtp_configured():
+            st.warning(
+                "Email sender is not configured. Add SMTP_EMAIL and "
+                "SMTP_APP_PASSWORD in Streamlit Secrets."
             )
 
-    if load_clicked and uploaded is not None:
-        try:
-            upload_bytes = uploaded.getvalue()
-            if not upload_bytes:
-                raise ValueError("Uploaded file is empty.")
-
-            # utf-8-sig handles both normal UTF-8 and BOM CSV exports.
-            incoming = pd.read_csv(
-                io.BytesIO(upload_bytes),
-                encoding="utf-8-sig",
+        if routine_email_enabled and not email_cfg["routine_recipients"]:
+            st.warning(
+                "REPORT_RECIPIENTS_30MIN is empty."
             )
 
-            required = {"timestamp", "username", "text"}
-            incoming_cols = {
-                str(c).strip().lower()
-                for c in incoming.columns
-            }
-            missing = required - incoming_cols
-            if missing:
-                raise ValueError(
-                    "Missing required column(s): "
-                    + ", ".join(sorted(missing))
-                )
-
-            normalized = normalize_posts(incoming)
-
-            if normalized.empty:
-                raise ValueError(
-                    "The CSV was read but no valid rows remained after validation."
-                )
-
-            st.session_state["active_csv_df_v54"] = normalized
-            st.session_state["active_csv_name_v54"] = uploaded.name
-            st.session_state.pop("active_csv_error_v54", None)
-
-        except Exception as exc:
-            st.session_state["active_csv_error_v54"] = (
-                f"{type(exc).__name__}: {exc}"
+        if alert_email_enabled and not email_cfg["alert_recipients"]:
+            st.warning(
+                "ALERT_RECIPIENTS is empty."
             )
 
-    if st.session_state.get("active_csv_error_v54"):
-        st.error(
-            "CSV load failed: "
-            + st.session_state["active_csv_error_v54"]
+        if st.button("Test alarm sound", key="test_alarm_v57"):
+            _play_alarm_sound()
+            st.caption("Alarm test sent to the browser.")
+
+        # Build 5.11 uses a short heartbeat but schedules work by fixed
+        # India Standard Time half-hour slots (:00 and :30). This avoids the
+        # drift caused by scheduling from the moment the browser session opened.
+        scheduler_now_ist = datetime.now(IST)
+        monitor_slot_start = scheduler_now_ist.replace(
+            minute=(scheduler_now_ist.minute // 30) * 30,
+            second=0,
+            microsecond=0,
         )
+        monitor_slot_end = monitor_slot_start + timedelta(minutes=30)
+        monitor_slot_key = monitor_slot_start.strftime("%Y%m%d_%H%M_IST")
 
-    csv_df = st.session_state.get(
-        "active_csv_df_v54",
-        pd.DataFrame(columns=STANDARD_COLUMNS),
-    )
+        if auto_monitor:
+            refresh_tick = st_autorefresh(
+                interval=60 * 1000,
+                limit=None,
+                key="monitor_heartbeat_v511",
+            )
+            st.caption(
+                "Scheduler heartbeat: every 60 seconds · "
+                f"current slot {monitor_slot_start.strftime('%H:%M')}–"
+                f"{monitor_slot_end.strftime('%H:%M')} IST · "
+                f"next scheduled slot {monitor_slot_end.strftime('%H:%M')} IST."
+            )
+        else:
+            refresh_tick = 0
 
-    if len(csv_df):
-        csv_name = st.session_state.get(
-            "active_csv_name_v54",
-            "CSV dataset",
-        )
-
-        st.success(
-            f"✅ ACTIVE X/CSV DATASET: {csv_name} · "
-            f"{len(csv_df):,} valid records"
-        )
-
-        d1, d2, d3, d4 = st.columns(4)
-        d1.metric("Rows", f"{len(csv_df):,}")
-        d2.metric("Likes", f"{int(csv_df['likes'].sum()):,}")
-        d3.metric("Reposts", f"{int(csv_df['reposts'].sum()):,}")
-        d4.metric("Replies", f"{int(csv_df['replies'].sum()):,}")
-
-        st.dataframe(
-            csv_df[
-                [
-                    "timestamp",
-                    "username",
-                    "text",
-                    "likes",
-                    "reposts",
-                    "replies",
-                    "platform",
-                ]
-            ].head(12),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        st.info(
-            "This CSV is now locked into the app session and will feed "
-            "the intelligence dashboard below until you tap Clear CSV."
-        )
-    else:
-        st.info(
-            "Choose a file and tap **Load & analyze CSV**, "
-            "or tap **Test built-in CSV** to verify the CSV pipeline."
+        st.caption(
+            "The 60-second heartbeat improves timing and retry behavior while the "
+            "app is awake. Streamlit Community Cloud can still sleep an inactive "
+            "app, so this in-app scheduler is not a guaranteed 24/7 background job."
         )
 
 
-# ---------- GDELT controls ----------
-if source_mode in [
-    "Free web/news",
-    "Combine CSV + web/news",
-]:
-    st.subheader("Option B — Free web/news")
-    st.caption("Uses GDELT first and automatically falls back to Google News RSS if rate-limited.")
-
-    query = st.text_input(
-        "News query",
-        value='(ISRO OR "Indian Space Research Organisation")',
-    )
-
-    period_label = st.selectbox(
-        "Look-back period",
-        ["24 hours", "7 days", "1 month"],
-        index=1,
-    )
-
-    timespan_map = {
-        "24 hours": "24h",
-        "7 days": "1week",
-        "1 month": "1month",
-    }
-
-    max_records = st.slider(
-        "News items",
-        min_value=10,
-        max_value=100,
-        value=50,
-        step=10,
-    )
-
-    manual_news_fetch = st.button(
-        "Fetch free news",
-        type="primary"
-    )
-
-    now_epoch = datetime.now(IST).timestamp()
-    last_news_fetch = float(
-        st.session_state.get("last_news_fetch_epoch_v57", 0.0)
-    )
-    last_news_slot = st.session_state.get(
-        "last_news_fetch_slot_v511", ""
-    )
-    last_news_attempt = float(
-        st.session_state.get("last_news_attempt_epoch_v511", 0.0)
-    )
-    news_retry_ready = (now_epoch - last_news_attempt) >= 5 * 60
-    auto_news_due = (
-        auto_monitor
-        and last_news_slot != monitor_slot_key
-        and news_retry_ready
-    )
-
-    if manual_news_fetch or auto_news_due:
-        st.session_state["last_news_attempt_epoch_v511"] = now_epoch
-        try:
-            fetched, provider = fetch_free_news(
-                query=query,
-                timespan=timespan_map[period_label],
-                max_records=max_records,
-            )
-            st.session_state["gdelt_posts"] = fetched
-            st.session_state["news_provider"] = provider
-            st.session_state["last_news_fetch_epoch_v57"] = now_epoch
-            st.session_state["last_news_fetch_iso_v57"] = (
-                datetime.now(IST).isoformat()
-            )
-            st.session_state["last_news_fetch_slot_v511"] = monitor_slot_key
-            st.session_state["last_news_fetch_error_v511"] = ""
-            news_df = fetched
-            if manual_news_fetch:
-                st.success(
-                    f"Fetched {len(fetched):,} news items via {provider}."
-                )
-            else:
-                st.success(
-                    f"30-minute auto refresh fetched {len(fetched):,} "
-                    f"news items via {provider}."
-                )
-        except Exception as exc:
-            # Do not mark the half-hour slot as successfully refreshed.
-            # The 60-second heartbeat will retry after the 5-minute cooldown.
-            st.session_state["last_news_fetch_error_v511"] = (
-                f"{type(exc).__name__}: {exc}"
-            )
-            st.error(
-                "News refresh failed; cached news will be used for this run. "
-                "Automatic retry is scheduled in about 5 minutes. "
-                f"Technical detail: {type(exc).__name__}: {exc}"
-            )
-
+    csv_df = pd.DataFrame(columns=STANDARD_COLUMNS)
     news_df = st.session_state.get(
         "gdelt_posts",
         pd.DataFrame(columns=STANDARD_COLUMNS)
     )
 
-    if len(news_df):
-        provider = st.session_state.get("news_provider", "Free news source")
-        last_iso = st.session_state.get("last_news_fetch_iso_v57", "")
-        refresh_note = f" · refreshed {last_iso}" if last_iso else ""
-        st.info(
-            f"Current news dataset: {len(news_df):,} items · "
-            f"Source: {provider}{refresh_note}"
+
+    # ---------- CSV controls ----------
+    if source_mode in [
+        "CSV / manual X posts",
+        "Combine CSV + web/news",
+    ]:
+        st.subheader("Option A — X / CSV")
+        st.caption(
+            "Build 5.4 uses an explicit Load & analyze step and stores the "
+            "validated CSV in session state, so mobile browser reruns cannot lose it."
         )
 
-
-# ---------- Build raw dataset ----------
-if source_mode == "CSV / manual X posts":
-    raw_df = csv_df
-
-elif source_mode == "Free web/news":
-    raw_df = news_df
-
-elif source_mode == "Combine CSV + web/news":
-    raw_df = normalize_posts(
-        pd.concat(
-            [csv_df, news_df],
-            ignore_index=True
+        st.download_button(
+            "Download CSV template",
+            data=CSV_TEMPLATE,
+            file_name="isro_x_template.csv",
+            mime="text/csv",
         )
-    )
 
-elif source_mode == "Supabase database":
-    if not supabase_enabled():
-        st.warning(
-            "Supabase secrets are not configured."
+        uploaded = st.file_uploader(
+            "Choose X CSV file",
+            type=["csv"],
+            key="x_csv_upload_v54",
         )
-        raw_df = pd.DataFrame(
-            columns=STANDARD_COLUMNS
-        )
-    else:
-        try:
-            raw_df = load_supabase_posts()
-            st.success(
-                f"Loaded {len(raw_df):,} stored records."
+
+        c_load, c_test, c_clear = st.columns(3)
+
+        with c_load:
+            load_clicked = st.button(
+                "Load & analyze CSV",
+                type="primary",
+                key="load_csv_v54",
+                disabled=(uploaded is None),
             )
-        except Exception as exc:
+
+        with c_test:
+            test_clicked = st.button(
+                "Test built-in CSV",
+                key="test_csv_v54",
+            )
+
+        with c_clear:
+            clear_clicked = st.button(
+                "Clear CSV",
+                key="clear_csv_v54",
+            )
+
+        if clear_clicked:
+            st.session_state.pop("active_csv_df_v54", None)
+            st.session_state.pop("active_csv_name_v54", None)
+            st.session_state.pop("active_csv_error_v54", None)
+
+        if test_clicked:
+            try:
+                test_raw = pd.read_csv(io.StringIO(BUILTIN_ISRO_SAMPLE))
+                test_norm = normalize_posts(test_raw)
+                st.session_state["active_csv_df_v54"] = test_norm
+                st.session_state["active_csv_name_v54"] = "built-in ISRO test CSV"
+                st.session_state.pop("active_csv_error_v54", None)
+            except Exception as exc:
+                st.session_state["active_csv_error_v54"] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+        if load_clicked and uploaded is not None:
+            try:
+                upload_bytes = uploaded.getvalue()
+                if not upload_bytes:
+                    raise ValueError("Uploaded file is empty.")
+
+                # utf-8-sig handles both normal UTF-8 and BOM CSV exports.
+                incoming = pd.read_csv(
+                    io.BytesIO(upload_bytes),
+                    encoding="utf-8-sig",
+                )
+
+                required = {"timestamp", "username", "text"}
+                incoming_cols = {
+                    str(c).strip().lower()
+                    for c in incoming.columns
+                }
+                missing = required - incoming_cols
+                if missing:
+                    raise ValueError(
+                        "Missing required column(s): "
+                        + ", ".join(sorted(missing))
+                    )
+
+                normalized = normalize_posts(incoming)
+
+                if normalized.empty:
+                    raise ValueError(
+                        "The CSV was read but no valid rows remained after validation."
+                    )
+
+                st.session_state["active_csv_df_v54"] = normalized
+                st.session_state["active_csv_name_v54"] = uploaded.name
+                st.session_state.pop("active_csv_error_v54", None)
+
+            except Exception as exc:
+                st.session_state["active_csv_error_v54"] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+        if st.session_state.get("active_csv_error_v54"):
             st.error(
-                f"Could not load Supabase: {exc}"
+                "CSV load failed: "
+                + st.session_state["active_csv_error_v54"]
+            )
+
+        csv_df = st.session_state.get(
+            "active_csv_df_v54",
+            pd.DataFrame(columns=STANDARD_COLUMNS),
+        )
+
+        if len(csv_df):
+            csv_name = st.session_state.get(
+                "active_csv_name_v54",
+                "CSV dataset",
+            )
+
+            st.success(
+                f"✅ ACTIVE X/CSV DATASET: {csv_name} · "
+                f"{len(csv_df):,} valid records"
+            )
+
+            d1, d2, d3, d4 = st.columns(4)
+            d1.metric("Rows", f"{len(csv_df):,}")
+            d2.metric("Likes", f"{int(csv_df['likes'].sum()):,}")
+            d3.metric("Reposts", f"{int(csv_df['reposts'].sum()):,}")
+            d4.metric("Replies", f"{int(csv_df['replies'].sum()):,}")
+
+            st.dataframe(
+                csv_df[
+                    [
+                        "timestamp",
+                        "username",
+                        "text",
+                        "likes",
+                        "reposts",
+                        "replies",
+                        "platform",
+                    ]
+                ].head(12),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.info(
+                "This CSV is now locked into the app session and will feed "
+                "the intelligence dashboard below until you tap Clear CSV."
+            )
+        else:
+            st.info(
+                "Choose a file and tap **Load & analyze CSV**, "
+                "or tap **Test built-in CSV** to verify the CSV pipeline."
+            )
+
+
+    # ---------- GDELT controls ----------
+    if source_mode in [
+        "Free web/news",
+        "Combine CSV + web/news",
+    ]:
+        st.subheader("Option B — Free web/news")
+        st.caption("Uses GDELT first and automatically falls back to Google News RSS if rate-limited.")
+
+        query = st.text_input(
+            "News query",
+            value='(ISRO OR "Indian Space Research Organisation")',
+        )
+
+        period_label = st.selectbox(
+            "Look-back period",
+            ["24 hours", "7 days", "1 month"],
+            index=1,
+        )
+
+        timespan_map = {
+            "24 hours": "24h",
+            "7 days": "1week",
+            "1 month": "1month",
+        }
+
+        max_records = st.slider(
+            "News items",
+            min_value=10,
+            max_value=100,
+            value=50,
+            step=10,
+        )
+
+        manual_news_fetch = st.button(
+            "Fetch free news",
+            type="primary"
+        )
+
+        now_epoch = datetime.now(IST).timestamp()
+        last_news_fetch = float(
+            st.session_state.get("last_news_fetch_epoch_v57", 0.0)
+        )
+        last_news_slot = st.session_state.get(
+            "last_news_fetch_slot_v511", ""
+        )
+        last_news_attempt = float(
+            st.session_state.get("last_news_attempt_epoch_v511", 0.0)
+        )
+        news_retry_ready = (now_epoch - last_news_attempt) >= 5 * 60
+        auto_news_due = (
+            auto_monitor
+            and last_news_slot != monitor_slot_key
+            and news_retry_ready
+        )
+
+        if manual_news_fetch or auto_news_due:
+            st.session_state["last_news_attempt_epoch_v511"] = now_epoch
+            try:
+                fetched, provider = fetch_free_news(
+                    query=query,
+                    timespan=timespan_map[period_label],
+                    max_records=max_records,
+                )
+                st.session_state["gdelt_posts"] = fetched
+                st.session_state["news_provider"] = provider
+                st.session_state["last_news_fetch_epoch_v57"] = now_epoch
+                st.session_state["last_news_fetch_iso_v57"] = (
+                    datetime.now(IST).isoformat()
+                )
+                st.session_state["last_news_fetch_slot_v511"] = monitor_slot_key
+                st.session_state["last_news_fetch_error_v511"] = ""
+                news_df = fetched
+                if manual_news_fetch:
+                    st.success(
+                        f"Fetched {len(fetched):,} news items via {provider}."
+                    )
+                else:
+                    st.success(
+                        f"30-minute auto refresh fetched {len(fetched):,} "
+                        f"news items via {provider}."
+                    )
+            except Exception as exc:
+                # Do not mark the half-hour slot as successfully refreshed.
+                # The 60-second heartbeat will retry after the 5-minute cooldown.
+                st.session_state["last_news_fetch_error_v511"] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
+                st.error(
+                    "News refresh failed; cached news will be used for this run. "
+                    "Automatic retry is scheduled in about 5 minutes. "
+                    f"Technical detail: {type(exc).__name__}: {exc}"
+                )
+
+        news_df = st.session_state.get(
+            "gdelt_posts",
+            pd.DataFrame(columns=STANDARD_COLUMNS)
+        )
+
+        if len(news_df):
+            provider = st.session_state.get("news_provider", "Free news source")
+            last_iso = st.session_state.get("last_news_fetch_iso_v57", "")
+            refresh_note = f" · refreshed {last_iso}" if last_iso else ""
+            st.info(
+                f"Current news dataset: {len(news_df):,} items · "
+                f"Source: {provider}{refresh_note}"
+            )
+
+
+    # ---------- Build raw dataset ----------
+    if source_mode == "CSV / manual X posts":
+        raw_df = csv_df
+
+    elif source_mode == "Free web/news":
+        raw_df = news_df
+
+    elif source_mode == "Combine CSV + web/news":
+        raw_df = normalize_posts(
+            pd.concat(
+                [csv_df, news_df],
+                ignore_index=True
+            )
+        )
+
+    elif source_mode == "Supabase database":
+        if not supabase_enabled():
+            st.warning(
+                "Supabase secrets are not configured."
             )
             raw_df = pd.DataFrame(
                 columns=STANDARD_COLUMNS
             )
-
-else:
-    raw_df = make_sample_data()
-
-
-# ---------- Optional persistence ----------
-if (
-    len(raw_df)
-    and supabase_enabled()
-    and source_mode != "Supabase database"
-):
-    with st.sidebar:
-        if st.button(
-            "Save current data to Supabase"
-        ):
+        else:
             try:
-                count = save_posts_to_supabase(
-                    raw_df
-                )
+                raw_df = load_supabase_posts()
                 st.success(
-                    f"Sent {count:,} records to Supabase."
+                    f"Loaded {len(raw_df):,} stored records."
                 )
             except Exception as exc:
                 st.error(
-                    f"Save failed: {exc}"
+                    f"Could not load Supabase: {exc}"
+                )
+                raw_df = pd.DataFrame(
+                    columns=STANDARD_COLUMNS
                 )
 
-
-if raw_df.empty:
-    if source_mode == "CSV / manual X posts":
-        st.info(
-            "No active CSV yet. Choose a file and tap "
-            "**Load & analyze CSV**, or use **Test built-in CSV**."
-        )
-    elif source_mode == "Free web/news":
-        st.info(
-            "Tap **Fetch free news** to begin."
-        )
-    elif source_mode == "Combine CSV + web/news":
-        st.info(
-            "Upload a CSV and/or tap **Fetch free news**."
-        )
     else:
-        st.info(
-            "No records are available from this source."
-        )
-    st.stop()
+        raw_df = make_sample_data()
 
 
+    # ---------- Optional persistence ----------
+    if (
+        len(raw_df)
+        and supabase_enabled()
+        and source_mode != "Supabase database"
+    ):
+        with st.sidebar:
+            if st.button(
+                "Save current data to Supabase"
+            ):
+                try:
+                    count = save_posts_to_supabase(
+                        raw_df
+                    )
+                    st.success(
+                        f"Sent {count:,} records to Supabase."
+                    )
+                except Exception as exc:
+                    st.error(
+                        f"Save failed: {exc}"
+                    )
 
-st.caption(
-    f"Runtime check: source mode = {source_mode} · "
-    f"raw rows = {len(raw_df):,}"
-)
 
-# =========================================================
-# LOADED SOURCE DIAGNOSTICS
-# =========================================================
-st.divider()
-st.subheader("Loaded data")
-
-source_counts = (
-    raw_df["platform"]
-    .value_counts()
-    .rename_axis("source")
-    .reset_index(name="records")
-)
-
-st.dataframe(
-    source_counts,
-    use_container_width=True,
-    hide_index=True,
-)
-
-st.success(
-    f"✅ {len(raw_df):,} total records are ready for intelligence analysis."
-)
-
-# =========================================================
-# RUN INTELLIGENCE PIPELINE
-# =========================================================
-try:
-    with st.spinner("Analyzing uploaded/loaded records..."):
-        df = run_sentiment_agent(raw_df)
-        df = run_emotion_agent(df)
-        df["engagement"] = (
-            df["likes"] + df["reposts"] + df["replies"]
-        )
-
-        df, vectorizer, tfidf, feature_names = (
-            run_semantic_topic_agent(df)
-        )
-
-        narratives_df = run_narrative_agent(
-            df,
-            vectorizer,
-            tfidf,
-            feature_names,
-        )
-
-        trend_df = run_trend_agent(df)
-
-    st.success(
-        f"✅ Intelligence analysis complete for {len(df):,} loaded records."
-    )
-
-    overall_negative_pct = (
-        df["sentiment"].eq("Negative").mean() * 100
-        if len(df)
-        else 0.0
-    )
-    snapshot_df = _record_monitor_snapshot(overall_negative_pct)
-
-    alert_latched = bool(
-        st.session_state.get("negativity_alert_latched_v57", False)
-    )
-
-    if overall_negative_pct > alert_threshold:
-        st.error(
-            f"🚨 NEGATIVITY ALERT: {overall_negative_pct:.1f}% negative, "
-            f"above the {alert_threshold:.0f}% threshold."
-        )
-        if not alert_latched:
-            if sound_alerts:
-                _play_alarm_sound()
-
-            st.session_state["negativity_alert_latched_v57"] = True
-
-            # One unique alert event per upward threshold crossing.
-            alert_event_id = (
-                datetime.now(IST).strftime("%Y%m%d_%H%M%S_IST")
-                + f"|neg={overall_negative_pct:.2f}"
-                + f"|threshold={alert_threshold:.2f}"
+    if raw_df.empty:
+        if source_mode == "CSV / manual X posts":
+            st.info(
+                "No active CSV yet. Choose a file and tap "
+                "**Load & analyze CSV**, or use **Test built-in CSV**."
             )
-            st.session_state["pending_alert_email_event_v59"] = (
-                alert_event_id
+        elif source_mode == "Free web/news":
+            st.info(
+                "Tap **Fetch free news** to begin."
             )
-            st.session_state["pending_alert_negative_pct_v59"] = (
-                float(overall_negative_pct)
+        elif source_mode == "Combine CSV + web/news":
+            st.info(
+                "Upload a CSV and/or tap **Fetch free news**."
             )
-    else:
-        st.session_state["negativity_alert_latched_v57"] = False
+        else:
+            st.info(
+                "No records are available from this source."
+            )
+        st.stop()
 
-except Exception as exc:
-    st.error(
-        "The CSV loaded, but the intelligence pipeline failed. "
-        f"Technical detail: {type(exc).__name__}: {exc}"
+
+
+    st.caption(
+        f"Runtime check: source mode = {source_mode} · "
+        f"raw rows = {len(raw_df):,}"
     )
-    st.stop()
 
-
-# =========================================================
-# FILTERS
-# =========================================================
-with st.sidebar:
+    # =========================================================
+    # LOADED SOURCE DIAGNOSTICS
+    # =========================================================
     st.divider()
-    st.header("Analysis filters")
+    st.subheader("Loaded data")
 
-    platforms = sorted(
-        df["platform"].unique().tolist()
-    )
-    selected_platforms = st.multiselect(
-        "Source/platform",
-        platforms,
-        default=platforms,
-    )
-
-    sentiments = [
-        "Positive", "Neutral", "Negative"
-    ]
-    selected_sentiments = st.multiselect(
-        "Sentiment",
-        sentiments,
-        default=sentiments,
-    )
-
-    emotions = sorted(
-        df["emotion"].unique().tolist()
-    )
-    selected_emotions = st.multiselect(
-        "Emotion",
-        emotions,
-        default=emotions,
-    )
-
-    clusters = sorted(
-        df["semantic_cluster"].unique().tolist()
-    )
-    selected_clusters = st.multiselect(
-        "Semantic clusters",
-        clusters,
-        default=clusters,
-    )
-
-    search = st.text_input(
-        "Search within loaded data",
-        placeholder="launch, satellite, mission...",
-    )
-
-
-filtered = df[
-    df["platform"].isin(selected_platforms)
-    & df["sentiment"].isin(selected_sentiments)
-    & df["emotion"].isin(selected_emotions)
-    & df["semantic_cluster"].isin(
-        selected_clusters
-    )
-].copy()
-
-if search:
-    filtered = filtered[
-        filtered["text"].str.contains(
-            re.escape(search),
-            case=False,
-            na=False,
-        )
-        | filtered["hashtags"].str.contains(
-            re.escape(search),
-            case=False,
-            na=False,
-        )
-    ]
-
-
-filtered_trend = run_trend_agent(filtered)
-
-filtered_narratives = narratives_df[
-    narratives_df["cluster"].isin(
-        selected_clusters
-    )
-].copy()
-
-risk_data = run_risk_agent(
-    filtered,
-    filtered_trend,
-    filtered_narratives,
-)
-
-
-# =========================================================
-# DASHBOARD
-# =========================================================
-c1, c2, c3, c4, c5, c6 = st.columns(6)
-
-c1.metric("Records", f"{len(filtered):,}")
-c2.metric(
-    "Engagement",
-    f"{int(filtered['engagement'].sum()):,}",
-)
-c3.metric(
-    "Negative",
-    f"{risk_data['negative_pct']:.1f}%",
-)
-c4.metric(
-    "12h growth",
-    f"{risk_data['recent_growth_pct']:+.0f}%",
-)
-c5.metric(
-    "Narratives",
-    len(filtered_narratives),
-)
-c6.metric(
-    "Monitoring score",
-    f"{risk_data['risk']}/100",
-)
-
-
-if (
-    len(filtered)
-    and filtered["platform"]
-    .eq("web_news")
-    .all()
-):
-    st.info(
-        "News mode: sentiment/emotion are calculated from "
-        "article headlines, so treat them as headline-framing "
-        "signals rather than public-opinion measurements."
-    )
-
-
-left, right = st.columns([2, 1])
-
-with left:
-    st.subheader("Conversation / coverage trend")
-    fig = px.line(
-        filtered_trend,
-        x="hour",
-        y=["posts", "rolling_avg"],
-        markers=True,
-    )
-    fig.update_layout(
-        xaxis_title=None,
-        yaxis_title="Records",
-        legend_title_text="",
-    )
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
-    )
-
-with right:
-    st.subheader("Sentiment")
-    sent = (
-        filtered["sentiment"]
+    source_counts = (
+        raw_df["platform"]
         .value_counts()
-        .reindex(
-            ["Positive", "Neutral", "Negative"],
-            fill_value=0,
-        )
-        .reset_index()
-    )
-    sent.columns = ["sentiment", "records"]
-
-    st.plotly_chart(
-        px.pie(
-            sent,
-            names="sentiment",
-            values="records",
-            hole=0.55,
-        ),
-        use_container_width=True,
-    )
-
-
-
-
-# =========================================================
-# EXTENDED MONITORING CHARTS
-# =========================================================
-st.subheader("📈 Extended monitoring charts")
-
-neg_history = compute_negativity_history(df)
-if len(neg_history):
-    neg_fig = px.line(
-        neg_history,
-        x="bucket",
-        y="negative_pct",
-        color="series",
-        markers=True,
-        hover_data={"records": True, "negative_pct": ":.1f"},
-        title="Historic negativity - 30 minute buckets (IST)",
-    )
-    neg_fig.add_hline(
-        y=alert_threshold,
-        line_dash="dash",
-        annotation_text=f"Alarm threshold {alert_threshold:.0f}%",
-    )
-    neg_fig.update_yaxes(
-        title="Negative share (%)",
-        range=[0, 100],
-    )
-    neg_fig.update_xaxes(title=None)
-    st.plotly_chart(neg_fig, use_container_width=True)
-
-if len(snapshot_df) >= 2:
-    snap_plot = snapshot_df.copy()
-    snap_plot["bucket"] = pd.to_datetime(
-        snap_plot["bucket"], errors="coerce", utc=True
-    )
-    snap_fig = px.line(
-        snap_plot,
-        x="bucket",
-        y="negative_pct",
-        markers=True,
-        title="Live 30-minute monitoring snapshots (this app session)",
-    )
-    snap_fig.add_hline(
-        y=alert_threshold,
-        line_dash="dash",
-        annotation_text=f"Alarm threshold {alert_threshold:.0f}%",
-    )
-    snap_fig.update_yaxes(title="Negative share (%)", range=[0, 100])
-    snap_fig.update_xaxes(title=None)
-    st.plotly_chart(snap_fig, use_container_width=True)
-
-source_mix_df = filtered.copy()
-source_mix_df["source_group"] = np.where(
-    source_mix_df["platform"].isin(["x_manual", "x"]),
-    "X",
-    np.where(
-        source_mix_df["platform"].eq("web_news"),
-        "News",
-        source_mix_df["platform"],
-    ),
-)
-source_mix = (
-    source_mix_df.groupby(["source_group", "sentiment"])
-    .size()
-    .reset_index(name="records")
-)
-
-chart_left, chart_right = st.columns(2)
-with chart_left:
-    st.markdown("**Sentiment mix by source**")
-    if len(source_mix):
-        st.plotly_chart(
-            px.bar(
-                source_mix,
-                x="source_group",
-                y="records",
-                color="sentiment",
-                barmode="stack",
-            ),
-            use_container_width=True,
-        )
-
-with chart_right:
-    st.markdown("**Semantic cluster volume**")
-    cluster_volume = (
-        filtered.groupby("semantic_cluster")
-        .size()
+        .rename_axis("source")
         .reset_index(name="records")
     )
-    if len(cluster_volume):
-        cluster_volume["cluster"] = (
-            "Cluster " + cluster_volume["semantic_cluster"].astype(str)
+
+    st.dataframe(
+        source_counts,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.success(
+        f"✅ {len(raw_df):,} total records are ready for intelligence analysis."
+    )
+
+    # =========================================================
+    # RUN INTELLIGENCE PIPELINE
+    # =========================================================
+    try:
+        with st.spinner("Analyzing uploaded/loaded records..."):
+            df = run_sentiment_agent(raw_df)
+            df = run_emotion_agent(df)
+            df["engagement"] = (
+                df["likes"] + df["reposts"] + df["replies"]
+            )
+
+            df, vectorizer, tfidf, feature_names = (
+                run_semantic_topic_agent(df)
+            )
+
+            narratives_df = run_narrative_agent(
+                df,
+                vectorizer,
+                tfidf,
+                feature_names,
+            )
+
+            trend_df = run_trend_agent(df)
+
+        st.success(
+            f"✅ Intelligence analysis complete for {len(df):,} loaded records."
+        )
+
+        overall_negative_pct = (
+            df["sentiment"].eq("Negative").mean() * 100
+            if len(df)
+            else 0.0
+        )
+        snapshot_df = _record_monitor_snapshot(overall_negative_pct)
+
+        alert_latched = bool(
+            st.session_state.get("negativity_alert_latched_v57", False)
+        )
+
+        if overall_negative_pct > alert_threshold:
+            st.error(
+                f"🚨 NEGATIVITY ALERT: {overall_negative_pct:.1f}% negative, "
+                f"above the {alert_threshold:.0f}% threshold."
+            )
+            if not alert_latched:
+                if sound_alerts:
+                    _play_alarm_sound()
+
+                st.session_state["negativity_alert_latched_v57"] = True
+
+                # One unique alert event per upward threshold crossing.
+                alert_event_id = (
+                    datetime.now(IST).strftime("%Y%m%d_%H%M%S_IST")
+                    + f"|neg={overall_negative_pct:.2f}"
+                    + f"|threshold={alert_threshold:.2f}"
+                )
+                st.session_state["pending_alert_email_event_v59"] = (
+                    alert_event_id
+                )
+                st.session_state["pending_alert_negative_pct_v59"] = (
+                    float(overall_negative_pct)
+                )
+        else:
+            st.session_state["negativity_alert_latched_v57"] = False
+
+    except Exception as exc:
+        st.error(
+            "The CSV loaded, but the intelligence pipeline failed. "
+            f"Technical detail: {type(exc).__name__}: {exc}"
+        )
+        st.stop()
+
+
+    # =========================================================
+    # FILTERS
+    # =========================================================
+    with st.sidebar:
+        st.divider()
+        st.header("Analysis filters")
+
+        platforms = sorted(
+            df["platform"].unique().tolist()
+        )
+        selected_platforms = st.multiselect(
+            "Source/platform",
+            platforms,
+            default=platforms,
+        )
+
+        sentiments = [
+            "Positive", "Neutral", "Negative"
+        ]
+        selected_sentiments = st.multiselect(
+            "Sentiment",
+            sentiments,
+            default=sentiments,
+        )
+
+        emotions = sorted(
+            df["emotion"].unique().tolist()
+        )
+        selected_emotions = st.multiselect(
+            "Emotion",
+            emotions,
+            default=emotions,
+        )
+
+        clusters = sorted(
+            df["semantic_cluster"].unique().tolist()
+        )
+        selected_clusters = st.multiselect(
+            "Semantic clusters",
+            clusters,
+            default=clusters,
+        )
+
+        search = st.text_input(
+            "Search within loaded data",
+            placeholder="launch, satellite, mission...",
+        )
+
+
+    filtered = df[
+        df["platform"].isin(selected_platforms)
+        & df["sentiment"].isin(selected_sentiments)
+        & df["emotion"].isin(selected_emotions)
+        & df["semantic_cluster"].isin(
+            selected_clusters
+        )
+    ].copy()
+
+    if search:
+        filtered = filtered[
+            filtered["text"].str.contains(
+                re.escape(search),
+                case=False,
+                na=False,
+            )
+            | filtered["hashtags"].str.contains(
+                re.escape(search),
+                case=False,
+                na=False,
+            )
+        ]
+
+
+    filtered_trend = run_trend_agent(filtered)
+
+    filtered_narratives = narratives_df[
+        narratives_df["cluster"].isin(
+            selected_clusters
+        )
+    ].copy()
+
+    risk_data = run_risk_agent(
+        filtered,
+        filtered_trend,
+        filtered_narratives,
+    )
+
+
+    # =========================================================
+    # DASHBOARD
+    # =========================================================
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+
+    c1.metric("Records", f"{len(filtered):,}")
+    c2.metric(
+        "Engagement",
+        f"{int(filtered['engagement'].sum()):,}",
+    )
+    c3.metric(
+        "Negative",
+        f"{risk_data['negative_pct']:.1f}%",
+    )
+    c4.metric(
+        "12h growth",
+        f"{risk_data['recent_growth_pct']:+.0f}%",
+    )
+    c5.metric(
+        "Narratives",
+        len(filtered_narratives),
+    )
+    c6.metric(
+        "Monitoring score",
+        f"{risk_data['risk']}/100",
+    )
+
+
+    if (
+        len(filtered)
+        and filtered["platform"]
+        .eq("web_news")
+        .all()
+    ):
+        st.info(
+            "News mode: sentiment/emotion are calculated from "
+            "article headlines, so treat them as headline-framing "
+            "signals rather than public-opinion measurements."
+        )
+
+
+    left, right = st.columns([2, 1])
+
+    with left:
+        st.subheader("Conversation / coverage trend")
+        fig = px.line(
+            filtered_trend,
+            x="hour",
+            y=["posts", "rolling_avg"],
+            markers=True,
+        )
+        fig.update_layout(
+            xaxis_title=None,
+            yaxis_title="Records",
+            legend_title_text="",
         )
         st.plotly_chart(
-            px.bar(
-                cluster_volume,
-                x="cluster",
-                y="records",
+            fig,
+            use_container_width=True,
+        )
+
+    with right:
+        st.subheader("Sentiment")
+        sent = (
+            filtered["sentiment"]
+            .value_counts()
+            .reindex(
+                ["Positive", "Neutral", "Negative"],
+                fill_value=0,
+            )
+            .reset_index()
+        )
+        sent.columns = ["sentiment", "records"]
+
+        st.plotly_chart(
+            px.pie(
+                sent,
+                names="sentiment",
+                values="records",
+                hole=0.55,
+                color="sentiment",
+                color_discrete_map=SENTIMENT_COLORS,
+                category_orders={
+                    "sentiment": ["Positive", "Neutral", "Negative"]
+                },
             ),
             use_container_width=True,
         )
 
-chart_left, chart_right = st.columns(2)
-with chart_left:
-    st.markdown("**Negative share by cluster**")
-    cluster_neg = (
-        filtered.groupby("semantic_cluster")["sentiment"]
-        .apply(lambda s: s.eq("Negative").mean() * 100)
-        .reset_index(name="negative_pct")
-    )
-    if len(cluster_neg):
-        cluster_neg["cluster"] = (
-            "Cluster " + cluster_neg["semantic_cluster"].astype(str)
+
+
+
+    # =========================================================
+    # EXTENDED MONITORING CHARTS
+    # =========================================================
+    st.subheader("📈 Extended monitoring charts")
+
+    # Persistent browser-independent history written by GitHub Actions.
+    background_runs = pd.DataFrame()
+    if supabase_enabled():
+        try:
+            background_runs = load_background_monitoring_runs(limit=336)
+        except Exception as exc:
+            st.caption(
+                "Background monitoring history is not available yet: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    if len(background_runs):
+        last_bg = background_runs.iloc[-1]
+        bg_time = last_bg["run_timestamp"].strftime(
+            "%Y-%m-%d %H:%M:%S IST"
         )
-        cluster_neg_fig = px.bar(
-            cluster_neg,
-            x="cluster",
+        st.success(
+            "Background scheduler last completed: "
+            f"{bg_time} · negativity {float(last_bg['negative_pct']):.1f}% · "
+            f"routine emails {int(last_bg.get('routine_email_sent', 0) or 0)}"
+        )
+
+        bg_fig = px.line(
+            background_runs,
+            x="run_timestamp",
             y="negative_pct",
+            markers=True,
+            title="Browser-independent 30-minute negativity history",
         )
-        cluster_neg_fig.update_yaxes(
+        bg_fig.update_traces(
+            line_color=NEGATIVE_RED,
+            marker_color=NEGATIVE_RED,
+        )
+        bg_fig.add_hline(
+            y=alert_threshold,
+            line_dash="dash",
+            line_color=NEUTRAL_GREY,
+            annotation_text=f"Alarm threshold {alert_threshold:.0f}%",
+        )
+        bg_fig.update_yaxes(title="Negative share (%)", range=[0, 100])
+        bg_fig.update_xaxes(title=None)
+        st.plotly_chart(bg_fig, use_container_width=True)
+    else:
+        st.caption(
+            "No GitHub background-run history found yet. Run "
+            "supabase_build513.sql once, add GitHub Actions secrets, and enable "
+            "the included workflow."
+        )
+
+    neg_history = compute_negativity_history(df)
+    if len(neg_history):
+        neg_fig = px.line(
+            neg_history,
+            x="bucket",
+            y="negative_pct",
+            color="series",
+            line_dash="series",
+            markers=True,
+            color_discrete_sequence=[NEGATIVE_RED],
+            hover_data={"records": True, "negative_pct": ":.1f"},
+            title="Historic negativity - 30 minute buckets (IST)",
+        )
+        neg_fig.add_hline(
+            y=alert_threshold,
+            line_dash="dash",
+            line_color=NEUTRAL_GREY,
+            annotation_text=f"Alarm threshold {alert_threshold:.0f}%",
+        )
+        neg_fig.update_yaxes(
             title="Negative share (%)",
             range=[0, 100],
         )
+        neg_fig.update_xaxes(title=None)
+        st.plotly_chart(neg_fig, use_container_width=True)
+
+    if len(snapshot_df) >= 2:
+        snap_plot = snapshot_df.copy()
+        snap_plot["bucket"] = pd.to_datetime(
+            snap_plot["bucket"], errors="coerce", utc=True
+        )
+        snap_fig = px.line(
+            snap_plot,
+            x="bucket",
+            y="negative_pct",
+            markers=True,
+            title="Live 30-minute monitoring snapshots (this app session)",
+        )
+        snap_fig.update_traces(
+            line_color=NEGATIVE_RED,
+            marker_color=NEGATIVE_RED,
+        )
+        snap_fig.add_hline(
+            y=alert_threshold,
+            line_dash="dash",
+            line_color=NEUTRAL_GREY,
+            annotation_text=f"Alarm threshold {alert_threshold:.0f}%",
+        )
+        snap_fig.update_yaxes(title="Negative share (%)", range=[0, 100])
+        snap_fig.update_xaxes(title=None)
+        st.plotly_chart(snap_fig, use_container_width=True)
+
+    source_mix_df = filtered.copy()
+    source_mix_df["source_group"] = np.where(
+        source_mix_df["platform"].isin(["x_manual", "x"]),
+        "X",
+        np.where(
+            source_mix_df["platform"].eq("web_news"),
+            "News",
+            source_mix_df["platform"],
+        ),
+    )
+    source_mix = (
+        source_mix_df.groupby(["source_group", "sentiment"])
+        .size()
+        .reset_index(name="records")
+    )
+
+    chart_left, chart_right = st.columns(2)
+    with chart_left:
+        st.markdown("**Sentiment mix by source**")
+        if len(source_mix):
+            st.plotly_chart(
+                px.bar(
+                    source_mix,
+                    x="source_group",
+                    y="records",
+                    color="sentiment",
+                    barmode="stack",
+                    color_discrete_map=SENTIMENT_COLORS,
+                    category_orders={
+                        "sentiment": ["Positive", "Neutral", "Negative"]
+                    },
+                ),
+                use_container_width=True,
+            )
+
+    with chart_right:
+        st.markdown("**Semantic cluster volume**")
+        cluster_volume = (
+            filtered.groupby("semantic_cluster")
+            .size()
+            .reset_index(name="records")
+        )
+        if len(cluster_volume):
+            cluster_volume["cluster"] = (
+                "Cluster " + cluster_volume["semantic_cluster"].astype(str)
+            )
+            st.plotly_chart(
+                px.bar(
+                    cluster_volume,
+                    x="cluster",
+                    y="records",
+                ),
+                use_container_width=True,
+            )
+
+    chart_left, chart_right = st.columns(2)
+    with chart_left:
+        st.markdown("**Negative share by cluster**")
+        cluster_neg = (
+            filtered.groupby("semantic_cluster")["sentiment"]
+            .apply(lambda s: s.eq("Negative").mean() * 100)
+            .reset_index(name="negative_pct")
+        )
+        if len(cluster_neg):
+            cluster_neg["cluster"] = (
+                "Cluster " + cluster_neg["semantic_cluster"].astype(str)
+            )
+            cluster_neg_fig = px.bar(
+                cluster_neg,
+                x="cluster",
+                y="negative_pct",
+            )
+            cluster_neg_fig.update_traces(marker_color=NEGATIVE_RED)
+            cluster_neg_fig.update_yaxes(
+                title="Negative share (%)",
+                range=[0, 100],
+            )
+            st.plotly_chart(
+                cluster_neg_fig,
+                use_container_width=True,
+            )
+
+    with chart_right:
+        st.markdown("**Top sources / authors by record volume**")
+        source_volume = (
+            filtered.groupby(["platform", "username"])
+            .size()
+            .reset_index(name="records")
+            .sort_values("records", ascending=False)
+            .head(12)
+            .sort_values("records")
+        )
+        if len(source_volume):
+            st.plotly_chart(
+                px.bar(
+                    source_volume,
+                    x="records",
+                    y="username",
+                    orientation="h",
+                    hover_data=["platform"],
+                ),
+                use_container_width=True,
+            )
+
+    st.caption(
+        "The historic negativity chart uses the timestamps inside the loaded "
+        "records. The GitHub background chart persists independent 30-minute "
+        "runs in Supabase even when the browser is closed; the live snapshot chart "
+        "is retained only as an in-session diagnostic."
+    )
+
+
+    # =========================================================
+    # TOP 10 POSITIVE / NEGATIVE SUMMARIES
+    # =========================================================
+    st.subheader("📝 Top 10 positive & negative briefs")
+    st.caption(
+        "Brief local summaries of the strongest sentiment items. "
+        "X rankings use sentiment + engagement; news rankings use "
+        "sentiment + recency. No paid LLM is required."
+    )
+
+    x_brief_df = filtered[
+        filtered["platform"].isin(["x_manual", "x"])
+    ].copy()
+
+    news_brief_df = filtered[
+        filtered["platform"].eq("web_news")
+    ].copy()
+
+    x_tab, news_tab = st.tabs(["X", "News"])
+
+    with x_tab:
+        if x_brief_df.empty:
+            st.info(
+                "No X/manual-X records are currently loaded. "
+                "Upload an X CSV or use Combined mode."
+            )
+        else:
+            positive_tab, negative_tab = st.tabs(
+                ["🔵 Top positive", "🔴 Top negative"]
+            )
+
+            with positive_tab:
+                render_brief_list(
+                    x_brief_df,
+                    polarity="positive",
+                    news=False,
+                )
+
+            with negative_tab:
+                render_brief_list(
+                    x_brief_df,
+                    polarity="negative",
+                    news=False,
+                )
+
+    with news_tab:
+        if news_brief_df.empty:
+            st.info(
+                "No news records are currently loaded. "
+                "Fetch free news or use Combined mode."
+            )
+        else:
+            positive_tab, negative_tab = st.tabs(
+                ["🔵 Top positive", "🔴 Top negative"]
+            )
+
+            with positive_tab:
+                render_brief_list(
+                    news_brief_df,
+                    polarity="positive",
+                    news=True,
+                )
+
+            with negative_tab:
+                render_brief_list(
+                    news_brief_df,
+                    polarity="negative",
+                    news=True,
+                )
+
+    st.divider()
+
+    st.subheader("🧠 Narrative intelligence")
+
+    if len(filtered_narratives):
+        view = filtered_narratives[
+            [
+                "narrative",
+                "posts",
+                "12h_growth_pct",
+                "negative_pct",
+                "engagement",
+                "top_terms",
+            ]
+        ].copy()
+
+        view.columns = [
+            "Narrative",
+            "Records",
+            "12h growth %",
+            "Negative %",
+            "Engagement",
+            "Key terms",
+        ]
+
+        st.dataframe(
+            view,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        chosen = st.selectbox(
+            "Inspect a narrative",
+            filtered_narratives[
+                "narrative"
+            ].tolist(),
+        )
+
+        row = filtered_narratives[
+            filtered_narratives["narrative"]
+            == chosen
+        ].iloc[0]
+
+        st.markdown(
+            f"**Representative item:** "
+            f"{row['representative_post']}"
+        )
+    else:
+        st.info(
+            "More records or more textual variation may be "
+            "needed for narrative clustering."
+        )
+
+
+    st.subheader("Semantic conversation map")
+
+    if len(filtered):
+        plot_df = filtered.copy()
+        plot_df["cluster_label"] = (
+            "Cluster "
+            + plot_df["semantic_cluster"].astype(str)
+        )
+
+        fig = px.scatter(
+            plot_df,
+            x="semantic_x",
+            y="semantic_y",
+            color="cluster_label",
+            hover_data=[
+                "platform",
+                "username",
+                "sentiment",
+                "emotion",
+                "text",
+            ],
+        )
+
+        fig.update_layout(
+            xaxis_title="Semantic dimension 1",
+            yaxis_title="Semantic dimension 2",
+            legend_title_text="",
+        )
+
         st.plotly_chart(
-            cluster_neg_fig,
+            fig,
             use_container_width=True,
         )
 
-with chart_right:
-    st.markdown("**Top sources / authors by record volume**")
-    source_volume = (
-        filtered.groupby(["platform", "username"])
-        .size()
-        .reset_index(name="records")
-        .sort_values("records", ascending=False)
-        .head(12)
-        .sort_values("records")
-    )
-    if len(source_volume):
+
+    left, right = st.columns(2)
+
+    with left:
+        st.subheader("Emotion intelligence")
+        emotions = (
+            filtered["emotion"]
+            .value_counts()
+            .reset_index()
+        )
+        emotions.columns = ["emotion", "records"]
+
         st.plotly_chart(
             px.bar(
-                source_volume,
-                x="records",
-                y="username",
-                orientation="h",
-                hover_data=["platform"],
+                emotions,
+                x="emotion",
+                y="records",
             ),
             use_container_width=True,
         )
 
-st.caption(
-    "The historic negativity chart uses the timestamps inside the loaded "
-    "records. The live snapshot chart records each 30-minute monitoring cycle "
-    "for the current active app session."
-)
-
-
-# =========================================================
-# TOP 10 POSITIVE / NEGATIVE SUMMARIES
-# =========================================================
-st.subheader("📝 Top 10 positive & negative briefs")
-st.caption(
-    "Brief local summaries of the strongest sentiment items. "
-    "X rankings use sentiment + engagement; news rankings use "
-    "sentiment + recency. No paid LLM is required."
-)
-
-x_brief_df = filtered[
-    filtered["platform"].isin(["x_manual", "x"])
-].copy()
-
-news_brief_df = filtered[
-    filtered["platform"].eq("web_news")
-].copy()
-
-x_tab, news_tab = st.tabs(["X", "News"])
-
-with x_tab:
-    if x_brief_df.empty:
-        st.info(
-            "No X/manual-X records are currently loaded. "
-            "Upload an X CSV or use Combined mode."
-        )
-    else:
-        positive_tab, negative_tab = st.tabs(
-            ["🟢 Top positive", "🔴 Top negative"]
-        )
-
-        with positive_tab:
-            render_brief_list(
-                x_brief_df,
-                polarity="positive",
-                news=False,
+    with right:
+        st.subheader("Top sources / authors")
+        sources = (
+            filtered.groupby(
+                ["platform", "username"]
             )
-
-        with negative_tab:
-            render_brief_list(
-                x_brief_df,
-                polarity="negative",
-                news=False,
+            .agg(
+                records=("text", "size"),
+                engagement=("engagement", "sum"),
             )
-
-with news_tab:
-    if news_brief_df.empty:
-        st.info(
-            "No news records are currently loaded. "
-            "Fetch free news or use Combined mode."
-        )
-    else:
-        positive_tab, negative_tab = st.tabs(
-            ["🟢 Top positive", "🔴 Top negative"]
-        )
-
-        with positive_tab:
-            render_brief_list(
-                news_brief_df,
-                polarity="positive",
-                news=True,
+            .sort_values(
+                ["records", "engagement"],
+                ascending=False,
             )
-
-        with negative_tab:
-            render_brief_list(
-                news_brief_df,
-                polarity="negative",
-                news=True,
-            )
-
-st.divider()
-
-st.subheader("🧠 Narrative intelligence")
-
-if len(filtered_narratives):
-    view = filtered_narratives[
-        [
-            "narrative",
-            "posts",
-            "12h_growth_pct",
-            "negative_pct",
-            "engagement",
-            "top_terms",
-        ]
-    ].copy()
-
-    view.columns = [
-        "Narrative",
-        "Records",
-        "12h growth %",
-        "Negative %",
-        "Engagement",
-        "Key terms",
-    ]
-
-    st.dataframe(
-        view,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    chosen = st.selectbox(
-        "Inspect a narrative",
-        filtered_narratives[
-            "narrative"
-        ].tolist(),
-    )
-
-    row = filtered_narratives[
-        filtered_narratives["narrative"]
-        == chosen
-    ].iloc[0]
-
-    st.markdown(
-        f"**Representative item:** "
-        f"{row['representative_post']}"
-    )
-else:
-    st.info(
-        "More records or more textual variation may be "
-        "needed for narrative clustering."
-    )
-
-
-st.subheader("Semantic conversation map")
-
-if len(filtered):
-    plot_df = filtered.copy()
-    plot_df["cluster_label"] = (
-        "Cluster "
-        + plot_df["semantic_cluster"].astype(str)
-    )
-
-    fig = px.scatter(
-        plot_df,
-        x="semantic_x",
-        y="semantic_y",
-        color="cluster_label",
-        hover_data=[
-            "platform",
-            "username",
-            "sentiment",
-            "emotion",
-            "text",
-        ],
-    )
-
-    fig.update_layout(
-        xaxis_title="Semantic dimension 1",
-        yaxis_title="Semantic dimension 2",
-        legend_title_text="",
-    )
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
-    )
-
-
-left, right = st.columns(2)
-
-with left:
-    st.subheader("Emotion intelligence")
-    emotions = (
-        filtered["emotion"]
-        .value_counts()
-        .reset_index()
-    )
-    emotions.columns = ["emotion", "records"]
-
-    st.plotly_chart(
-        px.bar(
-            emotions,
-            x="emotion",
-            y="records",
-        ),
-        use_container_width=True,
-    )
-
-with right:
-    st.subheader("Top sources / authors")
-    sources = (
-        filtered.groupby(
-            ["platform", "username"]
+            .head(15)
+            .reset_index()
         )
-        .agg(
-            records=("text", "size"),
-            engagement=("engagement", "sum"),
-        )
-        .sort_values(
-            ["records", "engagement"],
-            ascending=False,
-        )
-        .head(15)
-        .reset_index()
-    )
 
-    st.dataframe(
-        sources,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
-
-# =========================================================
-# LEGEND / METHODOLOGY
-# =========================================================
-with st.expander("📚 Legend & methodology — what the clusters, sentiment and scores mean"):
-    st.markdown(
-        """
-        **Sentiment**
-        - VADER compound score ranges from **-1 to +1**.
-        - **Positive:** score ≥ +0.05
-        - **Neutral:** between -0.05 and +0.05
-        - **Negative:** score ≤ -0.05
-        - For **News**, this represents *headline framing*, not public opinion.
-        - Sarcasm and multilingual text can reduce accuracy.
-
-        **Emotion**
-        - Lightweight rule-based signals: Anger, Fear/Worry, Joy,
-          Sadness/Disappointment, Surprise and Relief.
-        - **Other/Neutral** means no configured emotional cue was detected.
-
-        **Semantic cluster**
-        - An automatically discovered group of textually similar records.
-        - Cluster numbers such as **0, 1, 2... are arbitrary IDs**, not ranks.
-        - A cluster color does **not** mean positive/negative or high/low risk.
-        - On the semantic map, points closer together tend to discuss
-          more similar themes.
-        - The X/Y axes are latent text dimensions and have no direct
-          real-world unit.
-
-        **Narrative**
-        - A shorthand label derived from a cluster's strongest key terms
-          and representative item. It should be treated as an analytical
-          summary, not as a verified factual claim.
-
-        **Engagement**
-        - X/manual X = **likes + reposts + replies**.
-        - Free News feeds do not provide equivalent social engagement.
-
-        **12h growth**
-        - Compares the latest 12-hour record count with the previous
-          12-hour period.
-
-        **Trend anomaly**
-        - Hourly volume divided by a rolling six-hour baseline.
-        - This prototype flags roughly **2× baseline or higher**.
-
-        **Monitoring score**
-        - Prototype triage score combining negative share, recent growth,
-          anomaly strength and narrative growth.
-        - It is **not** a validated probability or official risk rating.
-
-        **Top-10 sentiment briefs**
-        - X: ranked by sentiment strength, then engagement and recency.
-        - News: ranked by headline sentiment strength, then recency.
-
-        **30-minute monitoring**
-        - When enabled, the active Streamlit session reruns every 30 minutes.
-        - News is automatically fetched again; Supabase is reloaded; CSV data is re-analysed.
-        - Free Streamlit hosting may sleep when nobody is using the app, so this is not a guaranteed always-on scheduler.
-
-        **Negativity alarm**
-        - Overall negativity is calculated across all currently loaded records.
-        - A sound alert is triggered when negativity crosses above the configured threshold (default **35%**).
-        - It sounds once per crossing and re-arms only after negativity falls back to or below the threshold.
-        - Mobile browser autoplay rules may require you to interact with the page first.
-        """
-    )
-
-    if len(filtered_narratives):
-        st.markdown("**Current cluster legend**")
-        legend_table = filtered_narratives[
-            [
-                "cluster",
-                "narrative",
-                "posts",
-                "negative_pct",
-                "12h_growth_pct",
-                "top_terms",
-            ]
-        ].copy()
-        legend_table.columns = [
-            "Cluster",
-            "Narrative",
-            "Records",
-            "Negative %",
-            "12h growth %",
-            "Key terms",
-        ]
         st.dataframe(
-            legend_table.sort_values("Cluster"),
+            sources,
             use_container_width=True,
             hide_index=True,
         )
 
 
 
+    # =========================================================
+    # LEGEND / METHODOLOGY
+    # =========================================================
+    with st.expander("📚 Legend & methodology — what the clusters, sentiment and scores mean"):
+        st.markdown(
+            """
+            **Sentiment**
+            - VADER compound score ranges from **-1 to +1**.
+            - **Positive:** score ≥ +0.05
+            - **Neutral:** between -0.05 and +0.05
+            - **Negative:** score ≤ -0.05
+            - For **News**, this represents *headline framing*, not public opinion.
+            - Sarcasm and multilingual text can reduce accuracy.
 
-def _attempt_browser_pdf_download(pdf_bytes, filename):
-    """
-    Attempt a zero-click browser download.
-    Browser security may block this, especially on mobile.
-    """
-    encoded = base64.b64encode(pdf_bytes).decode("ascii")
-    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", filename)
-    components.html(
-        f"""
-        <script>
-        (() => {{
-            try {{
-                const b64 = "{encoded}";
-                const binary = atob(b64);
-                const bytes = new Uint8Array(binary.length);
-                for (let i = 0; i < binary.length; i++) {{
-                    bytes[i] = binary.charCodeAt(i);
+            **Emotion**
+            - Lightweight rule-based signals: Anger, Fear/Worry, Joy,
+              Sadness/Disappointment, Surprise and Relief.
+            - **Other/Neutral** means no configured emotional cue was detected.
+
+            **Semantic cluster**
+            - An automatically discovered group of textually similar records.
+            - Cluster numbers such as **0, 1, 2... are arbitrary IDs**, not ranks.
+            - A cluster color does **not** mean positive/negative or high/low risk.
+            - On the semantic map, points closer together tend to discuss
+              more similar themes.
+            - The X/Y axes are latent text dimensions and have no direct
+              real-world unit.
+
+            **Narrative**
+            - A shorthand label derived from a cluster's strongest key terms
+              and representative item. It should be treated as an analytical
+              summary, not as a verified factual claim.
+
+            **Engagement**
+            - X/manual X = **likes + reposts + replies**.
+            - Free News feeds do not provide equivalent social engagement.
+
+            **12h growth**
+            - Compares the latest 12-hour record count with the previous
+              12-hour period.
+
+            **Trend anomaly**
+            - Hourly volume divided by a rolling six-hour baseline.
+            - This prototype flags roughly **2× baseline or higher**.
+
+            **Monitoring score**
+            - Prototype triage score combining negative share, recent growth,
+              anomaly strength and narrative growth.
+            - It is **not** a validated probability or official risk rating.
+
+            **Top-10 sentiment briefs**
+            - X: ranked by sentiment strength, then engagement and recency.
+            - News: ranked by headline sentiment strength, then recency.
+
+            **30-minute monitoring**
+            - When enabled, the active Streamlit session reruns every 30 minutes.
+            - News is automatically fetched again; Supabase is reloaded; CSV data is re-analysed.
+            - Free Streamlit hosting may sleep when nobody is using the app, so this is not a guaranteed always-on scheduler.
+
+            **Negativity alarm**
+            - Overall negativity is calculated across all currently loaded records.
+            - A sound alert is triggered when negativity crosses above the configured threshold (default **35%**).
+            - It sounds once per crossing and re-arms only after negativity falls back to or below the threshold.
+            - Mobile browser autoplay rules may require you to interact with the page first.
+            """
+        )
+
+        if len(filtered_narratives):
+            st.markdown("**Current cluster legend**")
+            legend_table = filtered_narratives[
+                [
+                    "cluster",
+                    "narrative",
+                    "posts",
+                    "negative_pct",
+                    "12h_growth_pct",
+                    "top_terms",
+                ]
+            ].copy()
+            legend_table.columns = [
+                "Cluster",
+                "Narrative",
+                "Records",
+                "Negative %",
+                "12h growth %",
+                "Key terms",
+            ]
+            st.dataframe(
+                legend_table.sort_values("Cluster"),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+
+
+
+    def _attempt_browser_pdf_download(pdf_bytes, filename):
+        """
+        Attempt a zero-click browser download.
+        Browser security may block this, especially on mobile.
+        """
+        encoded = base64.b64encode(pdf_bytes).decode("ascii")
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", filename)
+        components.html(
+            f"""
+            <script>
+            (() => {{
+                try {{
+                    const b64 = "{encoded}";
+                    const binary = atob(b64);
+                    const bytes = new Uint8Array(binary.length);
+                    for (let i = 0; i < binary.length; i++) {{
+                        bytes[i] = binary.charCodeAt(i);
+                    }}
+                    const blob = new Blob([bytes], {{type: "application/pdf"}});
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = "{safe_name}";
+                    a.style.display = "none";
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    setTimeout(() => URL.revokeObjectURL(url), 5000);
+                }} catch (e) {{
+                    console.log("Automatic PDF download was blocked:", e);
                 }}
-                const blob = new Blob([bytes], {{type: "application/pdf"}});
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement("a");
-                a.href = url;
-                a.download = "{safe_name}";
-                a.style.display = "none";
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
-                setTimeout(() => URL.revokeObjectURL(url), 5000);
-            }} catch (e) {{
-                console.log("Automatic PDF download was blocked:", e);
-            }}
-        }})();
-        </script>
-        """,
-        height=0,
+            }})();
+            </script>
+            """,
+            height=0,
+        )
+
+
+    # =========================================================
+    # PDF REPORT DOWNLOAD
+    # =========================================================
+    st.subheader("📄 Analytical PDF report")
+    st.caption(
+        "The report uses all currently loaded records before dashboard filters. "
+        "Build 5.10 generates it automatically when the dataset changes and on "
+        "each 30-minute monitoring cycle. All report timestamps are IST."
     )
 
-
-# =========================================================
-# PDF REPORT DOWNLOAD
-# =========================================================
-st.subheader("📄 Analytical PDF report")
-st.caption(
-    "The report uses all currently loaded records before dashboard filters. "
-    "Build 5.10 generates it automatically when the dataset changes and on "
-    "each 30-minute monitoring cycle. All report timestamps are IST."
-)
-
-report_fingerprint = (
-    f"{len(df)}|"
-    f"{df['timestamp'].min() if len(df) else ''}|"
-    f"{df['timestamp'].max() if len(df) else ''}|"
-    f"{source_mode}|{alert_threshold}|evidence={news_evidence_zip_enabled}"
-)
-
-cycle_key = (
-    f"{report_fingerprint}|slot={monitor_slot_key}"
-    if auto_monitor
-    else report_fingerprint
-)
-
-def _make_report_now():
-    generation_time = datetime.now(IST)
-    generation_stamp = generation_time.strftime("%Y%m%d_%H%M%S_IST")
-
-    report_bytes = build_pdf_report(
-        df,
-        narratives_df,
-        trend_df,
-        alert_threshold=alert_threshold,
-    )
-    report_name = (
-        "social_media_intelligence_report_"
-        + generation_stamp
-        + ".pdf"
+    report_fingerprint = (
+        f"{len(df)}|"
+        f"{df['timestamp'].min() if len(df) else ''}|"
+        f"{df['timestamp'].max() if len(df) else ''}|"
+        f"{source_mode}|{alert_threshold}|evidence={news_evidence_zip_enabled}"
     )
 
-    evidence_zip_bytes = None
-    evidence_zip_name = None
-    evidence_count = 0
-    if news_evidence_zip_enabled:
-        evidence_zip_bytes, evidence_count = build_news_evidence_zip(
+    cycle_key = (
+        f"{report_fingerprint}|slot={monitor_slot_key}"
+        if auto_monitor
+        else report_fingerprint
+    )
+
+    def _make_report_now():
+        generation_time = datetime.now(IST)
+        generation_stamp = generation_time.strftime("%Y%m%d_%H%M%S_IST")
+
+        report_bytes = build_pdf_report(
             df,
             narratives_df,
+            trend_df,
+            alert_threshold=alert_threshold,
         )
-        evidence_zip_name = (
-            "ISRO_WebNews_Evidence_"
+        report_name = (
+            "social_media_intelligence_report_"
             + generation_stamp
-            + ".zip"
+            + ".pdf"
         )
 
-    st.session_state["pdf_report_v58"] = report_bytes
-    st.session_state["pdf_report_fp_v58"] = report_fingerprint
-    st.session_state["pdf_report_cycle_v58"] = cycle_key
-    st.session_state["pdf_report_name_v58"] = report_name
-    st.session_state["pdf_report_generated_v58"] = (
-        generation_time.strftime("%Y-%m-%d %H:%M:%S IST")
+        evidence_zip_bytes = None
+        evidence_zip_name = None
+        evidence_count = 0
+        if news_evidence_zip_enabled:
+            evidence_zip_bytes, evidence_count = build_news_evidence_zip(
+                df,
+                narratives_df,
+            )
+            evidence_zip_name = (
+                "ISRO_WebNews_Evidence_"
+                + generation_stamp
+                + ".zip"
+            )
+
+        st.session_state["pdf_report_v58"] = report_bytes
+        st.session_state["pdf_report_fp_v58"] = report_fingerprint
+        st.session_state["pdf_report_cycle_v58"] = cycle_key
+        st.session_state["pdf_report_name_v58"] = report_name
+        st.session_state["pdf_report_generated_v58"] = (
+            generation_time.strftime("%Y-%m-%d %H:%M:%S IST")
+        )
+        st.session_state["news_evidence_zip_v510"] = evidence_zip_bytes
+        st.session_state["news_evidence_zip_name_v510"] = evidence_zip_name
+        st.session_state["news_evidence_count_v510"] = evidence_count
+        return report_bytes, report_name
+
+
+    # Automatic generation: once per dataset/cycle, not on every widget rerun.
+    pending_alert_event = st.session_state.get(
+        "pending_alert_email_event_v59"
     )
-    st.session_state["news_evidence_zip_v510"] = evidence_zip_bytes
-    st.session_state["news_evidence_zip_name_v510"] = evidence_zip_name
-    st.session_state["news_evidence_count_v510"] = evidence_count
-    return report_bytes, report_name
+    alert_event_unsent = bool(
+        pending_alert_event
+        and st.session_state.get(
+            "alert_email_sent_event_v59"
+        ) != pending_alert_event
+    )
 
+    email_needs_pdf = (
+        (routine_email_enabled and auto_monitor)
+        or (alert_email_enabled and alert_event_unsent)
+    )
 
-# Automatic generation: once per dataset/cycle, not on every widget rerun.
-pending_alert_event = st.session_state.get(
-    "pending_alert_email_event_v59"
-)
-alert_event_unsent = bool(
-    pending_alert_event
-    and st.session_state.get(
-        "alert_email_sent_event_v59"
-    ) != pending_alert_event
-)
+    if (
+        (auto_pdf or email_needs_pdf)
+        and st.session_state.get("pdf_report_cycle_v58") != cycle_key
+    ):
+        try:
+            with st.spinner("Automatically building the latest PDF report..."):
+                auto_bytes, auto_name = _make_report_now()
 
-email_needs_pdf = (
-    (routine_email_enabled and auto_monitor)
-    or (alert_email_enabled and alert_event_unsent)
-)
+            if auto_pdf_download:
+                _attempt_browser_pdf_download(auto_bytes, auto_name)
 
-if (
-    (auto_pdf or email_needs_pdf)
-    and st.session_state.get("pdf_report_cycle_v58") != cycle_key
-):
-    try:
-        with st.spinner("Automatically building the latest PDF report..."):
-            auto_bytes, auto_name = _make_report_now()
-
-        if auto_pdf_download:
-            _attempt_browser_pdf_download(auto_bytes, auto_name)
-
-        st.success(
-            "Latest PDF generated automatically at "
-            + st.session_state["pdf_report_generated_v58"]
-            + "."
-        )
-    except Exception as exc:
-        st.error(
-            "Automatic PDF generation failed: "
-            f"{type(exc).__name__}: {exc}"
-        )
-
-
-
-# =========================================================
-# AUTOMATIC EMAIL DELIVERY
-# =========================================================
-email_cfg = get_email_config()
-current_pdf = st.session_state.get("pdf_report_v58")
-current_pdf_name = st.session_state.get(
-    "pdf_report_name_v58",
-    "social_media_intelligence_report_IST.pdf",
-)
-current_generated_at = st.session_state.get(
-    "pdf_report_generated_v58",
-    datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
-)
-current_evidence_zip = st.session_state.get("news_evidence_zip_v510")
-current_evidence_zip_name = st.session_state.get(
-    "news_evidence_zip_name_v510",
-    "ISRO_WebNews_Evidence_IST.zip",
-)
-current_evidence_count = int(
-    st.session_state.get("news_evidence_count_v510", 0) or 0
-)
-
-def _current_evidence_attachments():
-    if news_evidence_zip_enabled and current_evidence_zip:
-        return [(
-            current_evidence_zip_name,
-            current_evidence_zip,
-            "application",
-            "zip",
-        )]
-    return []
-
-# Routine recipients: once per fixed IST half-hour slot (:00 / :30).
-routine_cycle_key = (
-    f"slot={monitor_slot_key}|source={source_mode}"
-    if auto_monitor
-    else None
-)
-
-routine_last_attempt_epoch = float(
-    st.session_state.get("routine_email_last_attempt_epoch_v511", 0.0)
-)
-routine_retry_ready = (
-    datetime.now(IST).timestamp() - routine_last_attempt_epoch >= 5 * 60
-)
-
-if (
-    routine_email_enabled
-    and auto_monitor
-    and email_cfg["routine_recipients"]
-    and smtp_configured()
-    and current_pdf
-    and routine_cycle_key
-    and routine_retry_ready
-    and st.session_state.get(
-        "routine_email_sent_cycle_v59"
-    ) != routine_cycle_key
-):
-    try:
-        st.session_state["routine_email_last_attempt_epoch_v511"] = (
-            datetime.now(IST).timestamp()
-        )
-        st.session_state["routine_email_last_attempt_v511"] = (
-            datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-        )
-        routine_subject = (
-            "ISRO Social Intelligence Report — "
-            + datetime.now(IST).strftime(
-                "%d %b %Y %H:%M IST"
-            )
-        )
-        routine_body = (
-            "Automated 30-minute Social Media Intelligence report.\n\n"
-            f"Generated: {current_generated_at}\n"
-            f"Data source mode: {source_mode}\n"
-            f"Analyzed records: {len(df):,}\n"
-            f"Negativity: {overall_negative_pct:.1f}%\n"
-            f"Alert threshold: {alert_threshold:.1f}%\n"
-            f"Web News evidence PDFs: {current_evidence_count}\n\n"
-            "Attachments:\n"
-            "1. Main analytical PDF\n"
-            + (
-                "2. Numbered Web News evidence ZIP (PDFs + manifest.csv)"
-                if news_evidence_zip_enabled and current_evidence_zip
-                else "2. Web News evidence ZIP not generated for this cycle"
-            )
-        )
-
-        # Reset per-recipient completion tracking when a new
-        # 30-minute slot begins.
-        if (
-            st.session_state.get(
-                "routine_delivery_cycle_v512"
-            ) != routine_cycle_key
-        ):
-            st.session_state["routine_delivery_cycle_v512"] = (
-                routine_cycle_key
-            )
-            st.session_state["routine_delivered_v512"] = []
-
-        delivered = {
-            str(x).lower()
-            for x in st.session_state.get(
-                "routine_delivered_v512",
-                [],
-            )
-        }
-
-        pending_recipients = [
-            address
-            for address in email_cfg["routine_recipients"]
-            if address.lower() not in delivered
-        ]
-
-        delivery = send_email_message(
-            pending_recipients,
-            routine_subject,
-            routine_body,
-            pdf_bytes=current_pdf,
-            pdf_filename=current_pdf_name,
-            extra_attachments=_current_evidence_attachments(),
-        )
-
-        delivered.update(
-            address.lower()
-            for address in delivery["sent"]
-        )
-        st.session_state["routine_delivered_v512"] = sorted(
-            delivered
-        )
-
-        all_expected = {
-            address.lower()
-            for address in email_cfg["routine_recipients"]
-        }
-
-        if delivered >= all_expected:
-            st.session_state["routine_email_sent_cycle_v59"] = (
-                routine_cycle_key
-            )
-            st.session_state["last_routine_email_v59"] = (
-                datetime.now(IST).strftime(
-                    "%Y-%m-%d %H:%M:%S IST"
-                )
-            )
-            st.session_state["last_routine_email_error_v511"] = ""
             st.success(
-                "30-minute PDF delivered individually to "
-                f"{len(delivered)} recipient(s)."
+                "Latest PDF generated automatically at "
+                + st.session_state["pdf_report_generated_v58"]
+                + "."
             )
-        else:
-            failed_text = "; ".join(
-                f"{addr}: {err}"
-                for addr, err in delivery["failed"].items()
-            )
-            st.session_state["last_routine_email_error_v511"] = (
-                failed_text
-                or "Some recipients are still pending delivery."
-            )
-            st.warning(
-                "Routine email was only partially delivered. "
-                "Successful recipients will NOT be re-sent on retry. "
-                "The remaining recipient(s) will be retried in about "
-                "5 minutes. "
-                + (
-                    f"Details: {failed_text}"
-                    if failed_text
-                    else ""
-                )
-            )
-    except Exception as exc:
-        st.session_state["last_routine_email_error_v511"] = (
-            f"{type(exc).__name__}: {exc}"
-        )
-        st.error(
-            "30-minute email failed. The app will retry in about 5 minutes "
-            "while this monitoring session remains awake. "
-            f"Technical detail: {type(exc).__name__}: {exc}"
-        )
-
-
-# Alert-only recipients: once per upward threshold crossing.
-pending_alert_event = st.session_state.get(
-    "pending_alert_email_event_v59"
-)
-alert_event_unsent = bool(
-    pending_alert_event
-    and st.session_state.get(
-        "alert_email_sent_event_v59"
-    ) != pending_alert_event
-)
-
-alert_last_attempt_epoch = float(
-    st.session_state.get("alert_email_last_attempt_epoch_v511", 0.0)
-)
-alert_retry_ready = (
-    datetime.now(IST).timestamp() - alert_last_attempt_epoch >= 5 * 60
-)
-
-if (
-    alert_email_enabled
-    and alert_event_unsent
-    and email_cfg["alert_recipients"]
-    and smtp_configured()
-    and alert_retry_ready
-):
-    try:
-        st.session_state["alert_email_last_attempt_epoch_v511"] = (
-            datetime.now(IST).timestamp()
-        )
-        st.session_state["alert_email_last_attempt_v511"] = (
-            datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-        )
-        # Build a PDF immediately if the currently cached report is missing.
-        if not current_pdf:
-            current_pdf, current_pdf_name = _make_report_now()
-            current_evidence_zip = st.session_state.get(
-                "news_evidence_zip_v510"
-            )
-            current_evidence_zip_name = st.session_state.get(
-                "news_evidence_zip_name_v510",
-                "ISRO_WebNews_Evidence_IST.zip",
-            )
-            current_evidence_count = int(
-                st.session_state.get(
-                    "news_evidence_count_v510", 0
-                ) or 0
+        except Exception as exc:
+            st.error(
+                "Automatic PDF generation failed: "
+                f"{type(exc).__name__}: {exc}"
             )
 
-        alert_negative_pct = float(
-            st.session_state.get(
-                "pending_alert_negative_pct_v59",
-                overall_negative_pct,
-            )
-        )
-
-        alert_subject = (
-            f"ALERT: ISRO negativity {alert_negative_pct:.1f}% — "
-            + datetime.now(IST).strftime(
-                "%d %b %Y %H:%M IST"
-            )
-        )
-        alert_body = (
-            "Negativity threshold alert from the Social Media "
-            "Intelligence Platform.\n\n"
-            f"Alert time: "
-            f"{datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}\n"
-            f"Negativity: {alert_negative_pct:.1f}%\n"
-            f"Configured threshold: {alert_threshold:.1f}%\n"
-            f"Data source mode: {source_mode}\n"
-            f"Analyzed records: {len(df):,}\n"
-            f"Web News evidence PDFs: {current_evidence_count}\n\n"
-            "The current analytical PDF is attached. "
-            "When enabled, a ZIP containing one numbered Web News evidence "
-            "PDF per feed item plus manifest.csv is also attached.\n\n"
-            "This monitoring score and sentiment classification are "
-            "analytical signals, not verified facts or probabilities."
-        )
-
-        # Reset per-recipient completion tracking for each new
-        # threshold-crossing alert event.
-        if (
-            st.session_state.get(
-                "alert_delivery_event_v512"
-            ) != pending_alert_event
-        ):
-            st.session_state["alert_delivery_event_v512"] = (
-                pending_alert_event
-            )
-            st.session_state["alert_delivered_v512"] = []
-
-        delivered = {
-            str(x).lower()
-            for x in st.session_state.get(
-                "alert_delivered_v512",
-                [],
-            )
-        }
-
-        pending_recipients = [
-            address
-            for address in email_cfg["alert_recipients"]
-            if address.lower() not in delivered
-        ]
-
-        delivery = send_email_message(
-            pending_recipients,
-            alert_subject,
-            alert_body,
-            pdf_bytes=current_pdf,
-            pdf_filename=current_pdf_name,
-            extra_attachments=_current_evidence_attachments(),
-        )
-
-        delivered.update(
-            address.lower()
-            for address in delivery["sent"]
-        )
-        st.session_state["alert_delivered_v512"] = sorted(
-            delivered
-        )
-
-        all_expected = {
-            address.lower()
-            for address in email_cfg["alert_recipients"]
-        }
-
-        if delivered >= all_expected:
-            st.session_state["alert_email_sent_event_v59"] = (
-                pending_alert_event
-            )
-            st.session_state["last_alert_email_v59"] = (
-                datetime.now(IST).strftime(
-                    "%Y-%m-%d %H:%M:%S IST"
-                )
-            )
-            st.session_state["last_alert_email_error_v511"] = ""
-            st.success(
-                "Alert PDF delivered individually to "
-                f"{len(delivered)} alert recipient(s)."
-            )
-        else:
-            failed_text = "; ".join(
-                f"{addr}: {err}"
-                for addr, err in delivery["failed"].items()
-            )
-            st.session_state["last_alert_email_error_v511"] = (
-                failed_text
-                or "Some alert recipients are still pending delivery."
-            )
-            st.warning(
-                "Alert email was only partially delivered. "
-                "Successful recipients will NOT be re-sent on retry. "
-                "The remaining recipient(s) will be retried in about "
-                "5 minutes. "
-                + (
-                    f"Details: {failed_text}"
-                    if failed_text
-                    else ""
-                )
-            )
-    except Exception as exc:
-        st.session_state["last_alert_email_error_v511"] = (
-            f"{type(exc).__name__}: {exc}"
-        )
-        st.error(
-            "Alert email failed. The app will retry in about 5 minutes "
-            "while this monitoring session remains awake. "
-            f"Technical detail: {type(exc).__name__}: {exc}"
-        )
 
 
-with st.expander("Email delivery status"):
-    st.write("Current IST time:", datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"))
-    st.write("Current 30-minute slot:", monitor_slot_key)
-    st.write("Next scheduled slot:", monitor_slot_end.strftime("%Y-%m-%d %H:%M:%S IST"))
-    st.write(
-        "30-minute PDF recipients:",
-        ", ".join(email_cfg["routine_recipients"])
-        if email_cfg["routine_recipients"]
-        else "None configured",
+    # =========================================================
+    # AUTOMATIC EMAIL DELIVERY
+    # =========================================================
+    email_cfg = get_email_config()
+    current_pdf = st.session_state.get("pdf_report_v58")
+    current_pdf_name = st.session_state.get(
+        "pdf_report_name_v58",
+        "social_media_intelligence_report_IST.pdf",
     )
-    st.write(
-        "Alert-only recipients:",
-        ", ".join(email_cfg["alert_recipients"])
-        if email_cfg["alert_recipients"]
-        else "None configured",
-    )
-    st.write(
-        "Parsed routine recipient count:",
-        len(email_cfg["routine_recipients"]),
-    )
-    st.write(
-        "Routine recipients delivered in current slot:",
-        ", ".join(
-            st.session_state.get(
-                "routine_delivered_v512",
-                [],
-            )
-        )
-        or "None yet",
-    )
-    st.write(
-        "Parsed alert recipient count:",
-        len(email_cfg["alert_recipients"]),
-    )
-    st.write(
-        "Alert recipients delivered in current event:",
-        ", ".join(
-            st.session_state.get(
-                "alert_delivered_v512",
-                [],
-            )
-        )
-        or "None yet",
-    )
-    st.write(
-        "Last 30-minute email:",
-        st.session_state.get(
-            "last_routine_email_v59",
-            "Not sent in this session",
-        ),
-    )
-    st.write(
-        "Last alert email:",
-        st.session_state.get(
-            "last_alert_email_v59",
-            "Not sent in this session",
-        ),
-    )
-    st.write(
-        "Last routine send attempt:",
-        st.session_state.get(
-            "routine_email_last_attempt_v511",
-            "No attempt in this session",
-        ),
-    )
-    st.write(
-        "Last routine send error:",
-        st.session_state.get(
-            "last_routine_email_error_v511",
-            "None",
-        ) or "None",
-    )
-    st.write(
-        "Last alert send attempt:",
-        st.session_state.get(
-            "alert_email_last_attempt_v511",
-            "No attempt in this session",
-        ),
-    )
-    st.write(
-        "Last alert send error:",
-        st.session_state.get(
-            "last_alert_email_error_v511",
-            "None",
-        ) or "None",
-    )
-    st.write(
-        "Last successful news refresh:",
-        st.session_state.get(
-            "last_news_fetch_iso_v57",
-            "Not refreshed in this session",
-        ),
-    )
-    st.write(
-        "Last news refresh error:",
-        st.session_state.get(
-            "last_news_fetch_error_v511",
-            "None",
-        ) or "None",
-    )
-    st.write(
-        "Web News evidence PDFs in latest ZIP:",
-        current_evidence_count,
-    )
-    if current_evidence_zip:
-        st.write(
-            "Evidence ZIP size:",
-            f"{len(current_evidence_zip) / (1024 * 1024):.2f} MB",
-        )
-
-
-# Manual regeneration remains available as a fallback.
-if st.button(
-    "Regenerate PDF now",
-    key="regenerate_pdf_v58",
-):
-    try:
-        with st.spinner("Building PDF report..."):
-            manual_bytes, manual_name = _make_report_now()
-
-        if auto_pdf_download:
-            _attempt_browser_pdf_download(manual_bytes, manual_name)
-
-        st.success(
-            "PDF regenerated at "
-            + st.session_state["pdf_report_generated_v58"]
-            + "."
-        )
-    except Exception as exc:
-        st.error(
-            "PDF report could not be generated: "
-            f"{type(exc).__name__}: {exc}"
-        )
-
-
-if (
-    st.session_state.get("pdf_report_v58")
-    and st.session_state.get("pdf_report_fp_v58") == report_fingerprint
-):
-    generated_at = st.session_state.get(
+    current_generated_at = st.session_state.get(
         "pdf_report_generated_v58",
-        "unknown time",
+        datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
     )
-    st.info(
-        f"Latest report ready · generated {generated_at}. "
-        "If your browser blocked the automatic download, use the button below."
+    current_evidence_zip = st.session_state.get("news_evidence_zip_v510")
+    current_evidence_zip_name = st.session_state.get(
+        "news_evidence_zip_name_v510",
+        "ISRO_WebNews_Evidence_IST.zip",
     )
-
-    st.download_button(
-        "⬇️ Download latest PDF report",
-        data=st.session_state["pdf_report_v58"],
-        file_name=st.session_state.get(
-            "pdf_report_name_v58",
-            "social_media_intelligence_report_IST.pdf",
-        ),
-        mime="application/pdf",
-        key="download_pdf_v58",
+    current_evidence_count = int(
+        st.session_state.get("news_evidence_count_v510", 0) or 0
     )
 
-    if st.session_state.get("news_evidence_zip_v510"):
-        st.download_button(
-            "🗂️ Download Web News evidence ZIP",
-            data=st.session_state["news_evidence_zip_v510"],
-            file_name=st.session_state.get(
-                "news_evidence_zip_name_v510",
-                "ISRO_WebNews_Evidence_IST.zip",
+    def _current_evidence_attachments():
+        if news_evidence_zip_enabled and current_evidence_zip:
+            return [(
+                current_evidence_zip_name,
+                current_evidence_zip,
+                "application",
+                "zip",
+            )]
+        return []
+
+    # Routine recipients: once per fixed IST half-hour slot (:00 / :30).
+    routine_cycle_key = (
+        f"slot={monitor_slot_key}|source={source_mode}"
+        if auto_monitor
+        else None
+    )
+
+    routine_last_attempt_epoch = float(
+        st.session_state.get("routine_email_last_attempt_epoch_v511", 0.0)
+    )
+    routine_retry_ready = (
+        datetime.now(IST).timestamp() - routine_last_attempt_epoch >= 5 * 60
+    )
+
+    if (
+        routine_email_enabled
+        and auto_monitor
+        and email_cfg["routine_recipients"]
+        and smtp_configured()
+        and current_pdf
+        and routine_cycle_key
+        and routine_retry_ready
+        and st.session_state.get(
+            "routine_email_sent_cycle_v59"
+        ) != routine_cycle_key
+    ):
+        try:
+            st.session_state["routine_email_last_attempt_epoch_v511"] = (
+                datetime.now(IST).timestamp()
+            )
+            st.session_state["routine_email_last_attempt_v511"] = (
+                datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+            )
+            routine_subject = (
+                "ISRO Social Intelligence Report — "
+                + datetime.now(IST).strftime(
+                    "%d %b %Y %H:%M IST"
+                )
+            )
+            routine_body = (
+                "Automated 30-minute Social Media Intelligence report.\n\n"
+                f"Generated: {current_generated_at}\n"
+                f"Data source mode: {source_mode}\n"
+                f"Analyzed records: {len(df):,}\n"
+                f"Negativity: {overall_negative_pct:.1f}%\n"
+                f"Alert threshold: {alert_threshold:.1f}%\n"
+                f"Web News evidence PDFs: {current_evidence_count}\n\n"
+                "Attachments:\n"
+                "1. Main analytical PDF\n"
+                + (
+                    "2. Numbered Web News evidence ZIP (PDFs + manifest.csv)"
+                    if news_evidence_zip_enabled and current_evidence_zip
+                    else "2. Web News evidence ZIP not generated for this cycle"
+                )
+            )
+
+            # Reset per-recipient completion tracking when a new
+            # 30-minute slot begins.
+            if (
+                st.session_state.get(
+                    "routine_delivery_cycle_v512"
+                ) != routine_cycle_key
+            ):
+                st.session_state["routine_delivery_cycle_v512"] = (
+                    routine_cycle_key
+                )
+                st.session_state["routine_delivered_v512"] = []
+
+            delivered = {
+                str(x).lower()
+                for x in st.session_state.get(
+                    "routine_delivered_v512",
+                    [],
+                )
+            }
+
+            pending_recipients = [
+                address
+                for address in email_cfg["routine_recipients"]
+                if address.lower() not in delivered
+            ]
+
+            delivery = send_email_message(
+                pending_recipients,
+                routine_subject,
+                routine_body,
+                pdf_bytes=current_pdf,
+                pdf_filename=current_pdf_name,
+                extra_attachments=_current_evidence_attachments(),
+            )
+
+            delivered.update(
+                address.lower()
+                for address in delivery["sent"]
+            )
+            st.session_state["routine_delivered_v512"] = sorted(
+                delivered
+            )
+
+            all_expected = {
+                address.lower()
+                for address in email_cfg["routine_recipients"]
+            }
+
+            if delivered >= all_expected:
+                st.session_state["routine_email_sent_cycle_v59"] = (
+                    routine_cycle_key
+                )
+                st.session_state["last_routine_email_v59"] = (
+                    datetime.now(IST).strftime(
+                        "%Y-%m-%d %H:%M:%S IST"
+                    )
+                )
+                st.session_state["last_routine_email_error_v511"] = ""
+                st.success(
+                    "30-minute PDF delivered individually to "
+                    f"{len(delivered)} recipient(s)."
+                )
+            else:
+                failed_text = "; ".join(
+                    f"{addr}: {err}"
+                    for addr, err in delivery["failed"].items()
+                )
+                st.session_state["last_routine_email_error_v511"] = (
+                    failed_text
+                    or "Some recipients are still pending delivery."
+                )
+                st.warning(
+                    "Routine email was only partially delivered. "
+                    "Successful recipients will NOT be re-sent on retry. "
+                    "The remaining recipient(s) will be retried in about "
+                    "5 minutes. "
+                    + (
+                        f"Details: {failed_text}"
+                        if failed_text
+                        else ""
+                    )
+                )
+        except Exception as exc:
+            st.session_state["last_routine_email_error_v511"] = (
+                f"{type(exc).__name__}: {exc}"
+            )
+            st.error(
+                "30-minute email failed. The app will retry in about 5 minutes "
+                "while this monitoring session remains awake. "
+                f"Technical detail: {type(exc).__name__}: {exc}"
+            )
+
+
+    # Alert-only recipients: once per upward threshold crossing.
+    pending_alert_event = st.session_state.get(
+        "pending_alert_email_event_v59"
+    )
+    alert_event_unsent = bool(
+        pending_alert_event
+        and st.session_state.get(
+            "alert_email_sent_event_v59"
+        ) != pending_alert_event
+    )
+
+    alert_last_attempt_epoch = float(
+        st.session_state.get("alert_email_last_attempt_epoch_v511", 0.0)
+    )
+    alert_retry_ready = (
+        datetime.now(IST).timestamp() - alert_last_attempt_epoch >= 5 * 60
+    )
+
+    if (
+        alert_email_enabled
+        and alert_event_unsent
+        and email_cfg["alert_recipients"]
+        and smtp_configured()
+        and alert_retry_ready
+    ):
+        try:
+            st.session_state["alert_email_last_attempt_epoch_v511"] = (
+                datetime.now(IST).timestamp()
+            )
+            st.session_state["alert_email_last_attempt_v511"] = (
+                datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+            )
+            # Build a PDF immediately if the currently cached report is missing.
+            if not current_pdf:
+                current_pdf, current_pdf_name = _make_report_now()
+                current_evidence_zip = st.session_state.get(
+                    "news_evidence_zip_v510"
+                )
+                current_evidence_zip_name = st.session_state.get(
+                    "news_evidence_zip_name_v510",
+                    "ISRO_WebNews_Evidence_IST.zip",
+                )
+                current_evidence_count = int(
+                    st.session_state.get(
+                        "news_evidence_count_v510", 0
+                    ) or 0
+                )
+
+            alert_negative_pct = float(
+                st.session_state.get(
+                    "pending_alert_negative_pct_v59",
+                    overall_negative_pct,
+                )
+            )
+
+            alert_subject = (
+                f"ALERT: ISRO negativity {alert_negative_pct:.1f}% — "
+                + datetime.now(IST).strftime(
+                    "%d %b %Y %H:%M IST"
+                )
+            )
+            alert_body = (
+                "Negativity threshold alert from the Social Media "
+                "Intelligence Platform.\n\n"
+                f"Alert time: "
+                f"{datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}\n"
+                f"Negativity: {alert_negative_pct:.1f}%\n"
+                f"Configured threshold: {alert_threshold:.1f}%\n"
+                f"Data source mode: {source_mode}\n"
+                f"Analyzed records: {len(df):,}\n"
+                f"Web News evidence PDFs: {current_evidence_count}\n\n"
+                "The current analytical PDF is attached. "
+                "When enabled, a ZIP containing one numbered Web News evidence "
+                "PDF per feed item plus manifest.csv is also attached.\n\n"
+                "This monitoring score and sentiment classification are "
+                "analytical signals, not verified facts or probabilities."
+            )
+
+            # Reset per-recipient completion tracking for each new
+            # threshold-crossing alert event.
+            if (
+                st.session_state.get(
+                    "alert_delivery_event_v512"
+                ) != pending_alert_event
+            ):
+                st.session_state["alert_delivery_event_v512"] = (
+                    pending_alert_event
+                )
+                st.session_state["alert_delivered_v512"] = []
+
+            delivered = {
+                str(x).lower()
+                for x in st.session_state.get(
+                    "alert_delivered_v512",
+                    [],
+                )
+            }
+
+            pending_recipients = [
+                address
+                for address in email_cfg["alert_recipients"]
+                if address.lower() not in delivered
+            ]
+
+            delivery = send_email_message(
+                pending_recipients,
+                alert_subject,
+                alert_body,
+                pdf_bytes=current_pdf,
+                pdf_filename=current_pdf_name,
+                extra_attachments=_current_evidence_attachments(),
+            )
+
+            delivered.update(
+                address.lower()
+                for address in delivery["sent"]
+            )
+            st.session_state["alert_delivered_v512"] = sorted(
+                delivered
+            )
+
+            all_expected = {
+                address.lower()
+                for address in email_cfg["alert_recipients"]
+            }
+
+            if delivered >= all_expected:
+                st.session_state["alert_email_sent_event_v59"] = (
+                    pending_alert_event
+                )
+                st.session_state["last_alert_email_v59"] = (
+                    datetime.now(IST).strftime(
+                        "%Y-%m-%d %H:%M:%S IST"
+                    )
+                )
+                st.session_state["last_alert_email_error_v511"] = ""
+                st.success(
+                    "Alert PDF delivered individually to "
+                    f"{len(delivered)} alert recipient(s)."
+                )
+            else:
+                failed_text = "; ".join(
+                    f"{addr}: {err}"
+                    for addr, err in delivery["failed"].items()
+                )
+                st.session_state["last_alert_email_error_v511"] = (
+                    failed_text
+                    or "Some alert recipients are still pending delivery."
+                )
+                st.warning(
+                    "Alert email was only partially delivered. "
+                    "Successful recipients will NOT be re-sent on retry. "
+                    "The remaining recipient(s) will be retried in about "
+                    "5 minutes. "
+                    + (
+                        f"Details: {failed_text}"
+                        if failed_text
+                        else ""
+                    )
+                )
+        except Exception as exc:
+            st.session_state["last_alert_email_error_v511"] = (
+                f"{type(exc).__name__}: {exc}"
+            )
+            st.error(
+                "Alert email failed. The app will retry in about 5 minutes "
+                "while this monitoring session remains awake. "
+                f"Technical detail: {type(exc).__name__}: {exc}"
+            )
+
+
+    with st.expander("Email delivery status"):
+        st.write("Current IST time:", datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"))
+        st.write("Current 30-minute slot:", monitor_slot_key)
+        st.write("Next scheduled slot:", monitor_slot_end.strftime("%Y-%m-%d %H:%M:%S IST"))
+        st.write(
+            "30-minute PDF recipients:",
+            ", ".join(email_cfg["routine_recipients"])
+            if email_cfg["routine_recipients"]
+            else "None configured",
+        )
+        st.write(
+            "Alert-only recipients:",
+            ", ".join(email_cfg["alert_recipients"])
+            if email_cfg["alert_recipients"]
+            else "None configured",
+        )
+        st.write(
+            "Parsed routine recipient count:",
+            len(email_cfg["routine_recipients"]),
+        )
+        st.write(
+            "Routine recipients delivered in current slot:",
+            ", ".join(
+                st.session_state.get(
+                    "routine_delivered_v512",
+                    [],
+                )
+            )
+            or "None yet",
+        )
+        st.write(
+            "Parsed alert recipient count:",
+            len(email_cfg["alert_recipients"]),
+        )
+        st.write(
+            "Alert recipients delivered in current event:",
+            ", ".join(
+                st.session_state.get(
+                    "alert_delivered_v512",
+                    [],
+                )
+            )
+            or "None yet",
+        )
+        st.write(
+            "Last 30-minute email:",
+            st.session_state.get(
+                "last_routine_email_v59",
+                "Not sent in this session",
             ),
-            mime="application/zip",
-            key="download_news_evidence_zip_v510",
         )
-        st.caption(
-            f"Evidence ZIP contains "
-            f"{int(st.session_state.get('news_evidence_count_v510', 0) or 0)} "
-            "numbered Web News evidence PDF(s) plus manifest.csv."
+        st.write(
+            "Last alert email:",
+            st.session_state.get(
+                "last_alert_email_v59",
+                "Not sent in this session",
+            ),
         )
-else:
-    st.info(
-        "The PDF will be generated automatically when analyzed data is available."
-    )
+        st.write(
+            "Last routine send attempt:",
+            st.session_state.get(
+                "routine_email_last_attempt_v511",
+                "No attempt in this session",
+            ),
+        )
+        st.write(
+            "Last routine send error:",
+            st.session_state.get(
+                "last_routine_email_error_v511",
+                "None",
+            ) or "None",
+        )
+        st.write(
+            "Last alert send attempt:",
+            st.session_state.get(
+                "alert_email_last_attempt_v511",
+                "No attempt in this session",
+            ),
+        )
+        st.write(
+            "Last alert send error:",
+            st.session_state.get(
+                "last_alert_email_error_v511",
+                "None",
+            ) or "None",
+        )
+        st.write(
+            "Last successful news refresh:",
+            st.session_state.get(
+                "last_news_fetch_iso_v57",
+                "Not refreshed in this session",
+            ),
+        )
+        st.write(
+            "Last news refresh error:",
+            st.session_state.get(
+                "last_news_fetch_error_v511",
+                "None",
+            ) or "None",
+        )
+        st.write(
+            "Web News evidence PDFs in latest ZIP:",
+            current_evidence_count,
+        )
+        if current_evidence_zip:
+            st.write(
+                "Evidence ZIP size:",
+                f"{len(current_evidence_zip) / (1024 * 1024):.2f} MB",
+            )
 
 
-st.subheader("Record explorer — timestamps in IST")
+    # Manual regeneration remains available as a fallback.
+    if st.button(
+        "Regenerate PDF now",
+        key="regenerate_pdf_v58",
+    ):
+        try:
+            with st.spinner("Building PDF report..."):
+                manual_bytes, manual_name = _make_report_now()
 
-display_cols = [
-    "timestamp",
-    "platform",
-    "username",
-    "text",
-    "semantic_cluster",
-    "sentiment",
-    "sentiment_score",
-    "emotion",
-    "engagement",
-    "hashtags",
-    "source_url",
-]
+            if auto_pdf_download:
+                _attempt_browser_pdf_download(manual_bytes, manual_name)
 
-st.dataframe(
-    filtered[display_cols]
-    .sort_values(
+            st.success(
+                "PDF regenerated at "
+                + st.session_state["pdf_report_generated_v58"]
+                + "."
+            )
+        except Exception as exc:
+            st.error(
+                "PDF report could not be generated: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+
+    if (
+        st.session_state.get("pdf_report_v58")
+        and st.session_state.get("pdf_report_fp_v58") == report_fingerprint
+    ):
+        generated_at = st.session_state.get(
+            "pdf_report_generated_v58",
+            "unknown time",
+        )
+        st.info(
+            f"Latest report ready · generated {generated_at}. "
+            "If your browser blocked the automatic download, use the button below."
+        )
+
+        st.download_button(
+            "⬇️ Download latest PDF report",
+            data=st.session_state["pdf_report_v58"],
+            file_name=st.session_state.get(
+                "pdf_report_name_v58",
+                "social_media_intelligence_report_IST.pdf",
+            ),
+            mime="application/pdf",
+            key="download_pdf_v58",
+        )
+
+        if st.session_state.get("news_evidence_zip_v510"):
+            st.download_button(
+                "🗂️ Download Web News evidence ZIP",
+                data=st.session_state["news_evidence_zip_v510"],
+                file_name=st.session_state.get(
+                    "news_evidence_zip_name_v510",
+                    "ISRO_WebNews_Evidence_IST.zip",
+                ),
+                mime="application/zip",
+                key="download_news_evidence_zip_v510",
+            )
+            st.caption(
+                f"Evidence ZIP contains "
+                f"{int(st.session_state.get('news_evidence_count_v510', 0) or 0)} "
+                "numbered Web News evidence PDF(s) plus manifest.csv."
+            )
+    else:
+        st.info(
+            "The PDF will be generated automatically when analyzed data is available."
+        )
+
+
+    st.subheader("Record explorer — timestamps in IST")
+
+    display_cols = [
         "timestamp",
-        ascending=False
-    ),
-    use_container_width=True,
-    hide_index=True,
-)
+        "platform",
+        "username",
+        "text",
+        "semantic_cluster",
+        "sentiment",
+        "sentiment_score",
+        "emotion",
+        "engagement",
+        "hashtags",
+        "source_url",
+    ]
 
-
-st.subheader("Agent status")
-
-agent_status = pd.DataFrame(
-    [
-        [
-            "CSV / X Sample Collector",
-            "Active",
-            "Manual or exported X-post data",
-        ],
-        [
-            "GDELT News Collector",
-            "Active",
-            "Free web/news coverage",
-        ],
-        [
-            "Supabase Connector",
-            "Active",
-            "Persistent storage",
-        ],
-        [
-            "Sentiment Agent",
-            "Active",
-            "Sentiment classification",
-        ],
-        [
-            "Emotion Agent",
-            "Active",
-            "Basic emotion signals",
-        ],
-        [
-            "Semantic Topic Agent",
-            "Active",
-            "Automatic clustering",
-        ],
-        [
-            "Narrative Agent",
-            "Active",
-            "Themes and representative evidence",
-        ],
-        [
-            "Trend Agent",
-            "Active",
-            "Volume / coverage anomalies",
-        ],
-        [
-            "Risk Agent",
-            "Active",
-            "Multi-signal monitoring score",
-        ],
-    ],
-    columns=["Component", "Status", "Role"],
-)
-
-st.dataframe(
-    agent_status,
-    use_container_width=True,
-    hide_index=True,
-)
-
-
-with st.expander("How to use the free ISRO workflow"):
-    st.markdown(
-        """
-        **Option A — X samples**
-
-        Put manually collected or legitimately exported X posts
-        into the CSV template and upload it.
-
-        **Option B — Free web/news**
-
-        Search GDELT for ISRO-related news coverage. No X token
-        is required.
-
-        **Combined mode**
-
-        Upload your X CSV and fetch GDELT news, then analyze both
-        together. Use the Source/platform filter to separate
-        `x_manual` from `web_news`.
-
-        You can save either or both sources into Supabase.
-        """
+    st.dataframe(
+        filtered[display_cols]
+        .sort_values(
+            "timestamp",
+            ascending=False
+        ),
+        use_container_width=True,
+        hide_index=True,
     )
+
+
+    st.subheader("Agent status")
+
+    agent_status = pd.DataFrame(
+        [
+            [
+                "CSV / X Sample Collector",
+                "Active",
+                "Manual or exported X-post data",
+            ],
+            [
+                "GDELT News Collector",
+                "Active",
+                "Free web/news coverage",
+            ],
+            [
+                "Supabase Connector",
+                "Active",
+                "Persistent storage",
+            ],
+            [
+                "Sentiment Agent",
+                "Active",
+                "Sentiment classification",
+            ],
+            [
+                "Emotion Agent",
+                "Active",
+                "Basic emotion signals",
+            ],
+            [
+                "Semantic Topic Agent",
+                "Active",
+                "Automatic clustering",
+            ],
+            [
+                "Narrative Agent",
+                "Active",
+                "Themes and representative evidence",
+            ],
+            [
+                "Trend Agent",
+                "Active",
+                "Volume / coverage anomalies",
+            ],
+            [
+                "Risk Agent",
+                "Active",
+                "Multi-signal monitoring score",
+            ],
+        ],
+        columns=["Component", "Status", "Role"],
+    )
+
+    st.dataframe(
+        agent_status,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+    with st.expander("How to use the free ISRO workflow"):
+        st.markdown(
+            """
+            **Option A — X samples**
+
+            Put manually collected or legitimately exported X posts
+            into the CSV template and upload it.
+
+            **Option B — Free web/news**
+
+            Search GDELT for ISRO-related news coverage. No X token
+            is required.
+
+            **Combined mode**
+
+            Upload your X CSV and fetch GDELT news, then analyze both
+            together. Use the Source/platform filter to separate
+            `x_manual` from `web_news`.
+
+            You can save either or both sources into Supabase.
+            """
+        )
