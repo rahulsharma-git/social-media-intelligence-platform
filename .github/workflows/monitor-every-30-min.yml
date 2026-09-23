@@ -2,10 +2,9 @@ name: SMI Background Monitor - Every 30 Minutes
 
 on:
   schedule:
-    # Every 30 minutes in India Standard Time. :07/:37 avoids the busiest
-    # top-of-hour GitHub Actions scheduling window.
+    # GitHub cron is evaluated in UTC. Because this repeats every 30 minutes,
+    # 07/37 UTC also produces :07/:37 half-hour slots in IST, alternating.
     - cron: "7,37 * * * *"
-      timezone: "Asia/Kolkata"
   workflow_dispatch:
     inputs:
       force_send:
@@ -33,33 +32,83 @@ jobs:
       SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
       SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
       REPORT_RECIPIENTS_30MIN: ${{ secrets.REPORT_RECIPIENTS_30MIN }}
+      REPORT_RECIPIENTS: ${{ secrets.REPORT_RECIPIENTS }}
       ALERT_RECIPIENTS: ${{ secrets.ALERT_RECIPIENTS }}
       MONITOR_QUERY: ${{ vars.MONITOR_QUERY }}
       NEGATIVITY_ALERT_THRESHOLD: ${{ vars.NEGATIVITY_ALERT_THRESHOLD }}
       BACKGROUND_LOOKBACK_HOURS: ${{ vars.BACKGROUND_LOOKBACK_HOURS }}
       BACKGROUND_MAX_RECORDS: ${{ vars.BACKGROUND_MAX_RECORDS }}
+      FAIL_ON_EMAIL_ERROR: ${{ vars.FAIL_ON_EMAIL_ERROR }}
       FORCE_SEND: ${{ github.event_name == 'workflow_dispatch' && inputs.force_send || false }}
       OUTPUT_DIR: output
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: "pip"
 
+      - name: Validate required configuration
+        shell: bash
+        run: |
+          set -u
+          missing=0
+
+          if [ -z "${SUPABASE_URL:-}" ]; then
+            echo "::error::Missing GitHub Actions repository secret SUPABASE_URL"
+            missing=1
+          fi
+
+          if [ -z "${SUPABASE_SECRET_KEY:-}" ] && [ -z "${SUPABASE_SERVICE_KEY:-}" ]; then
+            echo "::error::Add SUPABASE_SECRET_KEY (preferred) or SUPABASE_SERVICE_KEY as a GitHub Actions repository secret"
+            missing=1
+          fi
+
+          RECIPIENTS="${REPORT_RECIPIENTS_30MIN:-}${REPORT_RECIPIENTS:-}${ALERT_RECIPIENTS:-}"
+          if [ -n "$RECIPIENTS" ]; then
+            if [ -z "${SMTP_EMAIL:-}" ]; then
+              echo "::error::Email recipients are configured but SMTP_EMAIL is missing from GitHub Actions repository secrets"
+              missing=1
+            fi
+            if [ -z "${SMTP_APP_PASSWORD:-}" ]; then
+              echo "::error::Email recipients are configured but SMTP_APP_PASSWORD is missing from GitHub Actions repository secrets"
+              missing=1
+            fi
+          else
+            echo "::warning::No REPORT_RECIPIENTS_30MIN / REPORT_RECIPIENTS / ALERT_RECIPIENTS secret is configured. PDF generation will run, but no email will be sent."
+          fi
+
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+          echo "Configuration presence check passed. Secret values were not printed."
+
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: python -m pip install -r requirements.txt
 
       - name: Run browser-independent monitor
         run: python background_monitor.py
 
-      - name: Preserve generated report and run summary
+      - name: Publish run summary
         if: always()
-        uses: actions/upload-artifact@v4
+        shell: bash
+        run: |
+          if [ -f output/github_step_summary.md ]; then
+            cat output/github_step_summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## SMI Background Monitor" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "No run summary was created. Open the failed step above for the exact error." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Preserve generated report and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
         with:
           name: smi-report-${{ github.run_id }}
           path: output/
