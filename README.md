@@ -1,4 +1,4 @@
-# Social Media Intelligence Platform — Build 5.13.1
+# Social Media Intelligence Platform — Build 5.13.2
 
 Build 5.13 is based on the uploaded Build 5.12 recipient-email hotfix.
 
@@ -141,3 +141,8 @@ For email:
 - optional `ALERT_RECIPIENTS`
 
 These are GitHub Actions secrets and are separate from Streamlit Secrets.
+
+## Build 5.13.2
+
+Fixes Supabase HTTP 409 conflicts in the GitHub background monitor by specifying
+the correct PostgREST conflict targets (`external_id` and `slot_key`).

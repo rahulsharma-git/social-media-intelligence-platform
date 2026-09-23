@@ -145,9 +145,16 @@ def upsert_posts(frame: pd.DataFrame) -> int:
     r = requests.post(
         f"{url}/rest/v1/social_posts",
         headers=supabase_headers("resolution=merge-duplicates,return=minimal"),
+        params={"on_conflict": "external_id"},
         json=payload,
         timeout=60,
     )
+    if r.status_code == 409:
+        raise RuntimeError(
+            "Supabase social_posts upsert conflict. Verify that "
+            "social_posts.external_id has a UNIQUE constraint. "
+            f"Response: {r.text[:500]}"
+        )
     r.raise_for_status()
     return len(payload)
 
@@ -199,12 +206,19 @@ def monitoring_upsert(record: dict) -> bool:
     r = requests.post(
         f"{url}/rest/v1/monitoring_runs",
         headers=supabase_headers("resolution=merge-duplicates,return=minimal"),
+        params={"on_conflict": "slot_key"},
         json=[record],
         timeout=30,
     )
     if r.status_code in (400, 404):
         print("WARNING: monitoring status could not be persisted:", r.text[:300])
         return False
+    if r.status_code == 409:
+        raise RuntimeError(
+            "Supabase monitoring_runs upsert conflict. Verify that "
+            "monitoring_runs.slot_key has a UNIQUE constraint. "
+            f"Response: {r.text[:500]}"
+        )
     r.raise_for_status()
     return True
 
@@ -358,7 +372,7 @@ def main() -> None:
         routine_recipients = parse_recipients("REPORT_RECIPIENTS")
     alert_recipients = parse_recipients("ALERT_RECIPIENTS")
 
-    print(f"Build 5.13.1 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
+    print(f"Build 5.13.2 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
     print(f"Slot: {slot_key}; query={query!r}; lookback={lookback_hours}h")
 
     table_ok, current_state = monitoring_current(slot_key)
@@ -561,7 +575,7 @@ def main() -> None:
         monitoring_upsert(run_record)
 
     summary = {
-        "build": "5.13.1",
+        "build": "5.13.2",
         "run_time_ist": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
         "slot_key": slot_key,
         "records": len(df),
@@ -588,7 +602,7 @@ def main() -> None:
         [
             "# SMI Background Monitor",
             "",
-            f"- Build: **5.13.1**",
+            f"- Build: **5.13.2**",
             f"- Run time: **{now_ist:%Y-%m-%d %H:%M:%S IST}**",
             f"- Status: **{run_record['status']}**",
             f"- Records analyzed: **{len(df):,}**",
