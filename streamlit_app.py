@@ -55,7 +55,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
 
     st.title("📡 Social Media Intelligence Platform")
     st.caption(
-        "Build 5.13 / Build 13 — GitHub background scheduler + "
+        "Build 5.13.1 — background scheduler hotfix + 24-hour news default + "
         "consistent sentiment colors"
     )
 
@@ -746,10 +746,39 @@ def fetch_google_news_rss(query, max_records=50):
     return normalize_posts(pd.DataFrame(rows))
 
 
-def fetch_free_news(query, timespan="1week", max_records=50):
+def _filter_news_to_timespan(df, timespan):
+    """Apply the requested look-back locally as well as at the source."""
+    if df is None or df.empty:
+        return df
+
+    span = str(timespan or "").strip().lower()
+    hours_map = {
+        "24h": 24,
+        "24hours": 24,
+        "1day": 24,
+        "1week": 24 * 7,
+        "7days": 24 * 7,
+        "1month": 24 * 31,
+        "30days": 24 * 30,
+    }
+    hours = hours_map.get(span)
+    if not hours:
+        return df
+
+    result = normalize_posts(df)
+    cutoff = pd.Timestamp.now(tz=IST) - pd.Timedelta(hours=hours)
+    return (
+        result[result["timestamp"] >= cutoff]
+        .sort_values("timestamp", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
+def fetch_free_news(query, timespan="24h", max_records=50):
     """
-    Try GDELT first. If GDELT rate-limits the Streamlit host,
-    automatically fall back to Google News RSS.
+    Try GDELT first. If GDELT rate-limits the host, automatically fall
+    back to Google News RSS. The requested look-back is also enforced
+    locally so the RSS fallback cannot leak older items into the dataset.
     """
     try:
         df = fetch_gdelt_news(
@@ -757,11 +786,10 @@ def fetch_free_news(query, timespan="1week", max_records=50):
             timespan=timespan,
             max_records=max_records,
         )
+        df = _filter_news_to_timespan(df, timespan)
         return df, "GDELT"
     except Exception as exc:
         if str(exc) != "GDELT_RATE_LIMIT":
-            # For robustness, still try the free fallback if GDELT fails
-            # for any transient reason.
             gdelt_error = str(exc)
         else:
             gdelt_error = "GDELT rate limit (HTTP 429)"
@@ -770,6 +798,7 @@ def fetch_free_news(query, timespan="1week", max_records=50):
             query=query,
             max_records=max_records,
         )
+        fallback = _filter_news_to_timespan(fallback, timespan)
         return fallback, f"Google News RSS fallback ({gdelt_error})"
 
 
@@ -2883,7 +2912,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
         period_label = st.selectbox(
             "Look-back period",
             ["24 hours", "7 days", "1 month"],
-            index=1,
+            index=0,
         )
 
         timespan_map = {

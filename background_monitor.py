@@ -17,6 +17,7 @@ import os
 import re
 import smtplib
 import ssl
+import time
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
@@ -228,53 +229,97 @@ def send_email_individually(
     pdf_bytes: bytes,
     pdf_filename: str,
 ) -> dict:
+    """
+    Send one message per recipient.
+
+    Build 5.13.1 retries transient SMTP connection/login failures and returns
+    failures to the caller instead of crashing before diagnostics are written.
+    """
     sender = env("SMTP_EMAIL")
     password = env("SMTP_APP_PASSWORD").replace(" ", "")
-    if not sender or not password:
-        raise RuntimeError(
-            "SMTP_EMAIL and SMTP_APP_PASSWORD must be configured in GitHub Secrets."
-        )
 
     recipients = [x for x in recipients if x and "@" in x]
     if not recipients:
         return {"sent": [], "failed": {}}
 
-    # Gmail MIME/base64 overhead makes large attachments unreliable.
-    if len(pdf_bytes) > 18 * 1024 * 1024:
-        raise RuntimeError(
-            f"PDF is {len(pdf_bytes)/(1024*1024):.1f} MB; above the 18 MB safe raw attachment limit."
+    if not sender or not password:
+        msg = (
+            "SMTP_EMAIL and SMTP_APP_PASSWORD are not configured in "
+            "GitHub Actions repository secrets."
         )
+        return {"sent": [], "failed": {x: msg for x in recipients}}
+
+    if len(pdf_bytes) > 18 * 1024 * 1024:
+        msg = (
+            f"PDF is {len(pdf_bytes)/(1024*1024):.1f} MB; above the "
+            "18 MB safe raw attachment limit."
+        )
+        return {"sent": [], "failed": {x: msg for x in recipients}}
 
     context = ssl.create_default_context()
+    pending = list(recipients)
     sent: list[str] = []
     failed: dict[str, str] = {}
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context, timeout=45) as smtp:
-        smtp.login(sender, password)
-        for recipient in recipients:
-            try:
-                msg = EmailMessage()
-                msg["From"] = sender
-                msg["To"] = recipient
-                msg["Subject"] = subject
-                msg.set_content(body)
-                msg.add_attachment(
-                    pdf_bytes,
-                    maintype="application",
-                    subtype="pdf",
-                    filename=pdf_filename,
-                )
-                refused = smtp.send_message(
-                    msg,
-                    from_addr=sender,
-                    to_addrs=[recipient],
-                )
-                if refused:
-                    failed[recipient] = str(refused)
-                else:
-                    sent.append(recipient)
-            except Exception as exc:
-                failed[recipient] = f"{type(exc).__name__}: {exc}"
+    last_connection_error = ""
+    for attempt in range(1, 4):
+        try:
+            with smtplib.SMTP_SSL(
+                "smtp.gmail.com",
+                465,
+                context=context,
+                timeout=45,
+            ) as smtp:
+                smtp.login(sender, password)
+
+                remaining = []
+                for recipient in pending:
+                    try:
+                        msg = EmailMessage()
+                        msg["From"] = sender
+                        msg["To"] = recipient
+                        msg["Subject"] = subject
+                        msg.set_content(body)
+                        msg.add_attachment(
+                            pdf_bytes,
+                            maintype="application",
+                            subtype="pdf",
+                            filename=pdf_filename,
+                        )
+                        refused = smtp.send_message(
+                            msg,
+                            from_addr=sender,
+                            to_addrs=[recipient],
+                        )
+                        if refused:
+                            failed[recipient] = str(refused)
+                            remaining.append(recipient)
+                        else:
+                            sent.append(recipient)
+                            failed.pop(recipient, None)
+                    except Exception as exc:
+                        failed[recipient] = f"{type(exc).__name__}: {exc}"
+                        remaining.append(recipient)
+
+                pending = remaining
+                if not pending:
+                    break
+
+        except Exception as exc:
+            last_connection_error = f"{type(exc).__name__}: {exc}"
+            for recipient in pending:
+                failed[recipient] = last_connection_error
+
+        if pending and attempt < 3:
+            wait_seconds = attempt * 5
+            print(
+                f"SMTP attempt {attempt}/3 incomplete; retrying in "
+                f"{wait_seconds}s."
+            )
+            time.sleep(wait_seconds)
+
+    if pending and last_connection_error:
+        print(f"::warning::SMTP delivery issue: {last_connection_error}")
 
     return {"sent": sent, "failed": failed}
 
@@ -302,14 +347,18 @@ def main() -> None:
 
     query = env("MONITOR_QUERY", "ISRO")
     alert_threshold = env_float("NEGATIVITY_ALERT_THRESHOLD", 35.0)
-    lookback_hours = max(1, env_int("BACKGROUND_LOOKBACK_HOURS", 168))
+    lookback_hours = max(1, env_int("BACKGROUND_LOOKBACK_HOURS", 24))
     report_max_records = max(50, env_int("BACKGROUND_MAX_RECORDS", 1500))
     force_send = env_bool("FORCE_SEND", False)
+    fail_on_email_error = env_bool("FAIL_ON_EMAIL_ERROR", False)
 
     routine_recipients = parse_recipients("REPORT_RECIPIENTS_30MIN")
+    if not routine_recipients:
+        # Backward-compatible fallback for earlier builds/secrets.
+        routine_recipients = parse_recipients("REPORT_RECIPIENTS")
     alert_recipients = parse_recipients("ALERT_RECIPIENTS")
 
-    print(f"Build 5.13 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
+    print(f"Build 5.13.1 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
     print(f"Slot: {slot_key}; query={query!r}; lookback={lookback_hours}h")
 
     table_ok, current_state = monitoring_current(slot_key)
@@ -331,7 +380,7 @@ def main() -> None:
     try:
         fresh_news, news_source = core.fetch_free_news(
             query=query,
-            timespan="1week",
+            timespan="24h",
             max_records=100,
         )
         if len(fresh_news):
@@ -512,7 +561,7 @@ def main() -> None:
         monitoring_upsert(run_record)
 
     summary = {
-        "build": "5.13",
+        "build": "5.13.1",
         "run_time_ist": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
         "slot_key": slot_key,
         "records": len(df),
@@ -535,11 +584,46 @@ def main() -> None:
         encoding="utf-8",
     )
 
+    summary_md = "\n".join(
+        [
+            "# SMI Background Monitor",
+            "",
+            f"- Build: **5.13.1**",
+            f"- Run time: **{now_ist:%Y-%m-%d %H:%M:%S IST}**",
+            f"- Status: **{run_record['status']}**",
+            f"- Records analyzed: **{len(df):,}**",
+            f"- X/manual X: **{x_records:,}**",
+            f"- Web News: **{news_records:,}**",
+            f"- Positive: **{positive_pct:.1f}%**",
+            f"- Neutral: **{neutral_pct:.1f}%**",
+            f"- Negative: **{negative_pct:.1f}%**",
+            f"- PDF: `{pdf_filename}`",
+            f"- Routine recipients delivered: **{len(routine_delivered)}**",
+            f"- Alert recipients delivered: **{len(alert_delivered)}**",
+            "",
+            "News collection default: **past 24 hours**.",
+            (
+                "Email errors: " + run_record["error"]
+                if run_record["error"]
+                else "Email errors: none"
+            ),
+        ]
+    )
+    (OUTPUT_DIR / "github_step_summary.md").write_text(
+        summary_md,
+        encoding="utf-8",
+    )
+
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
-    # Fail the workflow only for delivery failures after recording state/artifacts.
+    # Email failures are recorded but are non-fatal by default so the
+    # 30-minute scheduler continues to run, generate PDFs, and preserve data.
+    # Set GitHub variable FAIL_ON_EMAIL_ERROR=true if a red workflow is desired.
     if failed_parts:
-        raise RuntimeError("Some email deliveries failed: " + " | ".join(failed_parts))
+        message = "Some email deliveries failed: " + " | ".join(failed_parts)
+        print("::warning::" + message)
+        if fail_on_email_error:
+            raise RuntimeError(message)
 
 
 if __name__ == "__main__":

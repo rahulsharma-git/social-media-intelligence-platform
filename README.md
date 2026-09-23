@@ -1,4 +1,4 @@
-# Social Media Intelligence Platform — Build 5.13 / Build 13
+# Social Media Intelligence Platform — Build 5.13.1
 
 Build 5.13 is based on the uploaded Build 5.12 recipient-email hotfix.
 
@@ -113,3 +113,31 @@ Supabase. Fresh free Web News is fetched automatically on each run.
 Upload/replace the complete Build 5.13 contents in the GitHub repository,
 including the hidden `.github` folder. Streamlit continues to deploy
 `streamlit_app.py` as before, while GitHub Actions handles the background job.
+
+
+## Build 5.13.1 hotfix
+
+- News look-back defaults to **24 hours** in the Streamlit UI.
+- Background news collection now requests **24h** and defaults the analysis window to 24 hours.
+- The Google News RSS fallback is filtered locally so older items are excluded.
+- GitHub Actions workflow upgraded to current Node 24-compatible action versions.
+- Added a configuration-presence check with clear GitHub error annotations.
+- `REPORT_RECIPIENTS` is accepted as a fallback to `REPORT_RECIPIENTS_30MIN`.
+- SMTP sending retries up to three times.
+- Email delivery failures are recorded as warnings by default rather than stopping future monitoring cycles.
+- A GitHub Step Summary and JSON diagnostic summary are written on each completed run.
+- All report/run timestamps remain in IST.
+
+### Required GitHub Actions repository secrets
+
+At minimum:
+- `SUPABASE_URL`
+- `SUPABASE_SECRET_KEY` (or legacy `SUPABASE_SERVICE_KEY`)
+
+For email:
+- `SMTP_EMAIL`
+- `SMTP_APP_PASSWORD`
+- `REPORT_RECIPIENTS_30MIN` (or `REPORT_RECIPIENTS`)
+- optional `ALERT_RECIPIENTS`
+
+These are GitHub Actions secrets and are separate from Streamlit Secrets.
