@@ -1,0 +1,67 @@
+name: SMI Background Monitor - Every 30 Minutes
+
+on:
+  schedule:
+    # Every 30 minutes in India Standard Time. :07/:37 avoids the busiest
+    # top-of-hour GitHub Actions scheduling window.
+    - cron: "7,37 * * * *"
+      timezone: "Asia/Kolkata"
+  workflow_dispatch:
+    inputs:
+      force_send:
+        description: "Send again even if this half-hour slot was already delivered"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: smi-background-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    env:
+      TZ: Asia/Kolkata
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
+      SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
+      REPORT_RECIPIENTS_30MIN: ${{ secrets.REPORT_RECIPIENTS_30MIN }}
+      ALERT_RECIPIENTS: ${{ secrets.ALERT_RECIPIENTS }}
+      MONITOR_QUERY: ${{ vars.MONITOR_QUERY }}
+      NEGATIVITY_ALERT_THRESHOLD: ${{ vars.NEGATIVITY_ALERT_THRESHOLD }}
+      BACKGROUND_LOOKBACK_HOURS: ${{ vars.BACKGROUND_LOOKBACK_HOURS }}
+      BACKGROUND_MAX_RECORDS: ${{ vars.BACKGROUND_MAX_RECORDS }}
+      FORCE_SEND: ${{ github.event_name == 'workflow_dispatch' && inputs.force_send || false }}
+      OUTPUT_DIR: output
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run browser-independent monitor
+        run: python background_monitor.py
+
+      - name: Preserve generated report and run summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smi-report-${{ github.run_id }}
+          path: output/
+          if-no-files-found: warn
+          retention-days: 7
