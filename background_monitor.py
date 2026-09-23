@@ -365,6 +365,7 @@ def main() -> None:
     report_max_records = max(50, env_int("BACKGROUND_MAX_RECORDS", 1500))
     force_send = env_bool("FORCE_SEND", False)
     fail_on_email_error = env_bool("FAIL_ON_EMAIL_ERROR", False)
+    trigger_source = env("TRIGGER_SOURCE", "unknown")
 
     routine_recipients = parse_recipients("REPORT_RECIPIENTS_30MIN")
     if not routine_recipients:
@@ -372,7 +373,8 @@ def main() -> None:
         routine_recipients = parse_recipients("REPORT_RECIPIENTS")
     alert_recipients = parse_recipients("ALERT_RECIPIENTS")
 
-    print(f"Build 5.13.2 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
+    print(f"Build 5.13.3 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
+    print(f"Trigger source: {trigger_source}")
     print(f"Slot: {slot_key}; query={query!r}; lookback={lookback_hours}h")
 
     table_ok, current_state = monitoring_current(slot_key)
@@ -490,6 +492,7 @@ def main() -> None:
         f"Negative: {negative_pct:.1f}%",
         f"Alert threshold: {alert_threshold:.1f}%",
         f"Free news source: {news_source}",
+        f"Scheduler trigger: {trigger_source}",
         "",
         "All displayed/report timestamps are India Standard Time (IST).",
         "X data in this background run comes from posts already stored in Supabase; "
@@ -575,7 +578,7 @@ def main() -> None:
         monitoring_upsert(run_record)
 
     summary = {
-        "build": "5.13.2",
+        "build": "5.13.3",
         "run_time_ist": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
         "slot_key": slot_key,
         "records": len(df),
@@ -602,7 +605,7 @@ def main() -> None:
         [
             "# SMI Background Monitor",
             "",
-            f"- Build: **5.13.2**",
+            f"- Build: **5.13.3**",
             f"- Run time: **{now_ist:%Y-%m-%d %H:%M:%S IST}**",
             f"- Status: **{run_record['status']}**",
             f"- Records analyzed: **{len(df):,}**",
