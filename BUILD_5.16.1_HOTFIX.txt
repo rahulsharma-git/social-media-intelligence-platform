@@ -1,0 +1,35 @@
+BUILD 5.16.1 — X=0 / monitor crash hotfix
+
+Root cause fixed
+================
+Build 5.16 calculated x_fresh_count as an integer, but later the report_context
+still referenced `len(x_fresh)`. The variable `x_fresh` no longer existed after
+the Build 5.16 X-selection refactor.
+
+When the monitor reached PDF generation this caused a NameError, so:
+- the workflow ended with exit code 1,
+- no monitor summary file was created,
+- and no email was generated.
+
+Fix
+===
+- report_context now uses the existing integer `x_fresh_count`.
+- GitHub Step Summary now always prints x_collection_summary.json before the
+  background monitor step, making free-source diagnostics visible even if a
+  later step fails.
+- Build/version labels updated to 5.16.1.
+
+Important
+=========
+The warning "Only 0 real X rows available across all three free methods" is not
+the crash. It means the free X collector did not obtain X rows during that run.
+With this hotfix the News pipeline and email report can still complete even when
+X is zero.
+
+Deploy
+======
+Replace:
+- background_monitor.py
+- .github/workflows/monitor-every-30-min.yml
+
+Other Build 5.16 files can remain unchanged.

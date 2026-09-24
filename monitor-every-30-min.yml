@@ -72,7 +72,7 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Preflight - verify deployed Build 5.16 files
+      - name: Preflight - verify deployed Build 5.16.1 files
         shell: bash
         run: |
           echo "Trigger source: ${TRIGGER_SOURCE:-unknown}"
@@ -148,6 +148,20 @@ jobs:
             python x_collector.py || echo "::warning::X collector failed; continuing with stored Supabase X data."
           else
             echo "::warning::x_collector.py not present; skipping X collection."
+          fi
+
+      - name: Publish X collector diagnostics
+        if: always()
+        shell: bash
+        run: |
+          if [ -f output/x_collection_summary.json ]; then
+            echo "## X Collector" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat output/x_collection_summary.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## X Collector" >> "$GITHUB_STEP_SUMMARY"
+            echo "No x_collection_summary.json was created." >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Run browser-independent monitor
