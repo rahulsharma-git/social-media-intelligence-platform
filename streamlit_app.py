@@ -41,7 +41,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, PageBreak,
-    Table, LongTable, TableStyle, Image as RLImage
+    Table, LongTable, TableStyle, Image as RLImage, KeepTogether
 )
 from xml.sax.saxutils import escape
 
@@ -55,8 +55,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
 
     st.title("📡 Social Media Intelligence Platform")
     st.caption(
-        "Build 5.13.1 — background scheduler hotfix + 24-hour news default + "
-        "consistent sentiment colors"
+        "Build 5.14 — three intelligence PDFs + dual evidence packs + optional X collector"
     )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -2562,6 +2561,714 @@ def build_pdf_report(report_df, narrative_df, trend_df, alert_threshold=35.0):
     return buffer.getvalue()
 
 
+# =========================================================
+# BUILD 5.14 REPORTING FRAMEWORK
+# =========================================================
+def _prepare_x_evidence_frame(report_df):
+    """Return X/manual-X rows with stable evidence numbers (newest first)."""
+    if report_df is None or report_df.empty:
+        return pd.DataFrame()
+
+    x_df = report_df[
+        report_df["platform"].isin(["x", "x_manual"])
+    ].copy()
+    if x_df.empty:
+        x_df["_evidence_no"] = pd.Series(dtype="int64")
+        return x_df
+
+    x_df = x_df.sort_values(
+        ["timestamp", "username", "text"],
+        ascending=[False, True, True],
+        kind="stable",
+    ).reset_index(drop=True)
+    x_df["_evidence_no"] = range(1, len(x_df) + 1)
+    return x_df
+
+
+def build_x_evidence_pdf(row, evidence_no, narrative_label="Not available"):
+    """One evidence sheet for one stored X post."""
+    buffer = io.BytesIO()
+    normal_font, bold_font = _register_report_fonts()
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=16 * mm,
+        leftMargin=16 * mm,
+        topMargin=16 * mm,
+        bottomMargin=16 * mm,
+        title=f"X Evidence {int(evidence_no):03d}",
+        author="Social Media Intelligence Platform",
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "XEvidTitle", parent=styles["Title"], fontName=bold_font,
+        fontSize=16, leading=20, alignment=TA_CENTER, spaceAfter=8,
+    )
+    h1 = ParagraphStyle(
+        "XEvidH1", parent=styles["Heading1"], fontName=bold_font,
+        fontSize=11, leading=14, spaceBefore=7, spaceAfter=5,
+    )
+    body = ParagraphStyle(
+        "XEvidBody", parent=styles["BodyText"], fontName=normal_font,
+        fontSize=9, leading=12, spaceAfter=5,
+    )
+    small = ParagraphStyle(
+        "XEvidSmall", parent=body, fontSize=7.5, leading=9.5,
+    )
+    label_style = ParagraphStyle(
+        "XEvidLabel", parent=small, fontName=bold_font,
+    )
+
+    def p(v, s=body):
+        return _report_para(v, s)
+
+    timestamp = pd.to_datetime(row.get("timestamp"), errors="coerce", utc=True)
+    timestamp_text = (
+        "Unavailable" if pd.isna(timestamp)
+        else timestamp.tz_convert(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+    )
+    username = _report_clean_text(row.get("username", "")) or "Unknown user"
+    post_text = _report_clean_text(row.get("text", "")) or "No post text available"
+    source_url = _report_clean_text(row.get("source_url", "")) or "Not available"
+    hashtags = _report_clean_text(row.get("hashtags", "")) or "None recorded"
+    sentiment = _report_clean_text(row.get("sentiment", "")) or "Unclassified"
+    emotion = _report_clean_text(row.get("emotion", "")) or "Other/Neutral"
+    cluster = row.get("semantic_cluster", "Not available")
+    try:
+        score = float(row.get("sentiment_score", 0) or 0)
+    except Exception:
+        score = 0.0
+
+    likes = int(row.get("likes", 0) or 0)
+    reposts = int(row.get("reposts", 0) or 0)
+    replies = int(row.get("replies", 0) or 0)
+    followers = int(row.get("followers", 0) or 0)
+    engagement = int(row.get("engagement", likes + reposts + replies) or 0)
+
+    story = [
+        p(f"X / Social Media Evidence #{int(evidence_no):03d}", title_style),
+        p(
+            "Evidence sheet generated from the post and metrics stored in the "
+            "platform at analysis time. Engagement values may change later on X.",
+            small,
+        ),
+        Spacer(1, 6),
+        p("Post text", h1),
+        p(post_text, body),
+        Spacer(1, 4),
+    ]
+
+    rows = [
+        [p("Field", label_style), p("Value", label_style)],
+        [p("Evidence number", label_style), p(f"{int(evidence_no):03d}", small)],
+        [p("Time", label_style), p(timestamp_text, small)],
+        [p("Username", label_style), p(username, small)],
+        [p("Hashtags", label_style), p(hashtags, small)],
+        [p("Likes", label_style), p(str(likes), small)],
+        [p("Reposts", label_style), p(str(reposts), small)],
+        [p("Replies", label_style), p(str(replies), small)],
+        [p("Followers", label_style), p(str(followers), small)],
+        [p("Engagement", label_style), p(str(engagement), small)],
+        [p("Sentiment", label_style), p(sentiment, small)],
+        [p("Sentiment score", label_style), p(f"{score:+.3f}", small)],
+        [p("Emotion signal", label_style), p(emotion, small)],
+        [p("Semantic cluster", label_style), p(str(cluster), small)],
+        [p("Narrative", label_style), p(narrative_label, small)],
+    ]
+    tbl = Table(rows, colWidths=[43 * mm, 125 * mm], hAlign="LEFT")
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E9EEF7")),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#C9D2DF")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.extend([
+        tbl,
+        Spacer(1, 8),
+        p("Source URL", h1),
+        p(source_url, small),
+        Spacer(1, 6),
+        p("Interpretation note", h1),
+        p(
+            "Sentiment, emotion, cluster and narrative are automated analytical "
+            "labels. They should be treated as monitoring signals rather than "
+            "verified statements about intent, truth or real-world impact.",
+            small,
+        ),
+        p("Generated: " + datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"), small),
+    ])
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def build_x_evidence_zip(report_df, narrative_df):
+    """ZIP with one X evidence PDF per post plus manifest.csv."""
+    x_df = _prepare_x_evidence_frame(report_df)
+    zip_buffer = io.BytesIO()
+    manifest_rows = []
+
+    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        if x_df.empty:
+            archive.writestr("README.txt", "No X/manual-X records were present in this analysis cycle.\n")
+        else:
+            for _, row in x_df.iterrows():
+                evidence_no = int(row["_evidence_no"])
+                sentiment = (_report_clean_text(row.get("sentiment", "neutral")) or "neutral").lower()
+                user_slug = _safe_evidence_filename(row.get("username", "x_user"))
+                filename = f"{evidence_no:03d}_{sentiment}_{user_slug}.pdf"
+                narrative_label = _narrative_for_cluster(narrative_df, row.get("semantic_cluster", ""))
+                archive.writestr(
+                    filename,
+                    build_x_evidence_pdf(row, evidence_no, narrative_label=narrative_label),
+                )
+
+                ts = pd.to_datetime(row.get("timestamp"), errors="coerce", utc=True)
+                ts_text = "" if pd.isna(ts) else ts.tz_convert(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+                manifest_rows.append({
+                    "evidence_no": f"{evidence_no:03d}",
+                    "time_ist": ts_text,
+                    "username": _report_clean_text(row.get("username", "")),
+                    "sentiment": _report_clean_text(row.get("sentiment", "")),
+                    "sentiment_score": row.get("sentiment_score", 0),
+                    "semantic_cluster": row.get("semantic_cluster", ""),
+                    "narrative": narrative_label,
+                    "likes": int(row.get("likes", 0) or 0),
+                    "reposts": int(row.get("reposts", 0) or 0),
+                    "replies": int(row.get("replies", 0) or 0),
+                    "engagement": int(row.get("engagement", 0) or 0),
+                    "hashtags": _report_clean_text(row.get("hashtags", "")),
+                    "text": _report_clean_text(row.get("text", "")),
+                    "source_url": _report_clean_text(row.get("source_url", "")),
+                    "pdf_filename": filename,
+                })
+
+        manifest_df = pd.DataFrame(manifest_rows)
+        archive.writestr("manifest.csv", manifest_df.to_csv(index=False).encode("utf-8-sig"))
+        archive.writestr(
+            "README.txt",
+            (
+                "Social Media Intelligence evidence pack. Each numbered PDF documents one "
+                "stored X/manual-X post and the analytical labels used in the report.\n"
+            ),
+        )
+
+    zip_buffer.seek(0)
+    return zip_buffer.getvalue(), int(len(x_df))
+
+
+def _report_subset_analysis(report_df, report_kind):
+    """Re-cluster each report on its own source population."""
+    if report_df is None:
+        report_df = pd.DataFrame()
+    source = report_df.copy()
+    if report_kind == "social":
+        source = source[source["platform"].isin(["x", "x_manual"])].copy()
+    elif report_kind == "news":
+        source = source[source["platform"].eq("web_news")].copy()
+
+    if source.empty:
+        return source, pd.DataFrame(), pd.DataFrame()
+
+    analyzed, vectorizer, tfidf, feature_names = run_semantic_topic_agent(source)
+    narratives = run_narrative_agent(analyzed, vectorizer, tfidf, feature_names)
+    trend = run_trend_agent(analyzed)
+    return analyzed, narratives, trend
+
+
+def _sentiment_counts(dataframe):
+    if dataframe is None or dataframe.empty:
+        return pd.Series({"Positive": 0, "Neutral": 0, "Negative": 0})
+    return dataframe["sentiment"].value_counts().reindex(
+        ["Positive", "Neutral", "Negative"], fill_value=0
+    )
+
+
+def _pct(count, total):
+    return 0.0 if not total else (float(count) / float(total)) * 100.0
+
+
+def _top_hashtag_text(dataframe, limit=6):
+    if dataframe is None or dataframe.empty:
+        return "None recorded"
+    tags = []
+    for value in dataframe.get("hashtags", pd.Series(dtype=str)).fillna(""):
+        tags.extend(re.findall(r"#[\w]+", str(value), flags=re.UNICODE))
+    if not tags:
+        for value in dataframe.get("text", pd.Series(dtype=str)).fillna(""):
+            tags.extend(re.findall(r"#[\w]+", str(value), flags=re.UNICODE))
+    if not tags:
+        return "None recorded"
+    s = pd.Series([t.lower() for t in tags]).value_counts().head(limit)
+    return ", ".join(f"{idx} ({int(val)})" for idx, val in s.items())
+
+
+def _source_summary_text(dataframe, limit=5):
+    if dataframe is None or dataframe.empty:
+        return "No source data available"
+    counts = dataframe["username"].fillna("Unknown").astype(str).value_counts().head(limit)
+    return ", ".join(f"{name} ({int(count)})" for name, count in counts.items())
+
+
+def _dominant_sentiment_text(dataframe, news=False):
+    counts = _sentiment_counts(dataframe)
+    total = int(counts.sum())
+    if total == 0:
+        return "No records were available for automated tone classification."
+    dominant = counts.idxmax()
+    share = _pct(counts[dominant], total)
+    label = "headline tone" if news else "sentiment"
+    return (
+        f"{dominant} was the largest automated {label} category at {share:.1f}% "
+        f"({int(counts[dominant])} of {total} records)."
+    )
+
+
+def _cluster_takeaway_text(dataframe, narratives):
+    if dataframe is None or dataframe.empty or narratives is None or narratives.empty:
+        return "The dataset was too small or sparse for a detailed multi-cluster narrative summary."
+    largest = narratives.sort_values(["posts", "12h_growth_pct"], ascending=[False, False]).iloc[0]
+    fastest = narratives.sort_values(["12h_growth_pct", "posts"], ascending=[False, False]).iloc[0]
+    return (
+        f"The largest cluster is C{int(largest['cluster'])} ({largest['narrative']}) with "
+        f"{int(largest['posts'])} records. The strongest 12-hour growth signal is C{int(fastest['cluster'])} "
+        f"at {float(fastest['12h_growth_pct']):+.1f}%."
+    )
+
+
+def _overall_conclusion_text(dataframe, narratives, alert_threshold, report_kind):
+    if dataframe is None or dataframe.empty:
+        return "No records were available in this reporting window, so no substantive intelligence conclusion can be drawn."
+
+    counts = _sentiment_counts(dataframe)
+    total = int(counts.sum())
+    neg_pct = _pct(counts["Negative"], total)
+    dom = counts.idxmax()
+    dom_pct = _pct(counts[dom], total)
+    alert_text = (
+        f"Negative share is {neg_pct:.1f}%, which is above the configured {alert_threshold:.0f}% monitoring threshold."
+        if neg_pct > alert_threshold
+        else f"Negative share is {neg_pct:.1f}%, below the configured {alert_threshold:.0f}% monitoring threshold."
+    )
+
+    largest_text = ""
+    if narratives is not None and not narratives.empty:
+        largest = narratives.sort_values(["posts", "12h_growth_pct"], ascending=[False, False]).iloc[0]
+        largest_text = (
+            f" The largest narrative cluster is C{int(largest['cluster'])}, labelled "
+            f"'{_report_clean_text(largest['narrative'])}', containing {int(largest['posts'])} records."
+        )
+
+    if report_kind == "news":
+        context = (
+            "For News, these sentiment values describe headline framing only; they are not a measure of public opinion."
+        )
+    elif report_kind == "social":
+        engagement = int(dataframe.get("engagement", pd.Series(dtype=int)).sum())
+        context = f" Stored social engagement across the analyzed posts totals {engagement:,}."
+    else:
+        x_df = dataframe[dataframe["platform"].isin(["x", "x_manual"])]
+        n_df = dataframe[dataframe["platform"].eq("web_news")]
+        social_neg = _pct(_sentiment_counts(x_df)["Negative"], len(x_df)) if len(x_df) else 0.0
+        news_neg = _pct(_sentiment_counts(n_df)["Negative"], len(n_df)) if len(n_df) else 0.0
+        context = (
+            f" Cross-source comparison shows {social_neg:.1f}% negative social sentiment versus "
+            f"{news_neg:.1f}% negative News headline framing in the available records."
+        )
+
+    return (
+        f"{dom} is the largest automated tone category at {dom_pct:.1f}% of the analyzed records. "
+        f"{alert_text}{largest_text}{context} Automated outputs should be used for triage and analyst review, not as verified factual conclusions."
+    )
+
+
+def build_intelligence_report_pdf(report_df, alert_threshold=35.0, report_kind="combined", query="ISRO"):
+    """
+    Build one of three cleaner intelligence reports:
+      social   -> X/social-media only
+      news     -> Web News only
+      combined -> cross-source combined intelligence
+    """
+    data, narratives, trend = _report_subset_analysis(report_df, report_kind)
+    generated = datetime.now(IST)
+
+    titles = {
+        "social": "Social Media Intelligence Report",
+        "news": "News Media Intelligence Report",
+        "combined": "Combined Intelligence Report",
+    }
+    title = titles.get(report_kind, titles["combined"])
+
+    buffer = io.BytesIO()
+    normal_font, bold_font = _register_report_fonts()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4,
+        rightMargin=13 * mm, leftMargin=13 * mm,
+        topMargin=14 * mm, bottomMargin=16 * mm,
+        title=title, author="Social Media Intelligence Platform",
+    )
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "R14Title", parent=styles["Title"], fontName=bold_font,
+        fontSize=20, leading=24, alignment=TA_CENTER, spaceAfter=8,
+        textColor=colors.HexColor("#1F2937"),
+    )
+    subtitle = ParagraphStyle(
+        "R14Subtitle", parent=styles["BodyText"], fontName=normal_font,
+        fontSize=9, leading=12, alignment=TA_CENTER, spaceAfter=6,
+        textColor=colors.HexColor("#4B5563"),
+    )
+    h1 = ParagraphStyle(
+        "R14H1", parent=styles["Heading1"], fontName=bold_font,
+        fontSize=14, leading=17, spaceBefore=5, spaceAfter=5,
+        textColor=colors.HexColor("#1F3B63"),
+    )
+    h2 = ParagraphStyle(
+        "R14H2", parent=styles["Heading2"], fontName=bold_font,
+        fontSize=10.5, leading=13, spaceBefore=5, spaceAfter=4,
+        textColor=colors.HexColor("#374151"),
+    )
+    body = ParagraphStyle(
+        "R14Body", parent=styles["BodyText"], fontName=normal_font,
+        fontSize=8.5, leading=11.2, spaceAfter=4,
+    )
+    small = ParagraphStyle(
+        "R14Small", parent=body, fontSize=7.2, leading=9.2,
+        textColor=colors.HexColor("#4B5563"),
+    )
+    table_text = ParagraphStyle(
+        "R14Table", parent=body, fontSize=6.7, leading=8.2, spaceAfter=0,
+    )
+    table_head = ParagraphStyle(
+        "R14TableHead", parent=table_text, fontName=bold_font,
+        textColor=colors.HexColor("#1F2937"),
+    )
+
+    story = []
+
+    def p(v, s=body):
+        return _report_para(v, s)
+
+    def callout(label, value, bg="#F4F7FB", border="#CBD5E1"):
+        t = Table(
+            [[p(label, table_head), p(value, body)]],
+            colWidths=[36 * mm, 142 * mm], hAlign="LEFT",
+        )
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(bg)),
+            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor(border)),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        story.append(t)
+        story.append(Spacer(1, 5))
+
+    def add_table(rows, widths, repeat_rows=1):
+        tbl = LongTable(rows, colWidths=widths, repeatRows=repeat_rows, hAlign="LEFT")
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E9EEF7")),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#C9D2DF")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 3),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        story.extend([tbl, Spacer(1, 5)])
+
+    def add_chart(chart_title, chart_buffer, caption=None):
+        if chart_buffer is None:
+            return
+        items = [p(chart_title, h2), RLImage(chart_buffer, width=172 * mm, height=72 * mm)]
+        if caption:
+            items.extend([Spacer(1, 2), p(caption, small)])
+        story.extend([KeepTogether(items), Spacer(1, 5)])
+
+    counts = _sentiment_counts(data)
+    total = int(len(data))
+    x_data = data[data["platform"].isin(["x", "x_manual"])] if total else data
+    news_data = data[data["platform"].eq("web_news")] if total else data
+    neg_pct = _pct(counts["Negative"], total)
+    monitoring_score = _report_monitoring_score(data, trend, narratives) if total else 0
+
+    # Cover
+    story.append(p(title, title_style))
+    if report_kind == "social":
+        scope_text = "X / social-media records only. Focus: conversation, engagement, sentiment, actors and narratives."
+    elif report_kind == "news":
+        scope_text = "Web News records only. Focus: coverage volume, headline framing, media sources and narratives."
+    else:
+        scope_text = "Cross-source view combining stored X/social-media records with Web News coverage."
+    story.append(p(scope_text, subtitle))
+    story.append(p(
+        f"Query/topic: {query} | Generated: {generated:%Y-%m-%d %H:%M:%S IST} | "
+        f"Records: {total:,} | X: {len(x_data):,} | News: {len(news_data):,}",
+        small,
+    ))
+    story.append(Spacer(1, 6))
+
+    # 1 Executive overview
+    story.append(p("1. Executive overview", h1))
+    callout(
+        "Purpose",
+        "This section gives the decision-level snapshot before the detailed charts. Values are calculated only from records available in this reporting window.",
+    )
+    summary_rows = [
+        [p("Metric", table_head), p("Value", table_head)],
+        [p("Analyzed records", table_text), p(f"{total:,}", table_text)],
+        [p("Positive", table_text), p(f"{int(counts['Positive']):,} ({_pct(counts['Positive'], total):.1f}%)", table_text)],
+        [p("Neutral", table_text), p(f"{int(counts['Neutral']):,} ({_pct(counts['Neutral'], total):.1f}%)", table_text)],
+        [p("Negative", table_text), p(f"{int(counts['Negative']):,} ({neg_pct:.1f}%)", table_text)],
+        [p("Monitoring score", table_text), p(f"{monitoring_score}/100", table_text)],
+        [p("Negative-share threshold", table_text), p(f"{alert_threshold:.0f}%", table_text)],
+        [p("Semantic clusters", table_text), p(str(data['semantic_cluster'].nunique()) if total else "0", table_text)],
+    ]
+    if report_kind in {"social", "combined"}:
+        summary_rows.append([p("Stored X engagement", table_text), p(f"{int(x_data.get('engagement', pd.Series(dtype=int)).sum()):,}", table_text)])
+    if report_kind == "social":
+        summary_rows.append([p("Top hashtags", table_text), p(_top_hashtag_text(data), table_text)])
+    if report_kind == "news":
+        summary_rows.append([p("Leading media sources", table_text), p(_source_summary_text(data), table_text)])
+    add_table(summary_rows, [64 * mm, 106 * mm])
+    callout("Executive takeaway", _dominant_sentiment_text(data, news=(report_kind == "news")), bg="#EEF5FF")
+
+    # 2 Dynamics
+    story.append(PageBreak())
+    story.append(p("2. Volume, tone and source dynamics", h1))
+    callout(
+        "What this section shows",
+        "This section explains how much activity is present, how the automated tone is distributed, and how the activity changes over time. For News, sentiment means headline framing rather than public opinion.",
+    )
+    add_chart("Tone / sentiment distribution", _pdf_chart_sentiment(data), "Blue = Positive, Grey = Neutral, Red = Negative.")
+    add_chart("30-minute historic negativity", _pdf_chart_negativity(data, alert_threshold), "The dashed line is the configured negative-share monitoring threshold.")
+    add_chart("Conversation / coverage volume over time", _pdf_chart_volume(data), "Shows hourly record volume in the analyzed source population.")
+    if report_kind == "combined":
+        add_chart("Sentiment mix by source", _pdf_chart_platform_sentiment(data), "Compares X/social sentiment with News headline framing; the two measures should not be interpreted as identical constructs.")
+    add_chart("Top sources / authors", _pdf_chart_top_sources(data), "For social media this is author volume; for News this is media-source volume.")
+    callout(
+        "Section takeaway",
+        _dominant_sentiment_text(data, news=(report_kind == "news")) + " " + f"Leading sources/authors: {_source_summary_text(data)}.",
+        bg="#EEF5FF",
+    )
+
+    # 3 Content signals
+    story.append(PageBreak())
+    story.append(p("3. Content signals and priority items", h1))
+    callout(
+        "What this section shows",
+        "This section surfaces the strongest positive and negative items using deterministic ranking. It is intended to help an analyst decide what to inspect first, not to validate the underlying claims.",
+    )
+    add_chart("Emotion signals", _pdf_chart_emotions(data), "Keyword/rule-based emotion cues; 'Other/Neutral' means no configured cue was found.")
+
+    if report_kind == "social":
+        list_defs = [("Top 10 positive posts", "Positive"), ("Top 10 negative posts", "Negative")]
+    elif report_kind == "news":
+        list_defs = [("Top 10 positive headlines", "Positive"), ("Top 10 negative headlines", "Negative")]
+    else:
+        list_defs = [("Top 10 positive records", "Positive"), ("Top 10 negative records", "Negative")]
+
+    for label, polarity in list_defs:
+        story.append(p(label, h2))
+        items = _report_top_items(data, polarity=polarity, limit=10, news=(report_kind == "news"))
+        if items.empty:
+            story.append(p(f"No {polarity.lower()} records were available.", body))
+        else:
+            for rank, (_, row) in enumerate(items.iterrows(), start=1):
+                source = _report_clean_text(row.get("username", "Unknown"))
+                score = float(row.get("sentiment_score", 0) or 0)
+                engagement = int(row.get("engagement", 0) or 0)
+                story.append(p(f"{rank}. {_report_brief(row.get('text', ''), 260)}", body))
+                meta = f"Source: {source} | score {score:+.2f}"
+                if row.get("platform") in ["x", "x_manual"]:
+                    meta += f" | engagement {engagement}"
+                story.append(p(meta, small))
+
+    if report_kind in {"social", "combined"} and not x_data.empty:
+        top_eng = x_data.sort_values(["engagement", "likes", "reposts", "replies", "timestamp"], ascending=[False, False, False, False, False]).head(10)
+        story.append(p("Top social posts by stored engagement", h2))
+        top_rows = [[p("#", table_head), p("User", table_head), p("Eng.", table_head), p("Post", table_head)]]
+        for rank, (_, row) in enumerate(top_eng.iterrows(), 1):
+            top_rows.append([
+                p(str(rank), table_text), p(row.get("username", ""), table_text),
+                p(str(int(row.get("engagement", 0) or 0)), table_text),
+                p(_report_brief(row.get("text", ""), 220), table_text),
+            ])
+        add_table(top_rows, [8 * mm, 32 * mm, 18 * mm, 112 * mm])
+
+    callout(
+        "Section takeaway",
+        "Priority lists are ranked from the available records only. Analysts should open the corresponding evidence PDF/source URL before treating a headline or post as verified context.",
+        bg="#EEF5FF",
+    )
+
+    # 4 Clusters
+    story.append(PageBreak())
+    story.append(p("4. Semantic clusters and narrative interpretation", h1))
+    callout(
+        "How clusters are made",
+        "Records are grouped by textual similarity using TF-IDF word/bigram weighting, TruncatedSVD latent semantic reduction (up to 10 dimensions), L2 normalization and KMeans (n_init=10, random_state=42). The cluster count is selected from dataset size up to the configured cap; datasets with fewer than 8 records use a single cluster. Cluster IDs are arbitrary labels, not ranks or severity levels.",
+    )
+    add_chart("Semantic cluster volume", _pdf_chart_clusters(data), "Shows how many records fall into each text-similarity group.")
+    add_chart("Negative share by cluster", _pdf_chart_cluster_negativity(data), "Helps identify which text themes contain a higher share of negative classifications.")
+    add_chart("Semantic conversation map", _pdf_chart_semantic_map(data), "Distance is the meaningful signal: nearby points have more similar text. Axis values have no direct real-world unit.")
+
+    if narratives is None or narratives.empty:
+        story.append(p("No detailed multi-cluster narrative table was available for this dataset.", body))
+    else:
+        for _, nrow in narratives.sort_values("cluster").iterrows():
+            cid = int(nrow.get("cluster", 0))
+            cdf = data[data["semantic_cluster"].eq(cid)].copy()
+            cc = _sentiment_counts(cdf)
+            sources = _source_summary_text(cdf, limit=4)
+            top_terms = _report_clean_text(nrow.get("top_terms", "")) or "No stable terms available"
+            rep = _report_clean_text(nrow.get("representative_post", "")) or "No representative record available"
+            story.append(p(f"Cluster C{cid}: {_report_clean_text(nrow.get('narrative', ''))}", h2))
+            callout(
+                "Why these records are together",
+                f"Shared high-weight terms/bigrams: {top_terms}. The representative record nearest the cluster centroid is shown below. Leading sources/authors: {sources}.",
+                bg="#F8FAFC",
+            )
+            metrics = [
+                [p("Records", table_head), p("Positive", table_head), p("Neutral", table_head), p("Negative", table_head), p("12h growth", table_head), p("Engagement", table_head)],
+                [
+                    p(str(len(cdf)), table_text),
+                    p(f"{int(cc['Positive'])} ({_pct(cc['Positive'], len(cdf)):.1f}%)", table_text),
+                    p(f"{int(cc['Neutral'])} ({_pct(cc['Neutral'], len(cdf)):.1f}%)", table_text),
+                    p(f"{int(cc['Negative'])} ({_pct(cc['Negative'], len(cdf)):.1f}%)", table_text),
+                    p(f"{float(nrow.get('12h_growth_pct', 0) or 0):+.1f}%", table_text),
+                    p(str(int(nrow.get('engagement', 0) or 0)), table_text),
+                ],
+            ]
+            add_table(metrics, [22 * mm, 27 * mm, 27 * mm, 27 * mm, 30 * mm, 27 * mm])
+            story.append(p("Representative record", h2))
+            story.append(p(rep, body))
+            samples = cdf.sort_values("timestamp", ascending=False).head(3)
+            story.append(p("Recent examples", h2))
+            for _, srow in samples.iterrows():
+                story.append(p("• " + _report_brief(srow.get("text", ""), 260), small))
+            story.append(Spacer(1, 4))
+
+    callout("Section takeaway", _cluster_takeaway_text(data, narratives), bg="#EEF5FF")
+
+    # 5 Overall conclusion
+    story.append(PageBreak())
+    story.append(p("5. Overall conclusion", h1))
+    callout(
+        "Conclusion",
+        _overall_conclusion_text(data, narratives, alert_threshold, report_kind),
+        bg="#EAF2FF",
+        border="#9DB7D8",
+    )
+
+    if report_kind == "combined" and total:
+        story.append(p("Cross-source comparison", h2))
+        cross_rows = [[p("Measure", table_head), p("X / social", table_head), p("Web News", table_head)]]
+        for label, cat in [("Positive", "Positive"), ("Neutral", "Neutral"), ("Negative", "Negative")]:
+            xc = _sentiment_counts(x_data)
+            nc = _sentiment_counts(news_data)
+            cross_rows.append([
+                p(label, table_text),
+                p(f"{_pct(xc[cat], len(x_data)):.1f}% ({int(xc[cat])})" if len(x_data) else "n/a", table_text),
+                p(f"{_pct(nc[cat], len(news_data)):.1f}% ({int(nc[cat])})" if len(news_data) else "n/a", table_text),
+            ])
+        add_table(cross_rows, [58 * mm, 56 * mm, 56 * mm])
+        story.append(p(
+            "Interpretation: X/social sentiment and News headline framing are different signals. A divergence can be analytically useful, but it should not be read as a direct causal relationship.",
+            small,
+        ))
+
+    story.append(p("Methodology and limitations", h2))
+    methodology = [
+        ("Sentiment", "VADER compound score: Positive >= +0.05, Negative <= -0.05, otherwise Neutral. News values describe headline framing; sarcasm and multilingual text may reduce accuracy."),
+        ("Emotion", "Lightweight rule/keyword signals. 'Other/Neutral' means no configured cue was detected."),
+        ("Engagement", "For X/manual X: likes + reposts + replies from stored values. News engagement is not comparable and is normally zero."),
+        ("Clusters", "TF-IDF (1-2 grams, min_df=2, max_df=.95) -> TruncatedSVD -> normalization -> KMeans. Cluster IDs may change when the dataset changes."),
+        ("Narrative", "Derived from strongest cluster terms plus a representative record. It is shorthand for analyst navigation, not a verified claim."),
+        ("Growth", "12-hour cluster volume compared with the preceding 12 hours; sparse windows can produce zero or volatile percentages."),
+        ("Monitoring score", "Prototype triage composite, not a probability, validated risk score or official assessment."),
+        ("Evidence", "Use the separate Social Media and News evidence ZIPs to trace report items back to stored post/feed metadata and source URLs."),
+    ]
+    meth_rows = [[p("Method", table_head), p("Interpretation", table_head)]]
+    for k, v in methodology:
+        meth_rows.append([p(k, table_text), p(v, table_text)])
+    add_table(meth_rows, [38 * mm, 132 * mm])
+
+    # Evidence index in source-specific reports only.
+    if report_kind == "social":
+        evidence_df = _prepare_x_evidence_frame(data)
+        story.append(PageBreak())
+        story.append(p("Appendix - Social-media evidence index", h1))
+        callout("Purpose", "Each row maps to one numbered PDF in the Social Media evidence ZIP.")
+        if evidence_df.empty:
+            story.append(p("No X/social-media evidence records were available.", body))
+        else:
+            rows = [[p("#", table_head), p("Time (IST)", table_head), p("User", table_head), p("Sentiment", table_head), p("Eng.", table_head), p("Post excerpt", table_head)]]
+            for _, row in evidence_df.iterrows():
+                ts = pd.to_datetime(row.get("timestamp"), utc=True).tz_convert(IST).strftime("%Y-%m-%d %H:%M")
+                rows.append([
+                    p(f"{int(row['_evidence_no']):03d}", table_text), p(ts, table_text),
+                    p(row.get("username", ""), table_text), p(row.get("sentiment", ""), table_text),
+                    p(str(int(row.get("engagement", 0) or 0)), table_text),
+                    p(_report_brief(row.get("text", ""), 150), table_text),
+                ])
+            add_table(rows, [8*mm, 25*mm, 27*mm, 18*mm, 14*mm, 78*mm])
+
+    if report_kind == "news":
+        evidence_df = _prepare_news_evidence_frame(data)
+        story.append(PageBreak())
+        story.append(p("Appendix - News evidence index", h1))
+        callout("Purpose", "Each row maps to one numbered PDF in the News Media evidence ZIP. Feed evidence documents headline/source metadata only and does not reproduce full publisher articles.")
+        if evidence_df.empty:
+            story.append(p("No News evidence records were available.", body))
+        else:
+            rows = [[p("#", table_head), p("Time (IST)", table_head), p("Media source", table_head), p("Tone", table_head), p("Headline", table_head)]]
+            for _, row in evidence_df.iterrows():
+                ts = pd.to_datetime(row.get("timestamp"), utc=True).tz_convert(IST).strftime("%Y-%m-%d %H:%M")
+                rows.append([
+                    p(f"{int(row['_evidence_no']):03d}", table_text), p(ts, table_text),
+                    p(row.get("username", ""), table_text), p(row.get("sentiment", ""), table_text),
+                    p(_report_brief(row.get("text", ""), 190), table_text),
+                ])
+            add_table(rows, [8*mm, 25*mm, 33*mm, 18*mm, 86*mm])
+
+    def footer(canvas, document):
+        canvas.saveState()
+        canvas.setFont(normal_font, 7)
+        canvas.setFillColor(colors.HexColor("#6B7280"))
+        canvas.drawString(document.leftMargin, 8 * mm, f"{title} - automated intelligence")
+        canvas.drawRightString(A4[0] - document.rightMargin, 8 * mm, f"Page {document.page}")
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def build_social_media_report(report_df, alert_threshold=35.0, query="ISRO"):
+    return build_intelligence_report_pdf(report_df, alert_threshold=alert_threshold, report_kind="social", query=query)
+
+
+def build_news_media_report(report_df, alert_threshold=35.0, query="ISRO"):
+    return build_intelligence_report_pdf(report_df, alert_threshold=alert_threshold, report_kind="news", query=query)
+
+
+def build_combined_intelligence_report(report_df, alert_threshold=35.0, query="ISRO"):
+    return build_intelligence_report_pdf(report_df, alert_threshold=alert_threshold, report_kind="combined", query=query)
+
+
+# Compatibility: legacy callers requesting build_pdf_report receive the new combined report.
+def build_pdf_report(report_df, narrative_df=None, trend_df=None, alert_threshold=35.0):
+    return build_combined_intelligence_report(report_df, alert_threshold=alert_threshold, query="ISRO")
+
+
 if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
     # =========================================================
     # DATA SOURCE UI
@@ -2631,18 +3338,19 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
             "device depends on browser security settings."
         )
 
-        news_evidence_zip_enabled = st.toggle(
-            "Create Web News evidence ZIP",
+        evidence_packs_enabled = st.toggle(
+            "Create Social + News evidence ZIPs",
             value=True,
             help=(
-                "Creates one numbered evidence-sheet PDF for every web_news "
-                "record plus a manifest.csv. The ZIP is attached to both "
-                "routine and alert emails."
+                "Creates one numbered evidence PDF per X/social post and one "
+                "per Web News item, plus manifest.csv in each ZIP."
             ),
         )
+        # Backward-compatible alias used by older UI state code.
+        news_evidence_zip_enabled = evidence_packs_enabled
         st.caption(
-            "Evidence PDFs document feed headlines/metadata and analysis. "
-            "They do not reproduce full publisher articles."
+            "Social evidence preserves stored post text/metrics. News evidence "
+            "documents feed headline/source metadata and does not reproduce full articles."
         )
 
         st.divider()
@@ -3929,82 +4637,82 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
 
 
     # =========================================================
-    # PDF REPORT DOWNLOAD
+    # BUILD 5.14 REPORT PACK: 3 PDFs + 2 EVIDENCE ZIPs
     # =========================================================
-    st.subheader("📄 Analytical PDF report")
+    st.subheader("📄 Intelligence report pack")
     st.caption(
-        "The report uses all currently loaded records before dashboard filters. "
-        "Build 5.10 generates it automatically when the dataset changes and on "
-        "each 30-minute monitoring cycle. All report timestamps are IST."
+        "Build 5.14 generates three cleaner reports: Social Media Intelligence, "
+        "News Media Intelligence, and Combined Intelligence. Each analytical "
+        "section includes a purpose statement and a section takeaway; cluster "
+        "profiles explain why records were grouped. All timestamps are IST."
     )
 
     report_fingerprint = (
-        f"{len(df)}|"
-        f"{df['timestamp'].min() if len(df) else ''}|"
-        f"{df['timestamp'].max() if len(df) else ''}|"
-        f"{source_mode}|{alert_threshold}|evidence={news_evidence_zip_enabled}"
+        f"{len(df)}|{df['timestamp'].min() if len(df) else ''}|"
+        f"{df['timestamp'].max() if len(df) else ''}|{source_mode}|"
+        f"{alert_threshold}|evidence={evidence_packs_enabled}"
     )
-
     cycle_key = (
-        f"{report_fingerprint}|slot={monitor_slot_key}"
-        if auto_monitor
-        else report_fingerprint
+        f"{report_fingerprint}|slot={monitor_slot_key}" if auto_monitor else report_fingerprint
     )
 
     def _make_report_now():
         generation_time = datetime.now(IST)
-        generation_stamp = generation_time.strftime("%Y%m%d_%H%M%S_IST")
+        stamp = generation_time.strftime("%Y%m%d_%H%M%S_IST")
 
-        report_bytes = build_pdf_report(
-            df,
-            narratives_df,
-            trend_df,
-            alert_threshold=alert_threshold,
-        )
-        report_name = (
-            "social_media_intelligence_report_"
-            + generation_stamp
-            + ".pdf"
-        )
+        social_pdf = build_social_media_report(df, alert_threshold=alert_threshold, query="ISRO")
+        news_pdf = build_news_media_report(df, alert_threshold=alert_threshold, query="ISRO")
+        combined_pdf = build_combined_intelligence_report(df, alert_threshold=alert_threshold, query="ISRO")
 
-        evidence_zip_bytes = None
-        evidence_zip_name = None
-        evidence_count = 0
-        if news_evidence_zip_enabled:
-            evidence_zip_bytes, evidence_count = build_news_evidence_zip(
-                df,
-                narratives_df,
-            )
-            evidence_zip_name = (
-                "ISRO_WebNews_Evidence_"
-                + generation_stamp
-                + ".zip"
-            )
+        names = {
+            "social": f"ISRO_Social_Media_Intelligence_{stamp}.pdf",
+            "news": f"ISRO_News_Media_Intelligence_{stamp}.pdf",
+            "combined": f"ISRO_Combined_Intelligence_{stamp}.pdf",
+        }
 
-        st.session_state["pdf_report_v58"] = report_bytes
+        x_zip = news_zip = None
+        x_count = news_count = 0
+        x_zip_name = f"ISRO_SocialMedia_Evidence_{stamp}.zip"
+        news_zip_name = f"ISRO_NewsMedia_Evidence_{stamp}.zip"
+        if evidence_packs_enabled:
+            x_subset, x_narr, _ = _report_subset_analysis(df, "social")
+            news_subset, news_narr, _ = _report_subset_analysis(df, "news")
+            x_zip, x_count = build_x_evidence_zip(x_subset, x_narr)
+            news_zip, news_count = build_news_evidence_zip(news_subset, news_narr)
+
+        st.session_state["report_pack_fp_v514"] = report_fingerprint
+        st.session_state["report_pack_cycle_v514"] = cycle_key
+        st.session_state["report_pack_generated_v514"] = generation_time.strftime("%Y-%m-%d %H:%M:%S IST")
+        st.session_state["social_pdf_v514"] = social_pdf
+        st.session_state["news_pdf_v514"] = news_pdf
+        st.session_state["combined_pdf_v514"] = combined_pdf
+        st.session_state["social_pdf_name_v514"] = names["social"]
+        st.session_state["news_pdf_name_v514"] = names["news"]
+        st.session_state["combined_pdf_name_v514"] = names["combined"]
+        st.session_state["x_evidence_zip_v514"] = x_zip
+        st.session_state["news_evidence_zip_v514"] = news_zip
+        st.session_state["x_evidence_zip_name_v514"] = x_zip_name
+        st.session_state["news_evidence_zip_name_v514"] = news_zip_name
+        st.session_state["x_evidence_count_v514"] = x_count
+        st.session_state["news_evidence_count_v514"] = news_count
+
+        # Compatibility for older alert/routine logic that expects one current PDF.
+        st.session_state["pdf_report_v58"] = combined_pdf
+        st.session_state["pdf_report_name_v58"] = names["combined"]
         st.session_state["pdf_report_fp_v58"] = report_fingerprint
         st.session_state["pdf_report_cycle_v58"] = cycle_key
-        st.session_state["pdf_report_name_v58"] = report_name
-        st.session_state["pdf_report_generated_v58"] = (
-            generation_time.strftime("%Y-%m-%d %H:%M:%S IST")
-        )
-        st.session_state["news_evidence_zip_v510"] = evidence_zip_bytes
-        st.session_state["news_evidence_zip_name_v510"] = evidence_zip_name
-        st.session_state["news_evidence_count_v510"] = evidence_count
-        return report_bytes, report_name
+        st.session_state["pdf_report_generated_v58"] = st.session_state["report_pack_generated_v514"]
+        st.session_state["news_evidence_zip_v510"] = news_zip
+        st.session_state["news_evidence_zip_name_v510"] = news_zip_name
+        st.session_state["news_evidence_count_v510"] = news_count
 
+        return combined_pdf, names["combined"]
 
-    # Automatic generation: once per dataset/cycle, not on every widget rerun.
-    pending_alert_event = st.session_state.get(
-        "pending_alert_email_event_v59"
-    )
+    pending_alert_event = st.session_state.get("pending_alert_email_event_v59")
     alert_event_unsent = bool(
         pending_alert_event
-        and st.session_state.get(
-            "alert_email_sent_event_v59"
-        ) != pending_alert_event
+        and st.session_state.get("alert_email_sent_event_v59") != pending_alert_event
     )
-
     email_needs_pdf = (
         (routine_email_enabled and auto_monitor)
         or (alert_email_enabled and alert_event_unsent)
@@ -4012,559 +4720,205 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
 
     if (
         (auto_pdf or email_needs_pdf)
-        and st.session_state.get("pdf_report_cycle_v58") != cycle_key
+        and st.session_state.get("report_pack_cycle_v514") != cycle_key
     ):
         try:
-            with st.spinner("Automatically building the latest PDF report..."):
+            with st.spinner("Building the 3-report intelligence pack..."):
                 auto_bytes, auto_name = _make_report_now()
-
             if auto_pdf_download:
                 _attempt_browser_pdf_download(auto_bytes, auto_name)
-
             st.success(
-                "Latest PDF generated automatically at "
-                + st.session_state["pdf_report_generated_v58"]
-                + "."
+                "Three intelligence PDFs generated at "
+                + st.session_state["report_pack_generated_v514"] + "."
             )
         except Exception as exc:
-            st.error(
-                "Automatic PDF generation failed: "
-                f"{type(exc).__name__}: {exc}"
-            )
+            st.error(f"Automatic report-pack generation failed: {type(exc).__name__}: {exc}")
 
-
-
-    # =========================================================
-    # AUTOMATIC EMAIL DELIVERY
-    # =========================================================
     email_cfg = get_email_config()
-    current_pdf = st.session_state.get("pdf_report_v58")
-    current_pdf_name = st.session_state.get(
-        "pdf_report_name_v58",
-        "social_media_intelligence_report_IST.pdf",
-    )
+    current_pdf = st.session_state.get("combined_pdf_v514")
+    current_pdf_name = st.session_state.get("combined_pdf_name_v514", "ISRO_Combined_Intelligence_IST.pdf")
     current_generated_at = st.session_state.get(
-        "pdf_report_generated_v58",
-        datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+        "report_pack_generated_v514", datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
     )
-    current_evidence_zip = st.session_state.get("news_evidence_zip_v510")
-    current_evidence_zip_name = st.session_state.get(
-        "news_evidence_zip_name_v510",
-        "ISRO_WebNews_Evidence_IST.zip",
-    )
-    current_evidence_count = int(
-        st.session_state.get("news_evidence_count_v510", 0) or 0
-    )
+    current_evidence_zip = st.session_state.get("news_evidence_zip_v514")
+    current_evidence_zip_name = st.session_state.get("news_evidence_zip_name_v514", "ISRO_NewsMedia_Evidence_IST.zip")
+    current_evidence_count = int(st.session_state.get("news_evidence_count_v514", 0) or 0)
+
+    def _current_report_attachments():
+        items = []
+        if st.session_state.get("social_pdf_v514"):
+            items.append((st.session_state["social_pdf_name_v514"], st.session_state["social_pdf_v514"], "application", "pdf"))
+        if st.session_state.get("news_pdf_v514"):
+            items.append((st.session_state["news_pdf_name_v514"], st.session_state["news_pdf_v514"], "application", "pdf"))
+        # combined report is passed as the primary pdf_bytes attachment by existing email code.
+        if evidence_packs_enabled and st.session_state.get("x_evidence_zip_v514"):
+            items.append((st.session_state["x_evidence_zip_name_v514"], st.session_state["x_evidence_zip_v514"], "application", "zip"))
+        if evidence_packs_enabled and st.session_state.get("news_evidence_zip_v514"):
+            items.append((st.session_state["news_evidence_zip_name_v514"], st.session_state["news_evidence_zip_v514"], "application", "zip"))
+        return items
 
     def _current_evidence_attachments():
-        if news_evidence_zip_enabled and current_evidence_zip:
-            return [(
-                current_evidence_zip_name,
-                current_evidence_zip,
-                "application",
-                "zip",
-            )]
-        return []
+        return _current_report_attachments()
 
-    # Routine recipients: once per fixed IST half-hour slot (:00 / :30).
-    routine_cycle_key = (
-        f"slot={monitor_slot_key}|source={source_mode}"
-        if auto_monitor
-        else None
-    )
-
-    routine_last_attempt_epoch = float(
-        st.session_state.get("routine_email_last_attempt_epoch_v511", 0.0)
-    )
-    routine_retry_ready = (
-        datetime.now(IST).timestamp() - routine_last_attempt_epoch >= 5 * 60
-    )
+    routine_cycle_key = f"slot={monitor_slot_key}|source={source_mode}" if auto_monitor else None
+    routine_last_attempt_epoch = float(st.session_state.get("routine_email_last_attempt_epoch_v511", 0.0))
+    routine_retry_ready = datetime.now(IST).timestamp() - routine_last_attempt_epoch >= 5 * 60
 
     if (
-        routine_email_enabled
-        and auto_monitor
-        and email_cfg["routine_recipients"]
-        and smtp_configured()
-        and current_pdf
-        and routine_cycle_key
-        and routine_retry_ready
-        and st.session_state.get(
-            "routine_email_sent_cycle_v59"
-        ) != routine_cycle_key
+        routine_email_enabled and auto_monitor and email_cfg["routine_recipients"]
+        and smtp_configured() and current_pdf and routine_cycle_key and routine_retry_ready
+        and st.session_state.get("routine_email_sent_cycle_v59") != routine_cycle_key
     ):
         try:
-            st.session_state["routine_email_last_attempt_epoch_v511"] = (
-                datetime.now(IST).timestamp()
-            )
-            st.session_state["routine_email_last_attempt_v511"] = (
-                datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-            )
-            routine_subject = (
-                "ISRO Social Intelligence Report — "
-                + datetime.now(IST).strftime(
-                    "%d %b %Y %H:%M IST"
-                )
-            )
+            st.session_state["routine_email_last_attempt_epoch_v511"] = datetime.now(IST).timestamp()
+            st.session_state["routine_email_last_attempt_v511"] = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+            routine_subject = "ISRO Intelligence Pack — " + datetime.now(IST).strftime("%d %b %Y %H:%M IST")
             routine_body = (
-                "Automated 30-minute Social Media Intelligence report.\n\n"
+                "Automated 30-minute intelligence pack.\n\n"
                 f"Generated: {current_generated_at}\n"
-                f"Data source mode: {source_mode}\n"
                 f"Analyzed records: {len(df):,}\n"
                 f"Negativity: {overall_negative_pct:.1f}%\n"
-                f"Alert threshold: {alert_threshold:.1f}%\n"
-                f"Web News evidence PDFs: {current_evidence_count}\n\n"
-                "Attachments:\n"
-                "1. Main analytical PDF\n"
-                + (
-                    "2. Numbered Web News evidence ZIP (PDFs + manifest.csv)"
-                    if news_evidence_zip_enabled and current_evidence_zip
-                    else "2. Web News evidence ZIP not generated for this cycle"
-                )
+                f"Alert threshold: {alert_threshold:.1f}%\n\n"
+                "Reports: Social Media Intelligence, News Media Intelligence, Combined Intelligence.\n"
+                "Evidence packs: numbered Social Media and News Media evidence PDFs + manifest.csv."
             )
-
-            # Reset per-recipient completion tracking when a new
-            # 30-minute slot begins.
-            if (
-                st.session_state.get(
-                    "routine_delivery_cycle_v512"
-                ) != routine_cycle_key
-            ):
-                st.session_state["routine_delivery_cycle_v512"] = (
-                    routine_cycle_key
-                )
+            if st.session_state.get("routine_delivery_cycle_v512") != routine_cycle_key:
+                st.session_state["routine_delivery_cycle_v512"] = routine_cycle_key
                 st.session_state["routine_delivered_v512"] = []
-
-            delivered = {
-                str(x).lower()
-                for x in st.session_state.get(
-                    "routine_delivered_v512",
-                    [],
-                )
-            }
-
-            pending_recipients = [
-                address
-                for address in email_cfg["routine_recipients"]
-                if address.lower() not in delivered
-            ]
-
+            delivered = {str(x).lower() for x in st.session_state.get("routine_delivered_v512", [])}
+            pending = [a for a in email_cfg["routine_recipients"] if a.lower() not in delivered]
             delivery = send_email_message(
-                pending_recipients,
-                routine_subject,
-                routine_body,
-                pdf_bytes=current_pdf,
-                pdf_filename=current_pdf_name,
-                extra_attachments=_current_evidence_attachments(),
+                pending, routine_subject, routine_body,
+                pdf_bytes=current_pdf, pdf_filename=current_pdf_name,
+                extra_attachments=_current_report_attachments(),
             )
-
-            delivered.update(
-                address.lower()
-                for address in delivery["sent"]
-            )
-            st.session_state["routine_delivered_v512"] = sorted(
-                delivered
-            )
-
-            all_expected = {
-                address.lower()
-                for address in email_cfg["routine_recipients"]
-            }
-
-            if delivered >= all_expected:
-                st.session_state["routine_email_sent_cycle_v59"] = (
-                    routine_cycle_key
-                )
-                st.session_state["last_routine_email_v59"] = (
-                    datetime.now(IST).strftime(
-                        "%Y-%m-%d %H:%M:%S IST"
-                    )
-                )
+            delivered.update(a.lower() for a in delivery["sent"])
+            st.session_state["routine_delivered_v512"] = sorted(delivered)
+            expected = {a.lower() for a in email_cfg["routine_recipients"]}
+            if delivered >= expected:
+                st.session_state["routine_email_sent_cycle_v59"] = routine_cycle_key
+                st.session_state["last_routine_email_v59"] = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
                 st.session_state["last_routine_email_error_v511"] = ""
-                st.success(
-                    "30-minute PDF delivered individually to "
-                    f"{len(delivered)} recipient(s)."
-                )
+                st.success(f"Intelligence pack delivered to {len(delivered)} recipient(s).")
             else:
-                failed_text = "; ".join(
-                    f"{addr}: {err}"
-                    for addr, err in delivery["failed"].items()
-                )
-                st.session_state["last_routine_email_error_v511"] = (
-                    failed_text
-                    or "Some recipients are still pending delivery."
-                )
-                st.warning(
-                    "Routine email was only partially delivered. "
-                    "Successful recipients will NOT be re-sent on retry. "
-                    "The remaining recipient(s) will be retried in about "
-                    "5 minutes. "
-                    + (
-                        f"Details: {failed_text}"
-                        if failed_text
-                        else ""
-                    )
-                )
+                failed_text = "; ".join(f"{a}: {e}" for a, e in delivery["failed"].items())
+                st.session_state["last_routine_email_error_v511"] = failed_text or "Some recipients remain pending."
+                st.warning("Routine email partially delivered; pending recipients will be retried. " + failed_text)
         except Exception as exc:
-            st.session_state["last_routine_email_error_v511"] = (
-                f"{type(exc).__name__}: {exc}"
-            )
-            st.error(
-                "30-minute email failed. The app will retry in about 5 minutes "
-                "while this monitoring session remains awake. "
-                f"Technical detail: {type(exc).__name__}: {exc}"
-            )
+            st.session_state["last_routine_email_error_v511"] = f"{type(exc).__name__}: {exc}"
+            st.error(f"30-minute intelligence-pack email failed: {type(exc).__name__}: {exc}")
 
-
-    # Alert-only recipients: once per upward threshold crossing.
-    pending_alert_event = st.session_state.get(
-        "pending_alert_email_event_v59"
-    )
-    alert_event_unsent = bool(
-        pending_alert_event
-        and st.session_state.get(
-            "alert_email_sent_event_v59"
-        ) != pending_alert_event
-    )
-
-    alert_last_attempt_epoch = float(
-        st.session_state.get("alert_email_last_attempt_epoch_v511", 0.0)
-    )
-    alert_retry_ready = (
-        datetime.now(IST).timestamp() - alert_last_attempt_epoch >= 5 * 60
-    )
-
+    # Alert-only recipients: combined report + the same supporting pack.
+    pending_alert_event = st.session_state.get("pending_alert_email_event_v59")
+    alert_event_unsent = bool(pending_alert_event and st.session_state.get("alert_email_sent_event_v59") != pending_alert_event)
+    alert_last_attempt_epoch = float(st.session_state.get("alert_email_last_attempt_epoch_v511", 0.0))
+    alert_retry_ready = datetime.now(IST).timestamp() - alert_last_attempt_epoch >= 5 * 60
     if (
-        alert_email_enabled
-        and alert_event_unsent
-        and email_cfg["alert_recipients"]
-        and smtp_configured()
-        and alert_retry_ready
+        alert_email_enabled and alert_event_unsent and email_cfg["alert_recipients"]
+        and smtp_configured() and alert_retry_ready
     ):
         try:
-            st.session_state["alert_email_last_attempt_epoch_v511"] = (
-                datetime.now(IST).timestamp()
-            )
-            st.session_state["alert_email_last_attempt_v511"] = (
-                datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-            )
-            # Build a PDF immediately if the currently cached report is missing.
+            st.session_state["alert_email_last_attempt_epoch_v511"] = datetime.now(IST).timestamp()
+            st.session_state["alert_email_last_attempt_v511"] = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
             if not current_pdf:
                 current_pdf, current_pdf_name = _make_report_now()
-                current_evidence_zip = st.session_state.get(
-                    "news_evidence_zip_v510"
-                )
-                current_evidence_zip_name = st.session_state.get(
-                    "news_evidence_zip_name_v510",
-                    "ISRO_WebNews_Evidence_IST.zip",
-                )
-                current_evidence_count = int(
-                    st.session_state.get(
-                        "news_evidence_count_v510", 0
-                    ) or 0
-                )
-
-            alert_negative_pct = float(
-                st.session_state.get(
-                    "pending_alert_negative_pct_v59",
-                    overall_negative_pct,
-                )
-            )
-
-            alert_subject = (
-                f"ALERT: ISRO negativity {alert_negative_pct:.1f}% — "
-                + datetime.now(IST).strftime(
-                    "%d %b %Y %H:%M IST"
-                )
-            )
-            alert_body = (
-                "Negativity threshold alert from the Social Media "
-                "Intelligence Platform.\n\n"
-                f"Alert time: "
-                f"{datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}\n"
+            alert_negative_pct = float(st.session_state.get("pending_alert_negative_pct_v59", overall_negative_pct))
+            subject = f"ALERT: ISRO negativity {alert_negative_pct:.1f}% — " + datetime.now(IST).strftime("%d %b %Y %H:%M IST")
+            body_text = (
+                "Negativity threshold alert.\n\n"
                 f"Negativity: {alert_negative_pct:.1f}%\n"
-                f"Configured threshold: {alert_threshold:.1f}%\n"
-                f"Data source mode: {source_mode}\n"
-                f"Analyzed records: {len(df):,}\n"
-                f"Web News evidence PDFs: {current_evidence_count}\n\n"
-                "The current analytical PDF is attached. "
-                "When enabled, a ZIP containing one numbered Web News evidence "
-                "PDF per feed item plus manifest.csv is also attached.\n\n"
-                "This monitoring score and sentiment classification are "
-                "analytical signals, not verified facts or probabilities."
+                f"Threshold: {alert_threshold:.1f}%\n"
+                "Combined Intelligence is the primary attachment; source-specific reports and evidence packs are included when size permits."
             )
-
-            # Reset per-recipient completion tracking for each new
-            # threshold-crossing alert event.
-            if (
-                st.session_state.get(
-                    "alert_delivery_event_v512"
-                ) != pending_alert_event
-            ):
-                st.session_state["alert_delivery_event_v512"] = (
-                    pending_alert_event
-                )
+            if st.session_state.get("alert_delivery_event_v512") != pending_alert_event:
+                st.session_state["alert_delivery_event_v512"] = pending_alert_event
                 st.session_state["alert_delivered_v512"] = []
-
-            delivered = {
-                str(x).lower()
-                for x in st.session_state.get(
-                    "alert_delivered_v512",
-                    [],
-                )
-            }
-
-            pending_recipients = [
-                address
-                for address in email_cfg["alert_recipients"]
-                if address.lower() not in delivered
-            ]
-
+            delivered = {str(x).lower() for x in st.session_state.get("alert_delivered_v512", [])}
+            pending = [a for a in email_cfg["alert_recipients"] if a.lower() not in delivered]
             delivery = send_email_message(
-                pending_recipients,
-                alert_subject,
-                alert_body,
-                pdf_bytes=current_pdf,
-                pdf_filename=current_pdf_name,
-                extra_attachments=_current_evidence_attachments(),
+                pending, subject, body_text,
+                pdf_bytes=current_pdf, pdf_filename=current_pdf_name,
+                extra_attachments=_current_report_attachments(),
             )
-
-            delivered.update(
-                address.lower()
-                for address in delivery["sent"]
-            )
-            st.session_state["alert_delivered_v512"] = sorted(
-                delivered
-            )
-
-            all_expected = {
-                address.lower()
-                for address in email_cfg["alert_recipients"]
-            }
-
-            if delivered >= all_expected:
-                st.session_state["alert_email_sent_event_v59"] = (
-                    pending_alert_event
-                )
-                st.session_state["last_alert_email_v59"] = (
-                    datetime.now(IST).strftime(
-                        "%Y-%m-%d %H:%M:%S IST"
-                    )
-                )
+            delivered.update(a.lower() for a in delivery["sent"])
+            st.session_state["alert_delivered_v512"] = sorted(delivered)
+            expected = {a.lower() for a in email_cfg["alert_recipients"]}
+            if delivered >= expected:
+                st.session_state["alert_email_sent_event_v59"] = pending_alert_event
+                st.session_state["last_alert_email_v59"] = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
                 st.session_state["last_alert_email_error_v511"] = ""
-                st.success(
-                    "Alert PDF delivered individually to "
-                    f"{len(delivered)} alert recipient(s)."
-                )
+                st.success(f"Alert intelligence pack delivered to {len(delivered)} recipient(s).")
             else:
-                failed_text = "; ".join(
-                    f"{addr}: {err}"
-                    for addr, err in delivery["failed"].items()
-                )
-                st.session_state["last_alert_email_error_v511"] = (
-                    failed_text
-                    or "Some alert recipients are still pending delivery."
-                )
-                st.warning(
-                    "Alert email was only partially delivered. "
-                    "Successful recipients will NOT be re-sent on retry. "
-                    "The remaining recipient(s) will be retried in about "
-                    "5 minutes. "
-                    + (
-                        f"Details: {failed_text}"
-                        if failed_text
-                        else ""
-                    )
-                )
+                failed_text = "; ".join(f"{a}: {e}" for a, e in delivery["failed"].items())
+                st.session_state["last_alert_email_error_v511"] = failed_text or "Some alert recipients remain pending."
+                st.warning("Alert email partially delivered; pending recipients will be retried. " + failed_text)
         except Exception as exc:
-            st.session_state["last_alert_email_error_v511"] = (
-                f"{type(exc).__name__}: {exc}"
-            )
-            st.error(
-                "Alert email failed. The app will retry in about 5 minutes "
-                "while this monitoring session remains awake. "
-                f"Technical detail: {type(exc).__name__}: {exc}"
-            )
+            st.session_state["last_alert_email_error_v511"] = f"{type(exc).__name__}: {exc}"
+            st.error(f"Alert intelligence-pack email failed: {type(exc).__name__}: {exc}")
 
+    with st.expander("Email/report-pack status"):
+        st.write("Generated:", st.session_state.get("report_pack_generated_v514", "Not generated"))
+        st.write("Social evidence PDFs:", int(st.session_state.get("x_evidence_count_v514", 0) or 0))
+        st.write("News evidence PDFs:", int(st.session_state.get("news_evidence_count_v514", 0) or 0))
+        st.write("Last 30-minute email:", st.session_state.get("last_routine_email_v59", "Not sent in this session"))
+        st.write("Last alert email:", st.session_state.get("last_alert_email_v59", "Not sent in this session"))
+        st.write("Last routine send error:", st.session_state.get("last_routine_email_error_v511", "None") or "None")
+        st.write("Last alert send error:", st.session_state.get("last_alert_email_error_v511", "None") or "None")
 
-    with st.expander("Email delivery status"):
-        st.write("Current IST time:", datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"))
-        st.write("Current 30-minute slot:", monitor_slot_key)
-        st.write("Next scheduled slot:", monitor_slot_end.strftime("%Y-%m-%d %H:%M:%S IST"))
-        st.write(
-            "30-minute PDF recipients:",
-            ", ".join(email_cfg["routine_recipients"])
-            if email_cfg["routine_recipients"]
-            else "None configured",
-        )
-        st.write(
-            "Alert-only recipients:",
-            ", ".join(email_cfg["alert_recipients"])
-            if email_cfg["alert_recipients"]
-            else "None configured",
-        )
-        st.write(
-            "Parsed routine recipient count:",
-            len(email_cfg["routine_recipients"]),
-        )
-        st.write(
-            "Routine recipients delivered in current slot:",
-            ", ".join(
-                st.session_state.get(
-                    "routine_delivered_v512",
-                    [],
-                )
-            )
-            or "None yet",
-        )
-        st.write(
-            "Parsed alert recipient count:",
-            len(email_cfg["alert_recipients"]),
-        )
-        st.write(
-            "Alert recipients delivered in current event:",
-            ", ".join(
-                st.session_state.get(
-                    "alert_delivered_v512",
-                    [],
-                )
-            )
-            or "None yet",
-        )
-        st.write(
-            "Last 30-minute email:",
-            st.session_state.get(
-                "last_routine_email_v59",
-                "Not sent in this session",
-            ),
-        )
-        st.write(
-            "Last alert email:",
-            st.session_state.get(
-                "last_alert_email_v59",
-                "Not sent in this session",
-            ),
-        )
-        st.write(
-            "Last routine send attempt:",
-            st.session_state.get(
-                "routine_email_last_attempt_v511",
-                "No attempt in this session",
-            ),
-        )
-        st.write(
-            "Last routine send error:",
-            st.session_state.get(
-                "last_routine_email_error_v511",
-                "None",
-            ) or "None",
-        )
-        st.write(
-            "Last alert send attempt:",
-            st.session_state.get(
-                "alert_email_last_attempt_v511",
-                "No attempt in this session",
-            ),
-        )
-        st.write(
-            "Last alert send error:",
-            st.session_state.get(
-                "last_alert_email_error_v511",
-                "None",
-            ) or "None",
-        )
-        st.write(
-            "Last successful news refresh:",
-            st.session_state.get(
-                "last_news_fetch_iso_v57",
-                "Not refreshed in this session",
-            ),
-        )
-        st.write(
-            "Last news refresh error:",
-            st.session_state.get(
-                "last_news_fetch_error_v511",
-                "None",
-            ) or "None",
-        )
-        st.write(
-            "Web News evidence PDFs in latest ZIP:",
-            current_evidence_count,
-        )
-        if current_evidence_zip:
-            st.write(
-                "Evidence ZIP size:",
-                f"{len(current_evidence_zip) / (1024 * 1024):.2f} MB",
-            )
-
-
-    # Manual regeneration remains available as a fallback.
-    if st.button(
-        "Regenerate PDF now",
-        key="regenerate_pdf_v58",
-    ):
+    if st.button("Regenerate all 3 PDFs now", key="regenerate_report_pack_v514"):
         try:
-            with st.spinner("Building PDF report..."):
+            with st.spinner("Building report pack..."):
                 manual_bytes, manual_name = _make_report_now()
-
             if auto_pdf_download:
                 _attempt_browser_pdf_download(manual_bytes, manual_name)
-
-            st.success(
-                "PDF regenerated at "
-                + st.session_state["pdf_report_generated_v58"]
-                + "."
-            )
+            st.success("All three PDFs and evidence packs regenerated.")
         except Exception as exc:
-            st.error(
-                "PDF report could not be generated: "
-                f"{type(exc).__name__}: {exc}"
-            )
+            st.error(f"Report pack could not be generated: {type(exc).__name__}: {exc}")
 
-
-    if (
-        st.session_state.get("pdf_report_v58")
-        and st.session_state.get("pdf_report_fp_v58") == report_fingerprint
-    ):
-        generated_at = st.session_state.get(
-            "pdf_report_generated_v58",
-            "unknown time",
-        )
-        st.info(
-            f"Latest report ready · generated {generated_at}. "
-            "If your browser blocked the automatic download, use the button below."
-        )
-
-        st.download_button(
-            "⬇️ Download latest PDF report",
-            data=st.session_state["pdf_report_v58"],
-            file_name=st.session_state.get(
-                "pdf_report_name_v58",
-                "social_media_intelligence_report_IST.pdf",
-            ),
-            mime="application/pdf",
-            key="download_pdf_v58",
-        )
-
-        if st.session_state.get("news_evidence_zip_v510"):
+    if st.session_state.get("report_pack_fp_v514") == report_fingerprint:
+        st.info("Latest Build 5.14 report pack is ready.")
+        c1, c2, c3 = st.columns(3)
+        with c1:
             st.download_button(
-                "🗂️ Download Web News evidence ZIP",
-                data=st.session_state["news_evidence_zip_v510"],
-                file_name=st.session_state.get(
-                    "news_evidence_zip_name_v510",
-                    "ISRO_WebNews_Evidence_IST.zip",
-                ),
-                mime="application/zip",
-                key="download_news_evidence_zip_v510",
+                "⬇️ Social Media Intel PDF",
+                data=st.session_state.get("social_pdf_v514", b""),
+                file_name=st.session_state.get("social_pdf_name_v514", "ISRO_Social_Media_Intelligence_IST.pdf"),
+                mime="application/pdf", key="download_social_pdf_v514",
             )
-            st.caption(
-                f"Evidence ZIP contains "
-                f"{int(st.session_state.get('news_evidence_count_v510', 0) or 0)} "
-                "numbered Web News evidence PDF(s) plus manifest.csv."
+        with c2:
+            st.download_button(
+                "⬇️ News Media Intel PDF",
+                data=st.session_state.get("news_pdf_v514", b""),
+                file_name=st.session_state.get("news_pdf_name_v514", "ISRO_News_Media_Intelligence_IST.pdf"),
+                mime="application/pdf", key="download_news_pdf_v514",
             )
+        with c3:
+            st.download_button(
+                "⬇️ Combined Intel PDF",
+                data=st.session_state.get("combined_pdf_v514", b""),
+                file_name=st.session_state.get("combined_pdf_name_v514", "ISRO_Combined_Intelligence_IST.pdf"),
+                mime="application/pdf", key="download_combined_pdf_v514",
+            )
+
+        z1, z2 = st.columns(2)
+        with z1:
+            if st.session_state.get("x_evidence_zip_v514"):
+                st.download_button(
+                    "🗂️ Social Media evidence ZIP",
+                    data=st.session_state["x_evidence_zip_v514"],
+                    file_name=st.session_state.get("x_evidence_zip_name_v514", "ISRO_SocialMedia_Evidence_IST.zip"),
+                    mime="application/zip", key="download_x_evidence_v514",
+                )
+        with z2:
+            if st.session_state.get("news_evidence_zip_v514"):
+                st.download_button(
+                    "🗂️ News Media evidence ZIP",
+                    data=st.session_state["news_evidence_zip_v514"],
+                    file_name=st.session_state.get("news_evidence_zip_name_v514", "ISRO_NewsMedia_Evidence_IST.zip"),
+                    mime="application/zip", key="download_news_evidence_v514",
+                )
     else:
-        st.info(
-            "The PDF will be generated automatically when analyzed data is available."
-        )
+        st.info("The report pack will be generated automatically when analyzed data is available.")
 
 
     st.subheader("Record explorer — timestamps in IST")

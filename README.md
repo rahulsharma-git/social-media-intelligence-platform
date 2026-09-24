@@ -1,4 +1,4 @@
-# Social Media Intelligence Platform — Build 5.13.2
+# Social Media Intelligence Platform — Build 5.14
 
 Build 5.13 is based on the uploaded Build 5.12 recipient-email hotfix.
 
@@ -146,3 +146,19 @@ These are GitHub Actions secrets and are separate from Streamlit Secrets.
 
 Fixes Supabase HTTP 409 conflicts in the GitHub background monitor by specifying
 the correct PostgREST conflict targets (`external_id` and `slot_key`).
+
+
+## Build 5.13.3 — Dual Scheduler
+
+- GitHub Actions schedule is explicitly timezone-aware for Asia/Kolkata.
+- Native schedule runs at :07 and :37 IST.
+- Optional Supabase Cron fallback dispatches the GitHub workflow every 30 minutes.
+- Slot-based deduplication prevents duplicate routine emails if both schedulers fire.
+- Trigger source is shown in GitHub run summaries and email/report status text.
+- News remains past 24 hours by default.
+- PDF generation, emailing and all timestamps remain browser-independent and IST.
+
+
+## Build 5.14
+
+Three source-specific intelligence PDFs, a combined PDF, two evidence ZIPs, improved cluster explanations/section summaries, and an optional official X API collector. See `BUILD_5.14_REPORTING_AND_X.md`.

@@ -240,52 +240,47 @@ def send_email_individually(
     recipients: list[str],
     subject: str,
     body: str,
-    pdf_bytes: bytes,
-    pdf_filename: str,
+    attachments: list[tuple[str, bytes, str, str]],
 ) -> dict:
-    """
-    Send one message per recipient.
-
-    Build 5.13.1 retries transient SMTP connection/login failures and returns
-    failures to the caller instead of crashing before diagnostics are written.
-    """
+    """Send one message per recipient with a bounded report/evidence pack."""
     sender = env("SMTP_EMAIL")
     password = env("SMTP_APP_PASSWORD").replace(" ", "")
-
     recipients = [x for x in recipients if x and "@" in x]
     if not recipients:
         return {"sent": [], "failed": {}}
-
     if not sender or not password:
-        msg = (
-            "SMTP_EMAIL and SMTP_APP_PASSWORD are not configured in "
-            "GitHub Actions repository secrets."
-        )
+        msg = "SMTP_EMAIL and SMTP_APP_PASSWORD are not configured in GitHub Actions repository secrets."
         return {"sent": [], "failed": {x: msg for x in recipients}}
 
-    if len(pdf_bytes) > 18 * 1024 * 1024:
-        msg = (
-            f"PDF is {len(pdf_bytes)/(1024*1024):.1f} MB; above the "
-            "18 MB safe raw attachment limit."
-        )
-        return {"sent": [], "failed": {x: msg for x in recipients}}
+    clean = [(str(n), p, str(mt), str(st)) for n, p, mt, st in attachments if p is not None]
+    raw_size = sum(len(p) for _, p, _, _ in clean)
+    if raw_size > 18 * 1024 * 1024:
+        # Keep the 3 analytical PDFs first, then add evidence ZIPs only if they fit.
+        selected = []
+        used = 0
+        for item in clean:
+            name, payload, mt, st = item
+            is_pdf = st == "pdf" or name.lower().endswith(".pdf")
+            if is_pdf and used + len(payload) <= 18 * 1024 * 1024:
+                selected.append(item); used += len(payload)
+        for item in clean:
+            if item in selected:
+                continue
+            if used + len(item[1]) <= 18 * 1024 * 1024:
+                selected.append(item); used += len(item[1])
+        clean = selected
+        print("::warning::Attachment pack exceeded 18 MB; evidence ZIPs were trimmed as needed while keeping analytical PDFs first.")
 
     context = ssl.create_default_context()
     pending = list(recipients)
     sent: list[str] = []
     failed: dict[str, str] = {}
-
     last_connection_error = ""
+
     for attempt in range(1, 4):
         try:
-            with smtplib.SMTP_SSL(
-                "smtp.gmail.com",
-                465,
-                context=context,
-                timeout=45,
-            ) as smtp:
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context, timeout=45) as smtp:
                 smtp.login(sender, password)
-
                 remaining = []
                 for recipient in pending:
                     try:
@@ -294,49 +289,28 @@ def send_email_individually(
                         msg["To"] = recipient
                         msg["Subject"] = subject
                         msg.set_content(body)
-                        msg.add_attachment(
-                            pdf_bytes,
-                            maintype="application",
-                            subtype="pdf",
-                            filename=pdf_filename,
-                        )
-                        refused = smtp.send_message(
-                            msg,
-                            from_addr=sender,
-                            to_addrs=[recipient],
-                        )
+                        for filename, payload, maintype, subtype in clean:
+                            msg.add_attachment(payload, maintype=maintype, subtype=subtype, filename=filename)
+                        refused = smtp.send_message(msg, from_addr=sender, to_addrs=[recipient])
                         if refused:
-                            failed[recipient] = str(refused)
-                            remaining.append(recipient)
+                            failed[recipient] = str(refused); remaining.append(recipient)
                         else:
-                            sent.append(recipient)
-                            failed.pop(recipient, None)
+                            sent.append(recipient); failed.pop(recipient, None)
                     except Exception as exc:
-                        failed[recipient] = f"{type(exc).__name__}: {exc}"
-                        remaining.append(recipient)
-
+                        failed[recipient] = f"{type(exc).__name__}: {exc}"; remaining.append(recipient)
                 pending = remaining
                 if not pending:
                     break
-
         except Exception as exc:
             last_connection_error = f"{type(exc).__name__}: {exc}"
             for recipient in pending:
                 failed[recipient] = last_connection_error
-
         if pending and attempt < 3:
-            wait_seconds = attempt * 5
-            print(
-                f"SMTP attempt {attempt}/3 incomplete; retrying in "
-                f"{wait_seconds}s."
-            )
-            time.sleep(wait_seconds)
+            time.sleep(attempt * 5)
 
     if pending and last_connection_error:
         print(f"::warning::SMTP delivery issue: {last_connection_error}")
-
     return {"sent": sent, "failed": failed}
-
 
 def build_analysis(raw_df: pd.DataFrame):
     df = core.run_sentiment_agent(raw_df)
@@ -461,25 +435,38 @@ def main() -> None:
     if table_ok:
         monitoring_upsert(run_record)
 
-    # Generate the same analytical PDF used by the dashboard.
-    pdf_bytes = core.build_pdf_report(
-        df,
-        narratives,
-        trend,
-        alert_threshold=alert_threshold,
-    )
-    pdf_filename = (
-        "social_media_intelligence_report_"
-        + now_ist.strftime("%Y%m%d_%H%M%S_IST")
-        + ".pdf"
-    )
-    pdf_path = OUTPUT_DIR / pdf_filename
-    pdf_path.write_bytes(pdf_bytes)
-    run_record["pdf_filename"] = pdf_filename
-    print(f"Generated {pdf_filename} ({len(pdf_bytes)/(1024*1024):.2f} MB).")
+    # Build three analytical PDFs plus separate evidence packs.
+    stamp = now_ist.strftime("%Y%m%d_%H%M%S_IST")
+    social_pdf = core.build_social_media_report(df, alert_threshold=alert_threshold, query=query)
+    news_pdf = core.build_news_media_report(df, alert_threshold=alert_threshold, query=query)
+    combined_pdf = core.build_combined_intelligence_report(df, alert_threshold=alert_threshold, query=query)
 
+    report_files = [
+        (f"ISRO_Social_Media_Intelligence_{stamp}.pdf", social_pdf, "application", "pdf"),
+        (f"ISRO_News_Media_Intelligence_{stamp}.pdf", news_pdf, "application", "pdf"),
+        (f"ISRO_Combined_Intelligence_{stamp}.pdf", combined_pdf, "application", "pdf"),
+    ]
+    for filename, payload, _, _ in report_files:
+        (OUTPUT_DIR / filename).write_bytes(payload)
+        print(f"Generated {filename} ({len(payload)/(1024*1024):.2f} MB).")
+
+    x_subset, x_narr, _ = core._report_subset_analysis(df, "social")
+    news_subset, news_narr, _ = core._report_subset_analysis(df, "news")
+    x_zip, x_evidence_count = core.build_x_evidence_zip(x_subset, x_narr)
+    news_zip, news_evidence_count = core.build_news_evidence_zip(news_subset, news_narr)
+    evidence_files = [
+        (f"ISRO_SocialMedia_Evidence_{stamp}.zip", x_zip, "application", "zip"),
+        (f"ISRO_NewsMedia_Evidence_{stamp}.zip", news_zip, "application", "zip"),
+    ]
+    for filename, payload, _, _ in evidence_files:
+        (OUTPUT_DIR / filename).write_bytes(payload)
+        print(f"Generated {filename} ({len(payload)/(1024*1024):.2f} MB).")
+
+    attachments = report_files + evidence_files
+    pdf_filename = report_files[2][0]
+    run_record["pdf_filename"] = pdf_filename
     status_lines = [
-        "Automated Social Media Intelligence background report.",
+        "Automated ISRO intelligence report pack (Social Media + News Media + Combined).",
         "",
         f"Run time: {now_ist:%Y-%m-%d %H:%M:%S IST}",
         f"Scheduled slot: {slot_start:%Y-%m-%d %H:%M IST}",
@@ -493,10 +480,12 @@ def main() -> None:
         f"Alert threshold: {alert_threshold:.1f}%",
         f"Free news source: {news_source}",
         f"Scheduler trigger: {trigger_source}",
+        f"Social evidence PDFs: {x_evidence_count}",
+        f"News evidence PDFs: {news_evidence_count}",
         "",
         "All displayed/report timestamps are India Standard Time (IST).",
-        "X data in this background run comes from posts already stored in Supabase; "
-        "the free background collector refreshes Web News, not authenticated X search.",
+        "X data comes from Supabase plus the optional official X API collector when X_BEARER_TOKEN is configured. "
+        "Without that token, the worker keeps analyzing X posts already stored in Supabase.",
     ]
     body = "\n".join(status_lines)
 
@@ -517,8 +506,7 @@ def main() -> None:
             routine_pending,
             routine_subject,
             body,
-            pdf_bytes,
-            pdf_filename,
+            attachments,
         )
         routine_delivered.update(x.lower() for x in result["sent"])
         routine_failed = result["failed"]
@@ -547,8 +535,7 @@ def main() -> None:
                 alert_pending,
                 alert_subject,
                 body,
-                pdf_bytes,
-                pdf_filename,
+                attachments,
             )
             alert_delivered.update(x.lower() for x in result["sent"])
             alert_failed = result["failed"]
@@ -578,7 +565,7 @@ def main() -> None:
         monitoring_upsert(run_record)
 
     summary = {
-        "build": "5.13.3",
+        "build": "5.14",
         "run_time_ist": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
         "slot_key": slot_key,
         "records": len(df),
@@ -593,6 +580,10 @@ def main() -> None:
         "routine_delivered": sorted(routine_delivered),
         "alert_delivered": sorted(alert_delivered),
         "pdf_filename": pdf_filename,
+        "report_files": [x[0] for x in report_files],
+        "evidence_files": [x[0] for x in evidence_files],
+        "x_evidence_count": x_evidence_count,
+        "news_evidence_count": news_evidence_count,
         "status": run_record["status"],
         "error": run_record["error"],
     }
@@ -605,7 +596,7 @@ def main() -> None:
         [
             "# SMI Background Monitor",
             "",
-            f"- Build: **5.13.3**",
+            f"- Build: **5.14**",
             f"- Run time: **{now_ist:%Y-%m-%d %H:%M:%S IST}**",
             f"- Status: **{run_record['status']}**",
             f"- Records analyzed: **{len(df):,}**",
@@ -614,7 +605,9 @@ def main() -> None:
             f"- Positive: **{positive_pct:.1f}%**",
             f"- Neutral: **{neutral_pct:.1f}%**",
             f"- Negative: **{negative_pct:.1f}%**",
-            f"- PDF: `{pdf_filename}`",
+            f"- Combined PDF: `{pdf_filename}`",
+            f"- Social evidence PDFs: **{x_evidence_count}**",
+            f"- News evidence PDFs: **{news_evidence_count}**",
             f"- Routine recipients delivered: **{len(routine_delivered)}**",
             f"- Alert recipients delivered: **{len(alert_delivered)}**",
             "",
