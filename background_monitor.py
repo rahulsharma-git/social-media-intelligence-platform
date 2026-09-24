@@ -373,7 +373,7 @@ def main() -> None:
     # live X API token is configured.
     news_lookback_hours = max(1, env_int("BACKGROUND_LOOKBACK_HOURS", 24))
     x_fresh_hours = max(1, env_int("X_FRESH_HOURS", 24))
-    x_fallback_max_posts = max(10, env_int("X_FALLBACK_MAX_POSTS", 50))
+    x_fallback_max_posts = min(50, max(10, env_int("X_FALLBACK_MAX_POSTS", 50)))
     x_min_report_posts = max(10, env_int("X_MIN_REPORT_POSTS", env_int("X_MIN_POSTS", 10)))
     report_max_records = max(50, env_int("BACKGROUND_MAX_RECORDS", 1500))
     force_send = env_bool("FORCE_SEND", False)
@@ -387,7 +387,7 @@ def main() -> None:
         routine_recipients = parse_recipients("REPORT_RECIPIENTS")
     alert_recipients = parse_recipients("ALERT_RECIPIENTS")
 
-    print(f"Build 5.14.3 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
+    print(f"Build 5.15 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
     print(f"Trigger source: {trigger_source}")
     print(f"Slot: {slot_key}; query={query!r}; news_window={news_lookback_hours}h; x_fresh_window={x_fresh_hours}h")
 
@@ -723,7 +723,7 @@ def main() -> None:
         monitoring_upsert(run_record)
 
     summary = {
-        "build": "5.14.3",
+        "build": "5.15",
         "run_time_ist": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
         "slot_key": slot_key,
         "records": len(df),

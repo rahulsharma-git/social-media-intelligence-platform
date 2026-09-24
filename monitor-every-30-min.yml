@@ -49,9 +49,11 @@ jobs:
       FAIL_ON_EMAIL_ERROR: ${{ vars.FAIL_ON_EMAIL_ERROR }}
       FORCE_SEND: ${{ github.event_name == 'workflow_dispatch' && inputs.force_send || false }}
       TRIGGER_SOURCE: ${{ github.event_name == 'workflow_dispatch' && inputs.trigger_source || 'github-schedule' }}
-      X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
       X_QUERY: ${{ vars.X_QUERY }}
       X_MAX_POSTS: ${{ vars.X_MAX_POSTS }}
+      X_FREE_TOPIC: ${{ vars.X_FREE_TOPIC }}
+      X_ENABLE_WEB_INDEX: ${{ vars.X_ENABLE_WEB_INDEX }}
+      X_ENABLE_OEMBED: ${{ vars.X_ENABLE_OEMBED }}
       X_MIN_POSTS: ${{ vars.X_MIN_POSTS }}
       X_MIN_REPORT_POSTS: ${{ vars.X_MIN_REPORT_POSTS }}
       X_FRESH_HOURS: ${{ vars.X_FRESH_HOURS }}
@@ -69,7 +71,7 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Preflight - verify deployed Build 5.14.3 files
+      - name: Preflight - verify deployed Build 5.15 files
         shell: bash
         run: |
           echo "Trigger source: ${TRIGGER_SOURCE:-unknown}"
@@ -137,11 +139,11 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Collect X posts if collector is available
+      - name: Collect free X fusion sources
         shell: bash
         run: |
           if [ -f x_collector.py ]; then
-            echo "Running optional X collector..."
+            echo "Running free X fusion collector (CSV inbox + web index + X oEmbed)..."
             python x_collector.py || echo "::warning::X collector failed; continuing with stored Supabase X data."
           else
             echo "::warning::x_collector.py not present; skipping X collection."

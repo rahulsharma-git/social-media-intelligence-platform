@@ -1,0 +1,60 @@
+SOCIAL MEDIA INTELLIGENCE PLATFORM — BUILD 5.15 FREE X FUSION
+
+Goal
+====
+Use only no-paid-X-API mechanisms and combine all REAL X rows.
+Target latest minimum 10, maximum 50 unique posts.
+
+Three free acquisition paths
+============================
+1. CSV/manual assisted ingestion
+   - Commit compatible files into x_inbox/*.csv.
+   - Existing manually uploaded rows in Supabase remain part of the pool.
+
+2. Public web-index discovery
+   - The scheduled worker searches public Bing web-search RSS/HTML results for
+     x.com/twitter.com status URLs containing ISRO / @isro / #ISRO.
+   - This is best effort. Search indexes are not exhaustive or guaranteed newest.
+
+3. Official X public oEmbed
+   - Discovered URLs and optional URLs in x_urls.txt are hydrated through
+     X's public publish.x.com / publish.twitter.com oEmbed endpoint.
+   - No X developer account or Bearer Token is required.
+   - oEmbed does not provide reliable likes/reposts/replies/follower counts;
+     unavailable metrics remain 0.
+
+Combination / ranking
+=====================
+- Merge existing Supabase X + CSV inbox + oEmbed rows.
+- Deduplicate by X post ID/external_id.
+- Sort by timestamp newest first.
+- Keep maximum 50.
+- Report target minimum 10 when at least 10 real rows exist.
+- If fewer than 10 real rows exist, use only what exists and emit a warning.
+- Never fabricate posts.
+
+Timestamp for oEmbed rows
+=========================
+X oEmbed does not expose a machine-readable creation timestamp. For a valid
+numeric X post ID the collector derives the UTC creation time from the
+Snowflake ID, then the application displays IST.
+
+Recommended GitHub Actions variables
+====================================
+X_MIN_POSTS = 10
+X_MIN_REPORT_POSTS = 10
+X_MAX_POSTS = 50
+X_FALLBACK_MAX_POSTS = 50
+X_FRESH_HOURS = 24
+X_FREE_TOPIC = ISRO
+X_ENABLE_WEB_INDEX = true
+X_ENABLE_OEMBED = true
+
+No X_BEARER_TOKEN is required for Build 5.15.
+
+Limitations
+===========
+- Free web search indexing can miss X posts and can be delayed.
+- Public oEmbed can hydrate only URLs already discovered/provided.
+- Engagement/follower metrics are 0 unless present in manual CSV/Supabase data.
+- No direct-login scraping, cookie automation or bypass of X access controls is used.

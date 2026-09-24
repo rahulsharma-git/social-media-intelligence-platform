@@ -183,3 +183,17 @@ Set GitHub Actions variables:
 
 If fewer than 10 fresh X posts are available but Supabase has older X records,
 the report backfills with the latest stored rows and labels them as backfill.
+
+
+## Build 5.15 — Free X Fusion
+
+Build 5.15 removes the requirement for `X_BEARER_TOKEN`.
+
+Free X inputs are combined:
+1. existing/manual Supabase X rows + `x_inbox/*.csv`
+2. free public web-index discovery of X status URLs
+3. official keyless X oEmbed hydration of discovered/manual URLs
+
+The pool is deduplicated, sorted newest-first, and capped at 50 rows.
+The reporting target is at least 10 latest real rows whenever at least 10 are
+actually available across the combined free sources. No synthetic posts are created.

@@ -1,0 +1,5 @@
+# FREE X URL INBOX
+# Optional: paste public X post URLs below, one per line.
+# The collector hydrates them through X's public oEmbed service.
+# Example:
+# https://x.com/username/status/1234567890123456789
