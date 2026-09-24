@@ -1,0 +1,26 @@
+BUILD 5.14.1 — resilient 30-minute scheduler hotfix
+
+Why:
+Build 5.14 introduced an optional `x_collector.py` step.
+If only the workflow file was updated, but `x_collector.py` was not yet present
+in the repository, GitHub Actions could stop before PDF/email generation.
+
+What changed:
+- Preflight verifies required runtime files.
+- x_collector.py is explicitly optional.
+- Missing or failed X collector no longer blocks the report/email cycle.
+- News + stored Supabase X data continue even when live X collection is unavailable.
+- GitHub/Supabase 30-minute trigger behavior is unchanged.
+- All diagnostics are visible in the GitHub Actions run summary.
+
+Deploy:
+1. Upload ALL runtime files together:
+   streamlit_app.py
+   background_monitor.py
+   x_collector.py
+   requirements.txt
+2. Replace:
+   .github/workflows/monitor-every-30-min.yml
+3. Commit to main.
+4. Run workflow manually once with force_send=true for testing.
+5. Then allow Supabase Cron / GitHub schedule to run normally.

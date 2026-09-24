@@ -91,3 +91,16 @@ RECOMMENDED DEPLOYMENT ORDER
 
 Do not commit passwords, Gmail App Passwords, Supabase secret keys,
 GitHub PATs, or X bearer tokens to the repository.
+
+
+ANDROID / MOBILE NOTE
+=====================
+Some Android file managers hide folders beginning with a dot, including `.github`.
+
+This package therefore also contains a visible root-level copy:
+  monitor-every-30-min.yml
+
+Upload that file in GitHub to:
+  .github/workflows/monitor-every-30-min.yml
+
+The same workflow file is also included in its proper hidden folder path.
