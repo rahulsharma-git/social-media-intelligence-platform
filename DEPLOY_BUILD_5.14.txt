@@ -1,0 +1,93 @@
+SOCIAL MEDIA INTELLIGENCE PLATFORM — BUILD 5.14 ALL-IN-ONE
+
+This ZIP is arranged exactly like the GitHub repository.
+No file renaming is required.
+
+UPLOAD / REPLACE IN GITHUB
+==========================
+
+Repository root:
+  streamlit_app.py
+  background_monitor.py
+  x_collector.py
+  requirements.txt
+
+Workflow:
+  .github/workflows/monitor-every-30-min.yml
+
+Supporting files:
+  README.md
+  BUILD_5.14_REPORTING_AND_X.md
+  GITHUB_ACTIONS_SETUP.md
+
+Supabase SQL:
+  supabase_build513.sql
+  supabase_build5132_repair.sql
+  supabase_dual_scheduler_build5.13.3.sql
+
+CSV/template files:
+  isro_x_template.csv
+  isro_x_posts_video_153631_BUILD53_COMPATIBLE.csv
+  isro_x_posts_video_175622_BUILD56_COMPATIBLE.csv
+
+
+BUILD 5.14 OUTPUTS
+==================
+
+Each monitoring cycle can produce:
+
+1. Social Media Intelligence PDF
+2. News Media Intelligence PDF
+3. Combined Intelligence PDF
+4. Social Media Evidence ZIP
+5. News Media Evidence ZIP
+
+Reporting improvements include:
+- section introductions
+- section-end takeaway statements
+- cluster methodology explanation
+- per-cluster rationale and representative examples
+- overall conclusions
+- Positive = blue, Negative = red, Neutral = grey
+- IST timestamps
+- past-24-hours News default
+
+
+BACKGROUND MONITORING
+=====================
+
+Primary flow:
+  Supabase Cron / GitHub schedule
+      -> GitHub Actions
+      -> optional official X collector
+      -> News refresh
+      -> Supabase
+      -> analysis
+      -> 3 PDFs
+      -> evidence ZIPs
+      -> email
+
+The process does not depend on Chrome remaining open.
+
+
+OPTIONAL X AUTOMATION
+=====================
+
+x_collector.py uses the official X recent-search API only when X_BEARER_TOKEN
+is configured in GitHub Actions secrets. If no token is available, the
+background monitor continues with X posts already stored in Supabase.
+
+
+RECOMMENDED DEPLOYMENT ORDER
+============================
+
+1. Replace the four repository-root runtime files.
+2. Replace .github/workflows/monitor-every-30-min.yml.
+3. Commit to main.
+4. Confirm required GitHub Actions secrets/variables are still present.
+5. Run one manual GitHub Actions test.
+6. Confirm PDF/email output.
+7. Confirm the next Supabase/GitHub scheduled run triggers automatically.
+
+Do not commit passwords, Gmail App Passwords, Supabase secret keys,
+GitHub PATs, or X bearer tokens to the repository.
