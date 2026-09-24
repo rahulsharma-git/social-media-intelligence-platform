@@ -1,0 +1,67 @@
+BUILD 5.16 — X FUSION REPAIR
+
+What was wrong in Build 5.15
+============================
+The web-index + oEmbed path depended on first discovering a usable status URL.
+If web search returned zero status URLs, oEmbed had nothing to hydrate.
+The collector therefore had no independent fresh-X source, and the analytics
+could still receive zero X rows when Supabase/manual X was empty.
+
+Build 5.16 fixes that.
+
+THREE FREE METHODS RECHECKED
+============================
+
+METHOD 1 — Stored/manual
+- Existing Supabase platform x / x_manual
+- x_inbox/*.csv
+- x_urls.txt
+
+METHOD 2 — Web-indexed discovery
+- Bing RSS
+- Bing HTML
+- DuckDuckGo HTML fallback
+- Multiple ISRO/@isro/#ISRO query variants
+
+METHOD 3 — X public embed/syndication
+- Public profile timeline:
+    https://syndication.twitter.com/srv/timeline-profile/screen-name/isro
+- Tweet hydration:
+    https://cdn.syndication.twimg.com/tweet-result
+- X oEmbed fallback for a known public status URL
+
+No login cookies and no paid X API bearer token are used.
+
+CONSOLIDATION
+=============
+1. Collector combines all three methods.
+2. Deduplicate by X post ID / external_id.
+3. Sort newest to oldest.
+4. Save latest maximum 50 to output/x_latest_fused.csv.
+5. Upsert into Supabase.
+6. background_monitor.py ALSO reads x_latest_fused.csv directly in the same run,
+   so analytics does not depend solely on the database round trip.
+7. Analytics uses the latest available X pool up to 50.
+8. Minimum target is 10 whenever 10 real rows exist.
+9. If fewer than 10 real rows exist, it says so; no synthetic rows are created.
+
+EMAIL SUBJECT
+=============
+Routine email subject now includes overall Negative %:
+
+ISRO Intelligence | Negative 12.5% | X 18 (+3) | News 26 (+1) | 24 Sep 2026 11:37 IST
+
+RECOMMENDED GITHUB VARIABLES
+============================
+X_MIN_POSTS = 10
+X_MIN_REPORT_POSTS = 10
+X_MAX_POSTS = 50
+X_FALLBACK_MAX_POSTS = 50
+X_FRESH_HOURS = 24
+X_FREE_TOPIC = ISRO
+X_PROFILE_HANDLES = isro
+X_ENABLE_WEB_INDEX = true
+X_ENABLE_OEMBED = true
+
+After one manual test, inspect output/x_collection_summary.json in the run artifact.
+Its `sources` object tells exactly which free method supplied X rows.

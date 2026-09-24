@@ -335,6 +335,24 @@ def load_x_collection_summary() -> dict:
         }
 
 
+def load_local_x_fusion():
+    """Direct handoff from x_collector.py in the same GitHub Actions run."""
+    path = OUTPUT_DIR / "x_latest_fused.csv"
+    if not path.exists():
+        return pd.DataFrame(columns=core.STANDARD_COLUMNS)
+    try:
+        frame = pd.read_csv(path, encoding="utf-8-sig")
+        if frame.empty:
+            return pd.DataFrame(columns=core.STANDARD_COLUMNS)
+        return core.normalize_posts(frame)
+    except Exception as exc:
+        print(
+            f"::warning::Could not load collector handoff {path}: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return pd.DataFrame(columns=core.STANDARD_COLUMNS)
+
+
 def _fmt_ts_ist(value):
     if value is None or value == "":
         return "n/a"
@@ -387,7 +405,7 @@ def main() -> None:
         routine_recipients = parse_recipients("REPORT_RECIPIENTS")
     alert_recipients = parse_recipients("ALERT_RECIPIENTS")
 
-    print(f"Build 5.15 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
+    print(f"Build 5.16 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
     print(f"Trigger source: {trigger_source}")
     print(f"Slot: {slot_key}; query={query!r}; news_window={news_lookback_hours}h; x_fresh_window={x_fresh_hours}h")
 
@@ -404,13 +422,32 @@ def main() -> None:
     # in the workflow, so any newly fetched X rows are visible here.
     stored = load_supabase_posts(limit=5000)
     print(f"Loaded {len(stored):,} stored posts from Supabase.")
-    stored_ids_before_news = set(stored["external_id"].astype(str)) if not stored.empty else set()
+
+    # Directly merge the collector output from this same workflow run.
+    # This prevents a successful X collector from being lost to analytics
+    # even if Supabase persistence is delayed or a platform value is unusual.
+    local_x_fusion = load_local_x_fusion()
+    if len(local_x_fusion):
+        print(
+            f"Loaded {len(local_x_fusion):,} X rows directly from "
+            "output/x_latest_fused.csv."
+        )
+        stored = core.normalize_posts(
+            pd.concat([stored, local_x_fusion], ignore_index=True)
+        )
+
+    stored_ids_before_news = (
+        set(stored["external_id"].astype(str)) if not stored.empty else set()
+    )
 
     # Read the X collector diagnostic even when it was disabled/denied.
     x_collection = load_x_collection_summary()
     x_new_count = int(x_collection.get("new_count", 0) or 0)
     x_collector_status = str(x_collection.get("status", "unknown") or "unknown")
     x_collector_reason = str(x_collection.get("reason", "") or "")
+    x_source_diag = x_collection.get("sources", {}) if isinstance(
+        x_collection.get("sources", {}), dict
+    ) else {}
 
     # Refresh free News independently of the Streamlit browser. Repeated feed
     # items are retained in the 24-hour snapshot but counted as new only when
@@ -446,47 +483,44 @@ def main() -> None:
     ].copy()
     news_report = news_report.sort_values("timestamp", ascending=False)
 
-    # X: use fresh rows first. If fewer than the configured minimum are fresh,
-    # backfill with the newest older stored X rows so the report can still show
-    # at least 10 latest available X posts when Supabase contains them.
-    # Backfill is explicitly labelled; nothing is fabricated.
+    # X: consolidate all available X rows, sort newest-first, and use
+    # the latest pool with a minimum target of 10 and hard maximum of 50.
+    # Freshness is reported separately; older rows are never mislabelled fresh.
     stored_x = combined_store[
         combined_store["platform"].isin(["x", "x_manual"])
     ].copy()
     stored_x = stored_x.sort_values("timestamp", ascending=False)
+
     x_cutoff = pd.Timestamp(now_ist - timedelta(hours=x_fresh_hours))
-    x_fresh = stored_x[stored_x["timestamp"] >= x_cutoff].copy()
+    x_fresh_count = int((stored_x["timestamp"] >= x_cutoff).sum()) if len(stored_x) else 0
 
-    if len(x_fresh) >= x_min_report_posts:
-        x_report = x_fresh.head(x_fallback_max_posts)
-        x_data_mode = f"fresh <= {x_fresh_hours}h"
-        x_is_stale_fallback = False
-    elif not stored_x.empty:
-        fresh_ids = set(x_fresh["external_id"].astype(str)) if not x_fresh.empty else set()
-        older_pool = stored_x[
-            ~stored_x["external_id"].astype(str).isin(fresh_ids)
-        ].copy()
-        need = max(0, x_min_report_posts - len(x_fresh))
-        backfill = older_pool.head(need)
-        x_report = core.normalize_posts(
-            pd.concat([x_fresh, backfill], ignore_index=True)
-        ).sort_values("timestamp", ascending=False)
-        x_report = x_report.head(x_fallback_max_posts)
+    # Use every latest available row up to 50, not only exactly 10 backfill rows.
+    x_report_limit = min(50, x_fallback_max_posts)
+    x_report = stored_x.head(x_report_limit).copy()
 
-        if len(x_fresh):
+    if x_report.empty:
+        x_data_mode = "no X records available after all free acquisition methods"
+        x_is_stale_fallback = True
+    else:
+        report_fresh_count = int((x_report["timestamp"] >= x_cutoff).sum())
+        report_older_count = int(len(x_report) - report_fresh_count)
+        if report_older_count == 0:
             x_data_mode = (
-                f"{len(x_fresh)} fresh <= {x_fresh_hours}h + "
-                f"{len(backfill)} latest stored backfill"
+                f"latest {len(x_report)} X rows; all fresh <= {x_fresh_hours}h"
             )
+            x_is_stale_fallback = False
         else:
             x_data_mode = (
-                "stored fallback (no fresh X in current window)"
+                f"latest {len(x_report)} X rows; {report_fresh_count} fresh "
+                f"<= {x_fresh_hours}h + {report_older_count} stored older rows"
             )
-        x_is_stale_fallback = len(backfill) > 0 or len(x_fresh) == 0
-    else:
-        x_report = stored_x
-        x_data_mode = "no X records available"
-        x_is_stale_fallback = True
+            x_is_stale_fallback = True
+
+        if len(x_report) < x_min_report_posts:
+            x_data_mode += (
+                f"; below minimum target {x_min_report_posts} because only "
+                f"{len(x_report)} real rows are available"
+            )
 
     x_latest = x_report["timestamp"].max() if not x_report.empty else None
     x_age_hours = None
@@ -622,6 +656,14 @@ def main() -> None:
         f"X new this cycle: {x_new_count:,}",
         f"X data mode: {x_data_mode}",
         f"X collector status: {x_collector_status}",
+        (
+            "X source counts: "
+            f"stored={x_source_diag.get('existing_supabase', 0)}, "
+            f"CSV={x_source_diag.get('csv_inbox_rows', 0)}, "
+            f"web URLs={x_source_diag.get('web_indexed_urls', 0)}, "
+            f"profile={x_source_diag.get('profile_timeline_rows', 0)}, "
+            f"hydrated={x_source_diag.get('hydrated_url_rows', 0)}"
+        ),
         f"Newest X record: {_fmt_ts_ist(x_latest)}" + (f" ({x_age_hours:.1f}h old)" if x_age_hours is not None else ""),
         f"Web News records in rolling {news_lookback_hours}h: {news_records:,}",
         f"News new this cycle: {new_news_count:,}",
@@ -637,8 +679,8 @@ def main() -> None:
         f"News evidence PDFs: {news_evidence_count}",
         "",
         "All displayed/report timestamps are India Standard Time (IST).",
-        "X data comes from Supabase plus the optional official X API collector when X_BEARER_TOKEN is configured. "
-        "Without that token, the worker keeps analyzing X posts already stored in Supabase.",
+        "X data is consolidated from stored/manual rows, public web-index discovery, "
+        "and X public embed/syndication sources. No paid X Bearer Token is required.",
     ]
     body = "\n".join(status_lines)
 
@@ -657,7 +699,10 @@ def main() -> None:
     if routine_pending:
         subject_prefix = "ALERT · " if alert_triggered else ""
         routine_subject = (
-            f"{subject_prefix}ISRO Intelligence | +{x_new_count} X / +{new_news_count} News | "
+            f"{subject_prefix}ISRO Intelligence | "
+            f"Negative {negative_pct:.1f}% | "
+            f"X {x_records} (+{x_new_count}) | "
+            f"News {news_records} (+{new_news_count}) | "
             + now_ist.strftime("%d %b %Y %H:%M IST")
         )
         result = send_email_individually(
@@ -723,7 +768,7 @@ def main() -> None:
         monitoring_upsert(run_record)
 
     summary = {
-        "build": "5.15",
+        "build": "5.16",
         "run_time_ist": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
         "slot_key": slot_key,
         "records": len(df),

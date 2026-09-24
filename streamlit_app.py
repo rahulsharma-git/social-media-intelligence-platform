@@ -55,7 +55,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
 
     st.title("📡 Social Media Intelligence Platform")
     st.caption(
-        "Build 5.14 — three intelligence PDFs + dual evidence packs + optional X collector"
+        "Build 5.16 — three intelligence PDFs + dual evidence packs + optional X collector"
     )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -4674,7 +4674,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
     # =========================================================
     st.subheader("📄 Intelligence report pack")
     st.caption(
-        "Build 5.14 generates three cleaner reports: Social Media Intelligence, "
+        "Build 5.16 generates three cleaner reports: Social Media Intelligence, "
         "News Media Intelligence, and Combined Intelligence. Each analytical "
         "section includes a purpose statement and a section takeaway; cluster "
         "profiles explain why records were grouped. All timestamps are IST."
@@ -4909,7 +4909,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
             st.error(f"Report pack could not be generated: {type(exc).__name__}: {exc}")
 
     if st.session_state.get("report_pack_fp_v514") == report_fingerprint:
-        st.info("Latest Build 5.14 report pack is ready.")
+        st.info("Latest Build 5.16 report pack is ready.")
         c1, c2, c3 = st.columns(3)
         with c1:
             st.download_button(

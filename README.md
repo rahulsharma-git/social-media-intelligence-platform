@@ -197,3 +197,15 @@ Free X inputs are combined:
 The pool is deduplicated, sorted newest-first, and capped at 50 rows.
 The reporting target is at least 10 latest real rows whenever at least 10 are
 actually available across the combined free sources. No synthetic posts are created.
+
+
+## Build 5.16 — X Fusion Repair
+
+The free X collector now has an independent X public-profile syndication source
+(default handle `isro`) in addition to stored/manual input and public web-index
+discovery. Known/discovered post URLs are hydrated with X's public tweet-result
+endpoint, with oEmbed as fallback.
+
+`background_monitor.py` directly merges `output/x_latest_fused.csv` from the
+collector into the same analytics run, then uses up to the latest 50 X rows.
+Routine email subjects include the overall Negative percentage.

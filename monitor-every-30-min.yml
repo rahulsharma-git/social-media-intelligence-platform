@@ -54,6 +54,7 @@ jobs:
       X_FREE_TOPIC: ${{ vars.X_FREE_TOPIC }}
       X_ENABLE_WEB_INDEX: ${{ vars.X_ENABLE_WEB_INDEX }}
       X_ENABLE_OEMBED: ${{ vars.X_ENABLE_OEMBED }}
+      X_PROFILE_HANDLES: ${{ vars.X_PROFILE_HANDLES }}
       X_MIN_POSTS: ${{ vars.X_MIN_POSTS }}
       X_MIN_REPORT_POSTS: ${{ vars.X_MIN_REPORT_POSTS }}
       X_FRESH_HOURS: ${{ vars.X_FRESH_HOURS }}
@@ -71,7 +72,7 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Preflight - verify deployed Build 5.15 files
+      - name: Preflight - verify deployed Build 5.16 files
         shell: bash
         run: |
           echo "Trigger source: ${TRIGGER_SOURCE:-unknown}"
@@ -143,7 +144,7 @@ jobs:
         shell: bash
         run: |
           if [ -f x_collector.py ]; then
-            echo "Running free X fusion collector (CSV inbox + web index + X oEmbed)..."
+            echo "Running free X fusion collector (stored/manual + web index + X public syndication/embed)..."
             python x_collector.py || echo "::warning::X collector failed; continuing with stored Supabase X data."
           else
             echo "::warning::x_collector.py not present; skipping X collection."

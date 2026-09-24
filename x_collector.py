@@ -1,22 +1,25 @@
-"""Build 5.15 — Free X Fusion Collector.
+"""Build 5.16 — resilient free X fusion collector.
 
-Combines three no-paid-X-API acquisition paths:
+Three free acquisition paths are combined every run:
 
-1) Assisted/manual CSV inbox:
-   Put compatible CSV files in x_inbox/*.csv and commit them to GitHub.
-2) Free web-indexed X discovery:
-   Query public Bing web-search RSS/HTML results for x.com/twitter.com status URLs.
-3) Official public X oEmbed hydration:
-   Resolve discovered or manually supplied public post URLs through X's
-   keyless publish.x.com/publish.twitter.com oEmbed service.
+1. Existing/manual X:
+   - existing Supabase x/x_manual rows
+   - x_inbox/*.csv
+   - x_urls.txt
 
-The collector merges all REAL rows with existing Supabase X records,
-deduplicates by X post ID / external_id, sorts newest-first, and targets:
-- minimum report pool: 10 posts when at least 10 real stored/discovered rows exist
-- maximum: 50 latest posts by default
+2. Public web-index discovery:
+   - Bing RSS/HTML
+   - DuckDuckGo HTML fallback
+   This discovers public x.com/twitter.com status URLs.
 
-No post is fabricated. Engagement/follower metrics that are not exposed by the
-free source are stored as 0.
+3. X public embed/syndication:
+   - public profile timeline for configured handles (default: isro)
+   - X CDN tweet-result hydration for discovered URLs
+   - official oEmbed fallback for known URLs
+
+All rows are real public/stored posts. No synthetic posts are created.
+The consolidated pool is deduplicated by X post ID/external_id and sorted
+newest-first. The output target is minimum 10 when available, maximum 50.
 """
 from __future__ import annotations
 
@@ -29,24 +32,22 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 import xml.etree.ElementTree as ET
 
 import requests
 
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
 INBOX_DIR = Path(os.getenv("X_INBOX_DIR", "x_inbox"))
 URL_FILE = Path(os.getenv("X_URL_FILE", "x_urls.txt"))
 
-X_STATUS_RE = re.compile(
+STATUS_RE = re.compile(
     r"https?://(?:www\.)?(?:x\.com|twitter\.com)/"
     r"(?:(?P<user>[A-Za-z0-9_]{1,15})|i(?:/web)?)/status/"
     r"(?P<id>\d{15,22})",
-    re.IGNORECASE,
+    re.I,
 )
-
 TWITTER_EPOCH_MS = 1288834974657
 
 
@@ -66,6 +67,13 @@ def env_bool(name, default=False):
     return value in {"1", "true", "yes", "on", "y"}
 
 
+def safe_int(value):
+    try:
+        return max(0, int(float(value or 0)))
+    except Exception:
+        return 0
+
+
 def supabase_config():
     url = env("SUPABASE_URL").rstrip("/")
     key = env("SUPABASE_SECRET_KEY") or env("SUPABASE_SERVICE_KEY")
@@ -74,143 +82,176 @@ def supabase_config():
     return url, key
 
 
-def supabase_headers(prefer=None):
+def sb_headers(prefer=None):
     _, key = supabase_config()
-    headers = {
+    h = {
         "apikey": key,
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
     if prefer:
-        headers["Prefer"] = prefer
-    return headers
+        h["Prefer"] = prefer
+    return h
 
 
-def _safe_int(value):
+def status_parts(url):
+    m = STATUS_RE.search(str(url or ""))
+    if not m:
+        return "", ""
+    return (m.group("user") or "", m.group("id") or "")
+
+
+def canonical_status_url(url):
+    user, post_id = status_parts(url)
+    if not post_id:
+        return ""
+    if user:
+        return f"https://x.com/{user}/status/{post_id}"
+    return f"https://x.com/i/status/{post_id}"
+
+
+def snowflake_timestamp(post_id):
     try:
-        return max(0, int(float(value or 0)))
-    except Exception:
-        return 0
-
-
-def _iso_utc(value):
-    if not value:
-        return None
-    s = str(value).strip()
-    if not s:
-        return None
-    try:
-        if s.endswith("Z"):
-            dt = datetime.fromisoformat(s[:-1] + "+00:00")
-        else:
-            dt = datetime.fromisoformat(s)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-    except Exception:
-        return None
-
-
-def timestamp_from_post_id(post_id):
-    """Derive UTC creation time from an X/Twitter Snowflake post ID."""
-    try:
-        snowflake = int(str(post_id))
-        ms = (snowflake >> 22) + TWITTER_EPOCH_MS
+        ms = (int(str(post_id)) >> 22) + TWITTER_EPOCH_MS
         dt = datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
         return dt.isoformat().replace("+00:00", "Z")
     except Exception:
         return None
 
 
-def extract_status_url(value):
-    if not value:
+def iso_utc(value):
+    if value is None:
         return None
-    m = X_STATUS_RE.search(html_lib.unescape(str(value)))
-    if not m:
+    s = str(value).strip()
+    if not s:
         return None
-    username = m.group("user")
-    post_id = m.group("id")
-    if username:
-        return f"https://x.com/{username}/status/{post_id}"
-    return f"https://x.com/i/status/{post_id}"
+    # First try ISO.
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    except Exception:
+        pass
+    # Common X/Twitter legacy created_at format.
+    for fmt in ("%a %b %d %H:%M:%S %z %Y",):
+        try:
+            dt = datetime.strptime(s, fmt)
+            return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        except Exception:
+            pass
+    return None
 
 
-def status_id_from_url(url):
-    m = X_STATUS_RE.search(str(url or ""))
-    return m.group("id") if m else None
+def hashtags_from_entities(entities, text):
+    tags = []
+    if isinstance(entities, dict):
+        for item in entities.get("hashtags", []) or []:
+            if isinstance(item, dict):
+                tag = str(item.get("text") or item.get("tag") or "").strip()
+            else:
+                tag = str(item or "").strip()
+            if tag:
+                tags.append("#" + tag.lstrip("#"))
+    if not tags:
+        tags = re.findall(r"(?<!\w)#[\w_]+", str(text or ""), flags=re.UNICODE)
+    return " ".join(dict.fromkeys(tags))
 
 
-def status_user_from_url(url):
-    m = X_STATUS_RE.search(str(url or ""))
-    if not m:
-        return ""
-    return m.group("user") or ""
-
-
-def external_id_for_row(row):
-    url = row.get("source_url", "")
-    post_id = status_id_from_url(url)
-    if post_id:
-        return f"x:{post_id}"
-    material = "|".join(
-        [
-            str(row.get("username", "")),
-            str(row.get("timestamp", "")),
-            str(row.get("text", "")),
-            str(url),
-        ]
-    )
-    return "xmanual:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
-
-
-def normalize_row(row, default_platform="x"):
-    text = str(row.get("text", "") or "").strip()
-    username = str(row.get("username", "") or "").strip().lstrip("@")
-    source_url = extract_status_url(row.get("source_url", "")) or str(
-        row.get("source_url", "") or ""
+def normalize_row(raw, platform="x"):
+    raw = dict(raw or {})
+    source_url = canonical_status_url(raw.get("source_url")) or str(
+        raw.get("source_url") or ""
     ).strip()
-    post_id = status_id_from_url(source_url)
+    user_from_url, post_id = status_parts(source_url)
 
-    timestamp = _iso_utc(row.get("timestamp"))
-    if not timestamp and post_id:
-        timestamp = timestamp_from_post_id(post_id)
-    if not timestamp or not text:
+    text = str(raw.get("text") or raw.get("full_text") or "").strip()
+    if not text:
         return None
 
-    if not username and source_url:
-        username = status_user_from_url(source_url)
+    timestamp = iso_utc(raw.get("timestamp") or raw.get("created_at"))
+    if not timestamp and post_id:
+        timestamp = snowflake_timestamp(post_id)
+    if not timestamp:
+        return None
+
+    username = str(raw.get("username") or raw.get("screen_name") or "").strip().lstrip("@")
     if not username:
-        username = "unknown"
+        username = user_from_url or "unknown"
 
-    hashtags = str(row.get("hashtags", "") or "").strip()
-    if not hashtags:
-        hashtags = " ".join(re.findall(r"(?<!\w)#[\w_]+", text, flags=re.UNICODE))
-
-    result = {
-        "external_id": str(row.get("external_id", "") or "").strip(),
-        "platform": str(row.get("platform", "") or default_platform).strip()
-        or default_platform,
+    row = {
+        "external_id": str(raw.get("external_id") or "").strip(),
+        "platform": str(raw.get("platform") or platform).strip() or platform,
         "timestamp": timestamp,
         "username": username,
         "text": text,
-        "hashtags": hashtags,
-        "likes": _safe_int(row.get("likes")),
-        "reposts": _safe_int(row.get("reposts")),
-        "replies": _safe_int(row.get("replies")),
-        "followers": _safe_int(row.get("followers")),
+        "hashtags": str(raw.get("hashtags") or "").strip(),
+        "likes": safe_int(raw.get("likes", raw.get("favorite_count", 0))),
+        "reposts": safe_int(raw.get("reposts", raw.get("retweet_count", 0))),
+        "replies": safe_int(
+            raw.get("replies", raw.get("reply_count", raw.get("conversation_count", 0)))
+        ),
+        "followers": safe_int(raw.get("followers", raw.get("followers_count", 0))),
         "source_url": source_url,
         "topic_seed": "ISRO",
     }
-    if not result["external_id"]:
-        result["external_id"] = external_id_for_row(result)
-    return result
+
+    if not row["hashtags"]:
+        row["hashtags"] = hashtags_from_entities(raw.get("entities"), text)
+
+    if not row["external_id"]:
+        if post_id:
+            row["external_id"] = f"x:{post_id}"
+        else:
+            material = "|".join(
+                [
+                    row["username"],
+                    row["timestamp"],
+                    row["text"],
+                    row["source_url"],
+                ]
+            )
+            row["external_id"] = (
+                "xmanual:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+            )
+    return row
+
+
+def merge_rows(*groups):
+    """Deduplicate and retain the richest version of each post."""
+    merged = {}
+    for group in groups:
+        for row in group or []:
+            if not row:
+                continue
+            key = str(row.get("external_id") or "").strip()
+            if not key:
+                continue
+            old = merged.get(key)
+            if old is None:
+                merged[key] = dict(row)
+                continue
+
+            for field in ("username", "text", "hashtags", "source_url", "timestamp"):
+                if (not old.get(field)) and row.get(field):
+                    old[field] = row[field]
+            for field in ("likes", "reposts", "replies", "followers"):
+                old[field] = max(safe_int(old.get(field)), safe_int(row.get(field)))
+            if old.get("platform") != "x_manual" and row.get("platform") == "x_manual":
+                old["platform"] = "x_manual"
+
+    return sorted(
+        merged.values(),
+        key=lambda r: str(r.get("timestamp") or ""),
+        reverse=True,
+    )
 
 
 def load_existing_x(limit=5000):
     url, _ = supabase_config()
     r = requests.get(
         f"{url}/rest/v1/social_posts",
-        headers=supabase_headers(),
+        headers=sb_headers(),
         params={
             "select": (
                 "external_id,platform,timestamp,username,text,hashtags,"
@@ -225,10 +266,10 @@ def load_existing_x(limit=5000):
     r.raise_for_status()
     rows = []
     for raw in r.json() or []:
-        row = normalize_row(raw, default_platform=str(raw.get("platform") or "x"))
+        row = normalize_row(raw, platform=str(raw.get("platform") or "x"))
         if row:
             rows.append(row)
-    return rows
+    return merge_rows(rows)
 
 
 def upsert(rows):
@@ -254,7 +295,7 @@ def upsert(rows):
         )
     r = requests.post(
         f"{url}/rest/v1/social_posts",
-        headers=supabase_headers("resolution=merge-duplicates,return=minimal"),
+        headers=sb_headers("resolution=merge-duplicates,return=minimal"),
         params={"on_conflict": "external_id"},
         json=payload,
         timeout=60,
@@ -263,41 +304,9 @@ def upsert(rows):
     return len(payload)
 
 
-def merge_rows(*groups):
-    """Deduplicate while preferring rows with richer engagement/text metadata."""
-    merged = {}
-    for rows in groups:
-        for row in rows or []:
-            if not row:
-                continue
-            key = str(row.get("external_id", "")).strip()
-            if not key:
-                continue
-            existing = merged.get(key)
-            if existing is None:
-                merged[key] = dict(row)
-                continue
-
-            # Preserve the richer existing/manual metrics; fill blanks from new row.
-            for field in ["username", "text", "hashtags", "source_url", "timestamp"]:
-                if not existing.get(field) and row.get(field):
-                    existing[field] = row[field]
-            for field in ["likes", "reposts", "replies", "followers"]:
-                existing[field] = max(_safe_int(existing.get(field)), _safe_int(row.get(field)))
-            # Prefer manual platform marker if either source is manual.
-            if row.get("platform") == "x_manual" or existing.get("platform") == "x_manual":
-                existing["platform"] = "x_manual"
-
-    return sorted(
-        merged.values(),
-        key=lambda x: str(x.get("timestamp", "")),
-        reverse=True,
-    )
-
-
-# ---------------------------------------------------------------------
-# FREE OPTION 1: assisted/manual CSV inbox
-# ---------------------------------------------------------------------
+# =====================================================================
+# METHOD 1 — existing/manual/CSV/URL inbox
+# =====================================================================
 def collect_csv_inbox():
     rows = []
     files = []
@@ -307,137 +316,287 @@ def collect_csv_inbox():
     for path in sorted(INBOX_DIR.glob("*.csv")):
         try:
             with path.open("r", encoding="utf-8-sig", newline="") as f:
-                reader = csv.DictReader(f)
-                for raw in reader:
-                    row = normalize_row(raw, default_platform="x_manual")
+                for raw in csv.DictReader(f):
+                    row = normalize_row(raw, platform="x_manual")
                     if row:
                         rows.append(row)
             files.append(path.name)
         except Exception as exc:
-            print(
-                f"::warning::Could not import {path}: "
-                f"{type(exc).__name__}: {exc}"
-            )
+            print(f"::warning::CSV inbox import failed for {path.name}: {exc}")
     return merge_rows(rows), files
 
 
-# ---------------------------------------------------------------------
-# FREE OPTION 2: public web-index discovery
-# ---------------------------------------------------------------------
-def _bing_queries(topic):
-    topic = topic or "ISRO"
+def load_url_inbox():
+    urls = []
+    if not URL_FILE.exists():
+        return urls
+    for line in URL_FILE.read_text(encoding="utf-8").splitlines():
+        u = canonical_status_url(line)
+        if u:
+            urls.append(u)
+    return list(dict.fromkeys(urls))
+
+
+# =====================================================================
+# METHOD 2 — free public web-index discovery
+# =====================================================================
+def extract_status_urls(text):
+    found = []
+    for m in STATUS_RE.finditer(html_lib.unescape(str(text or ""))):
+        user = m.group("user")
+        post_id = m.group("id")
+        found.append(
+            f"https://x.com/{user}/status/{post_id}"
+            if user
+            else f"https://x.com/i/status/{post_id}"
+        )
+    return list(dict.fromkeys(found))
+
+
+def search_queries(topic):
+    t = topic or "ISRO"
     return [
-        f'site:x.com "{topic}" status',
-        f'site:twitter.com "{topic}" status',
-        f'site:x.com "@isro" status',
-        f'site:x.com "#ISRO" status',
+        f'site:x.com "{t}" /status/',
+        f'site:twitter.com "{t}" /status/',
+        'site:x.com "@isro" /status/',
+        'site:x.com "#ISRO" /status/',
+        'site:x.com/isro/status ISRO',
     ]
 
 
-def _extract_urls_from_text(*values):
-    found = []
-    seen = set()
-    for value in values:
-        if not value:
-            continue
-        for m in X_STATUS_RE.finditer(html_lib.unescape(str(value))):
-            user = m.group("user")
-            post_id = m.group("id")
-            url = (
-                f"https://x.com/{user}/status/{post_id}"
-                if user
-                else f"https://x.com/i/status/{post_id}"
-            )
-            if url not in seen:
-                seen.add(url)
-                found.append(url)
-    return found
-
-
-def bing_rss_discover(query):
-    """Best-effort public Bing RSS discovery. No Bing API key is used."""
+def bing_rss(query):
     r = requests.get(
         "https://www.bing.com/search",
         params={"q": query, "format": "rss", "count": "50"},
-        headers={"User-Agent": "Mozilla/5.0 SMI-Free-X-Fusion/1.0"},
+        headers={"User-Agent": "Mozilla/5.0 SMI-Free-X/5.16"},
         timeout=30,
     )
     if r.status_code != 200:
         raise RuntimeError(f"Bing RSS HTTP {r.status_code}")
-
     root = ET.fromstring(r.content)
-    urls = []
+    values = []
     for item in root.findall(".//item"):
-        link = item.findtext("link") or ""
-        title = item.findtext("title") or ""
-        desc = item.findtext("description") or ""
-        urls.extend(_extract_urls_from_text(link, title, desc))
-    return list(dict.fromkeys(urls))
+        values.extend(
+            [
+                item.findtext("link") or "",
+                item.findtext("title") or "",
+                item.findtext("description") or "",
+            ]
+        )
+    return extract_status_urls("\n".join(values))
 
 
-def bing_html_discover(query):
-    """Fallback if RSS returns no usable X status URLs."""
+def bing_html(query):
     r = requests.get(
         "https://www.bing.com/search",
         params={"q": query, "count": "50"},
-        headers={"User-Agent": "Mozilla/5.0 SMI-Free-X-Fusion/1.0"},
+        headers={"User-Agent": "Mozilla/5.0 SMI-Free-X/5.16"},
         timeout=30,
     )
     if r.status_code != 200:
         raise RuntimeError(f"Bing HTML HTTP {r.status_code}")
-    return _extract_urls_from_text(r.text)
+    return extract_status_urls(r.text)
 
 
-def discover_web_indexed_urls(topic, max_urls=100):
-    all_urls = []
-    diagnostics = []
-    seen = set()
+def ddg_html(query):
+    r = requests.get(
+        "https://html.duckduckgo.com/html/",
+        params={"q": query},
+        headers={"User-Agent": "Mozilla/5.0 SMI-Free-X/5.16"},
+        timeout=30,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"DuckDuckGo HTML HTTP {r.status_code}")
 
-    for query in _bing_queries(topic):
-        query_urls = []
-        rss_error = None
-        html_error = None
+    text = html_lib.unescape(r.text)
+    urls = extract_status_urls(text)
+
+    # DDG often wraps outbound links in ?uddg=<encoded-url>.
+    for encoded in re.findall(r"[?&]uddg=([^&\"'>]+)", text):
         try:
-            query_urls = bing_rss_discover(query)
-        except Exception as exc:
-            rss_error = f"{type(exc).__name__}: {exc}"
+            target = unquote(encoded)
+            urls.extend(extract_status_urls(target))
+        except Exception:
+            pass
+    return list(dict.fromkeys(urls))
 
-        if not query_urls:
+
+def discover_indexed_urls(topic, limit=150):
+    seen = set()
+    urls = []
+    diagnostics = []
+
+    for query in search_queries(topic):
+        qdiag = {"query": query}
+        engines = [
+            ("bing_rss", bing_rss),
+            ("bing_html", bing_html),
+            ("duckduckgo", ddg_html),
+        ]
+        for name, fn in engines:
             try:
-                query_urls = bing_html_discover(query)
+                found = fn(query)
+                qdiag[name] = len(found)
+                for u in found:
+                    if u not in seen:
+                        seen.add(u)
+                        urls.append(u)
             except Exception as exc:
-                html_error = f"{type(exc).__name__}: {exc}"
-
-        for url in query_urls:
-            if url not in seen:
-                seen.add(url)
-                all_urls.append(url)
-                if len(all_urls) >= max_urls:
-                    break
-
-        diagnostics.append(
-            {
-                "query": query,
-                "urls": len(query_urls),
-                "rss_error": rss_error,
-                "html_error": html_error,
-            }
-        )
-        if len(all_urls) >= max_urls:
+                qdiag[name] = f"error: {type(exc).__name__}: {exc}"
+        diagnostics.append(qdiag)
+        if len(urls) >= limit:
             break
 
-    # Newest-first using the post-ID timestamp even before hydration.
-    all_urls.sort(
-        key=lambda u: timestamp_from_post_id(status_id_from_url(u)) or "",
+    urls.sort(
+        key=lambda u: snowflake_timestamp(status_parts(u)[1]) or "",
         reverse=True,
     )
-    return all_urls[:max_urls], diagnostics
+    return urls[:limit], diagnostics
 
 
-# ---------------------------------------------------------------------
-# FREE OPTION 3: official keyless X oEmbed hydration
-# ---------------------------------------------------------------------
-class _PostTextParser(HTMLParser):
+# =====================================================================
+# METHOD 3 — X public syndication/embed infrastructure
+# =====================================================================
+def timeline_row(tweet):
+    if not isinstance(tweet, dict):
+        return None
+    user = tweet.get("user") or {}
+    post_id = str(tweet.get("id_str") or tweet.get("id") or "").strip()
+    if not post_id:
+        return None
+
+    username = str(user.get("screen_name") or "").strip()
+    source_url = str(tweet.get("permalink") or "").strip()
+    if source_url.startswith("/"):
+        source_url = "https://x.com" + source_url
+    source_url = canonical_status_url(source_url)
+    if not source_url:
+        source_url = (
+            f"https://x.com/{username}/status/{post_id}"
+            if username
+            else f"https://x.com/i/status/{post_id}"
+        )
+
+    return normalize_row(
+        {
+            "external_id": f"x:{post_id}",
+            "platform": "x",
+            "timestamp": tweet.get("created_at") or snowflake_timestamp(post_id),
+            "username": username,
+            "text": tweet.get("full_text") or tweet.get("text") or "",
+            "hashtags": hashtags_from_entities(
+                tweet.get("entities"), tweet.get("full_text") or tweet.get("text")
+            ),
+            "likes": tweet.get("favorite_count", 0),
+            "reposts": tweet.get("retweet_count", 0),
+            "replies": tweet.get("reply_count", tweet.get("conversation_count", 0)),
+            "followers": user.get(
+                "followers_count", user.get("normal_followers_count", 0)
+            ),
+            "source_url": source_url,
+        }
+    )
+
+
+def fetch_profile_timeline(handle):
+    handle = str(handle or "").strip().lstrip("@")
+    if not handle:
+        return [], "empty handle"
+
+    url = (
+        "https://syndication.twitter.com/srv/"
+        f"timeline-profile/screen-name/{handle}"
+    )
+    r = requests.get(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 SMI-Free-X/5.16"},
+        timeout=45,
+    )
+    if r.status_code != 200:
+        return [], f"HTTP {r.status_code}"
+
+    m = re.search(
+        r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
+        r.text,
+        flags=re.S | re.I,
+    )
+    if not m:
+        return [], "__NEXT_DATA__ not found"
+
+    try:
+        payload = json.loads(html_lib.unescape(m.group(1)))
+        entries = (
+            payload.get("props", {})
+            .get("pageProps", {})
+            .get("timeline", {})
+            .get("entries", [])
+        )
+    except Exception as exc:
+        return [], f"JSON parse error: {type(exc).__name__}: {exc}"
+
+    rows = []
+    for entry in entries or []:
+        tweet = ((entry or {}).get("content") or {}).get("tweet")
+        row = timeline_row(tweet)
+        if row:
+            rows.append(row)
+    return merge_rows(rows), ""
+
+
+def tweet_result(post_url):
+    user, post_id = status_parts(post_url)
+    if not post_id:
+        return None, "invalid status URL"
+
+    # X's public embedded-post JSON endpoint currently accepts token=0.
+    r = requests.get(
+        "https://cdn.syndication.twimg.com/tweet-result",
+        params={"id": post_id, "token": "0", "lang": "en"},
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 SMI-Free-X/5.16",
+        },
+        timeout=30,
+    )
+    if r.status_code != 200:
+        return None, f"tweet-result HTTP {r.status_code}"
+
+    try:
+        payload = r.json()
+    except Exception as exc:
+        return None, f"tweet-result JSON error: {exc}"
+
+    puser = payload.get("user") or {}
+    username = str(puser.get("screen_name") or user or "").strip()
+    row = normalize_row(
+        {
+            "external_id": f"x:{post_id}",
+            "platform": "x",
+            "timestamp": payload.get("created_at") or snowflake_timestamp(post_id),
+            "username": username,
+            "text": payload.get("text") or "",
+            "hashtags": hashtags_from_entities(
+                payload.get("entities"), payload.get("text")
+            ),
+            "likes": payload.get("favorite_count", 0),
+            "reposts": payload.get("retweet_count", 0),
+            "replies": payload.get(
+                "reply_count", payload.get("conversation_count", 0)
+            ),
+            "followers": puser.get(
+                "followers_count", puser.get("normal_followers_count", 0)
+            ),
+            "source_url": (
+                f"https://x.com/{username}/status/{post_id}"
+                if username
+                else post_url
+            ),
+        }
+    )
+    return row, ""
+
+
+class OEmbedText(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.in_p = False
@@ -448,142 +607,113 @@ class _PostTextParser(HTMLParser):
             self.in_p = True
 
     def handle_endtag(self, tag):
-        if tag.lower() == "p" and self.in_p:
+        if tag.lower() == "p":
             self.in_p = False
 
     def handle_data(self, data):
         if self.in_p:
             self.parts.append(data)
 
-    def text(self):
-        return "".join(self.parts).strip()
 
-
-def oembed_hydrate(post_url):
-    post_id = status_id_from_url(post_url)
+def oembed(post_url):
+    user, post_id = status_parts(post_url)
     if not post_id:
-        return None, "not_status_url"
+        return None, "invalid status URL"
 
-    username = status_user_from_url(post_url)
     canonical = (
-        f"https://x.com/{username}/status/{post_id}"
-        if username
-        else post_url
+        f"https://x.com/{user}/status/{post_id}"
+        if user
+        else f"https://x.com/i/status/{post_id}"
     )
-
     endpoints = [
-        "https://publish.x.com/oembed",
-        "https://publish.twitter.com/oembed",
+        ("https://publish.x.com/oembed", canonical),
+        (
+            "https://publish.twitter.com/oembed",
+            canonical.replace("https://x.com/", "https://twitter.com/"),
+        ),
     ]
 
     last_error = ""
-    for endpoint in endpoints:
-        # Legacy endpoint can be more tolerant of twitter.com canonical URLs.
-        embed_url = canonical
-        if "publish.twitter.com" in endpoint:
-            embed_url = canonical.replace("https://x.com/", "https://twitter.com/")
-
+    for endpoint, target in endpoints:
         try:
             r = requests.get(
                 endpoint,
                 params={
-                    "url": embed_url,
+                    "url": target,
                     "omit_script": "true",
                     "dnt": "true",
                     "hide_thread": "true",
                 },
-                headers={"User-Agent": "Mozilla/5.0 SMI-Free-X-Fusion/1.0"},
+                headers={"User-Agent": "Mozilla/5.0 SMI-Free-X/5.16"},
                 timeout=30,
-                allow_redirects=True,
             )
             if r.status_code != 200:
                 last_error = f"{endpoint} HTTP {r.status_code}"
                 continue
-
             payload = r.json()
-            parser = _PostTextParser()
-            parser.feed(str(payload.get("html", "") or ""))
-            text = parser.text()
+            parser = OEmbedText()
+            parser.feed(str(payload.get("html") or ""))
+            text = "".join(parser.parts).strip()
             if not text:
-                last_error = f"{endpoint} returned no post text"
+                last_error = "oEmbed returned no post text"
                 continue
 
-            author_url = str(payload.get("author_url", "") or "")
-            author_name = str(payload.get("author_name", "") or "").strip()
-            author_handle = status_user_from_url(author_url)
-            if not author_handle:
-                # author_url is often a profile URL, not a status URL
-                m = re.search(
-                    r"(?:x\.com|twitter\.com)/([A-Za-z0-9_]{1,15})(?:[/?#]|$)",
-                    author_url,
-                    flags=re.I,
-                )
-                if m:
-                    author_handle = m.group(1)
-
-            username = author_handle or username or author_name or "unknown"
-            source_url = (
-                f"https://x.com/{username}/status/{post_id}"
-                if username and username != "unknown"
-                else canonical
+            author_url = str(payload.get("author_url") or "")
+            m = re.search(
+                r"(?:x\.com|twitter\.com)/([A-Za-z0-9_]{1,15})",
+                author_url,
+                flags=re.I,
             )
-
-            row = normalize_row(
+            username = (m.group(1) if m else user) or "unknown"
+            return normalize_row(
                 {
                     "external_id": f"x:{post_id}",
                     "platform": "x",
-                    "timestamp": timestamp_from_post_id(post_id),
+                    "timestamp": snowflake_timestamp(post_id),
                     "username": username,
                     "text": text,
-                    "hashtags": " ".join(
-                        re.findall(r"(?<!\w)#[\w_]+", text, flags=re.UNICODE)
-                    ),
                     "likes": 0,
                     "reposts": 0,
                     "replies": 0,
                     "followers": 0,
-                    "source_url": source_url,
-                },
-                default_platform="x",
-            )
-            return row, ""
+                    "source_url": (
+                        f"https://x.com/{username}/status/{post_id}"
+                        if username != "unknown"
+                        else canonical
+                    ),
+                }
+            ), ""
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
-
-    return None, last_error or "oembed_failed"
-
-
-def load_manual_url_file():
-    urls = []
-    if not URL_FILE.exists():
-        return urls
-    try:
-        for line in URL_FILE.read_text(encoding="utf-8").splitlines():
-            url = extract_status_url(line)
-            if url:
-                urls.append(url)
-    except Exception as exc:
-        print(
-            f"::warning::Could not read {URL_FILE}: "
-            f"{type(exc).__name__}: {exc}"
-        )
-    return list(dict.fromkeys(urls))
+    return None, last_error or "oEmbed failed"
 
 
-def hydrate_urls(urls, limit=100):
+def hydrate_urls(urls, limit=150):
     rows = []
-    errors = []
+    diagnostics = {"tweet_result_ok": 0, "oembed_ok": 0, "failed": 0}
+    failures = []
+
     for url in urls[:limit]:
-        row, err = oembed_hydrate(url)
+        row, err = tweet_result(url)
         if row:
             rows.append(row)
+            diagnostics["tweet_result_ok"] += 1
+            continue
+
+        row2, err2 = oembed(url)
+        if row2:
+            rows.append(row2)
+            diagnostics["oembed_ok"] += 1
         else:
-            errors.append({"url": url, "error": err})
-    return merge_rows(rows), errors
+            diagnostics["failed"] += 1
+            failures.append(
+                {"url": url, "tweet_result_error": err, "oembed_error": err2}
+            )
+    return merge_rows(rows), diagnostics, failures[:20]
 
 
-def write_latest_csv(rows, filename="x_latest_fused.csv"):
-    path = OUTPUT_DIR / filename
+def write_csv(rows):
+    path = OUTPUT_DIR / "x_latest_fused.csv"
     fields = [
         "timestamp",
         "username",
@@ -597,16 +727,15 @@ def write_latest_csv(rows, filename="x_latest_fused.csv"):
         "source_url",
     ]
     with path.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
-        writer.writeheader()
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
         for row in rows:
-            writer.writerow({key: row.get(key, "") for key in fields})
+            w.writerow({k: row.get(k, "") for k in fields})
     return path
 
 
 def write_summary(summary):
-    path = OUTPUT_DIR / "x_collection_summary.json"
-    path.write_text(
+    (OUTPUT_DIR / "x_collection_summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
@@ -614,65 +743,51 @@ def write_summary(summary):
 
 
 def main():
-    topic = env("X_FREE_TOPIC", env("X_QUERY", "ISRO"))
-    # Strip any paid-API query operators from the free web-search topic.
-    if " OR " in topic or "-is:" in topic or "@" in topic or "#" in topic:
-        topic = "ISRO"
-
     min_posts = max(10, env_int("X_MIN_POSTS", 10))
     max_posts = min(50, max(min_posts, env_int("X_MAX_POSTS", 50)))
-    discovery_limit = max(max_posts * 3, 60)
-    enable_web = env_bool("X_ENABLE_WEB_INDEX", True)
-    enable_oembed = env_bool("X_ENABLE_OEMBED", True)
+    topic = env("X_FREE_TOPIC", "ISRO") or "ISRO"
+    handles = [
+        h.strip().lstrip("@")
+        for h in env("X_PROFILE_HANDLES", "isro").split(",")
+        if h.strip()
+    ]
 
     existing = load_existing_x(limit=5000)
     existing_ids = {r["external_id"] for r in existing}
 
-    # Option 1
-    inbox_rows, inbox_files = collect_csv_inbox()
+    # Method 1
+    csv_rows, csv_files = collect_csv_inbox()
+    url_inbox = load_url_inbox()
 
-    # Option 2
-    indexed_urls = []
-    discovery_diag = []
-    if enable_web:
-        try:
-            indexed_urls, discovery_diag = discover_web_indexed_urls(
-                topic, max_urls=discovery_limit
-            )
-        except Exception as exc:
-            discovery_diag.append(
-                {
-                    "query": topic,
-                    "urls": 0,
-                    "rss_error": f"{type(exc).__name__}: {exc}",
-                    "html_error": None,
-                }
-            )
+    # Method 2
+    indexed_urls, web_diag = discover_indexed_urls(topic, limit=150)
 
-    # Manual URL list is also free and useful when search indexing misses a post.
-    manual_urls = load_manual_url_file()
-    candidate_urls = list(dict.fromkeys(manual_urls + indexed_urls))
+    # Method 3a: public profile timeline
+    timeline_rows = []
+    timeline_diag = {}
+    for handle in handles:
+        rows, err = fetch_profile_timeline(handle)
+        timeline_rows.extend(rows)
+        timeline_diag[handle] = {
+            "rows": len(rows),
+            "error": err or None,
+        }
+    timeline_rows = merge_rows(timeline_rows)
 
-    # Option 3
-    oembed_rows = []
-    oembed_errors = []
-    if enable_oembed and candidate_urls:
-        oembed_rows, oembed_errors = hydrate_urls(
-            candidate_urls,
-            limit=discovery_limit,
-        )
+    # Method 3b: hydrate discovered/manual URLs
+    candidate_urls = list(dict.fromkeys(url_inbox + indexed_urls))
+    hydrated, hydrate_diag, hydrate_failures = hydrate_urls(
+        candidate_urls, limit=150
+    )
 
-    acquired = merge_rows(inbox_rows, oembed_rows)
+    acquired = merge_rows(csv_rows, timeline_rows, hydrated)
     upserted = upsert(acquired) if acquired else 0
-
     new_ids = {r["external_id"] for r in acquired} - existing_ids
+
+    # Recombine all three methods with prior stored history.
     combined = merge_rows(existing, acquired)
     selected = combined[:max_posts]
-
-    latest_csv = write_latest_csv(selected)
-
-    newest = selected[0]["timestamp"] if selected else None
-    oldest = selected[-1]["timestamp"] if selected else None
+    out_csv = write_csv(selected)
 
     summary = {
         "status": (
@@ -680,50 +795,45 @@ def main():
             if len(selected) >= min_posts
             else ("partial" if selected else "empty")
         ),
-        "mode": "free_x_fusion",
+        "mode": "free_x_fusion_v2",
         "minimum_target": min_posts,
         "maximum_target": max_posts,
         "target_met": len(selected) >= min_posts,
         "selected_latest_count": len(selected),
-        "existing_supabase_count": len(existing),
-        "csv_inbox": {
-            "files": inbox_files,
-            "rows": len(inbox_rows),
-        },
-        "web_index": {
-            "enabled": enable_web,
-            "discovered_urls": len(indexed_urls),
-            "diagnostics": discovery_diag,
-        },
-        "oembed": {
-            "enabled": enable_oembed,
-            "candidate_urls": len(candidate_urls),
-            "hydrated_rows": len(oembed_rows),
-            "failed_urls": len(oembed_errors),
-            "sample_errors": oembed_errors[:10],
-        },
-        "fetched": len(acquired),
         "new_count": len(new_ids),
         "upserted": upserted,
-        "newest_timestamp": newest,
-        "oldest_timestamp": oldest,
-        "latest_csv": str(latest_csv),
+        "newest_timestamp": selected[0]["timestamp"] if selected else None,
+        "oldest_timestamp": selected[-1]["timestamp"] if selected else None,
+        "sources": {
+            "existing_supabase": len(existing),
+            "csv_inbox_rows": len(csv_rows),
+            "csv_inbox_files": csv_files,
+            "manual_url_inbox": len(url_inbox),
+            "web_indexed_urls": len(indexed_urls),
+            "profile_timeline_rows": len(timeline_rows),
+            "hydrated_url_rows": len(hydrated),
+        },
+        "timeline": timeline_diag,
+        "web_discovery": web_diag,
+        "hydration": hydrate_diag,
+        "hydration_failures": hydrate_failures,
+        "latest_csv": str(out_csv),
         "note": (
-            f"Using the latest {len(selected)} real unique X rows from all free "
-            "sources combined. No synthetic posts were created."
+            f"Consolidated latest {len(selected)} real unique X rows "
+            "from stored/manual, public web index and X public embed/syndication."
         ),
     }
     write_summary(summary)
 
     if len(selected) >= min_posts:
         print(
-            f"Free X fusion target met: {len(selected)} latest unique real posts "
-            f"available (minimum {min_posts}, maximum {max_posts})."
+            f"Free X fusion target met: {len(selected)} latest unique X posts "
+            f"(min {min_posts}, max {max_posts})."
         )
     else:
         print(
-            f"::warning::Only {len(selected)} real unique X posts are available "
-            f"across free sources; minimum target is {min_posts}. No rows were fabricated."
+            f"::warning::Only {len(selected)} real X rows available across all "
+            f"three free methods. No synthetic posts were created."
         )
     return 0
 
