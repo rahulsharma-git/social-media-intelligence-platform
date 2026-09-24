@@ -52,6 +52,11 @@ jobs:
       X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
       X_QUERY: ${{ vars.X_QUERY }}
       X_MAX_POSTS: ${{ vars.X_MAX_POSTS }}
+      X_MIN_POSTS: ${{ vars.X_MIN_POSTS }}
+      X_MIN_REPORT_POSTS: ${{ vars.X_MIN_REPORT_POSTS }}
+      X_FRESH_HOURS: ${{ vars.X_FRESH_HOURS }}
+      X_FALLBACK_MAX_POSTS: ${{ vars.X_FALLBACK_MAX_POSTS }}
+      EMAIL_ONLY_ON_CHANGE: ${{ vars.EMAIL_ONLY_ON_CHANGE }}
       OUTPUT_DIR: output
 
     steps:
@@ -64,7 +69,7 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Preflight - verify deployed Build 5.14 files
+      - name: Preflight - verify deployed Build 5.14.3 files
         shell: bash
         run: |
           echo "Trigger source: ${TRIGGER_SOURCE:-unknown}"

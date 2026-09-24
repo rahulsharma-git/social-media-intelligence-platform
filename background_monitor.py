@@ -1,4 +1,4 @@
-"""Browser-independent 30-minute monitor for Build 5.13.
+"""Browser-independent 30-minute monitor for Build 5.14.2.
 
 Designed for GitHub Actions. It does not require an active Streamlit/Chrome
 session. Each run:
@@ -312,6 +312,39 @@ def send_email_individually(
         print(f"::warning::SMTP delivery issue: {last_connection_error}")
     return {"sent": sent, "failed": failed}
 
+def load_x_collection_summary() -> dict:
+    path = OUTPUT_DIR / "x_collection_summary.json"
+    if not path.exists():
+        return {
+            "status": "not_run",
+            "reason": "x_collection_summary.json was not created",
+            "fetched": 0,
+            "new_count": 0,
+            "upserted": 0,
+        }
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except Exception as exc:
+        return {
+            "status": "summary_error",
+            "reason": f"{type(exc).__name__}: {exc}",
+            "fetched": 0,
+            "new_count": 0,
+            "upserted": 0,
+        }
+
+
+def _fmt_ts_ist(value):
+    if value is None or value == "":
+        return "n/a"
+    try:
+        ts = pd.to_datetime(value, utc=True).tz_convert(IST)
+        return ts.strftime("%Y-%m-%d %H:%M:%S IST")
+    except Exception:
+        return str(value)
+
+
 def build_analysis(raw_df: pd.DataFrame):
     df = core.run_sentiment_agent(raw_df)
     df = core.run_emotion_agent(df)
@@ -335,10 +368,17 @@ def main() -> None:
 
     query = env("MONITOR_QUERY", "ISRO")
     alert_threshold = env_float("NEGATIVITY_ALERT_THRESHOLD", 35.0)
-    lookback_hours = max(1, env_int("BACKGROUND_LOOKBACK_HOURS", 24))
+    # News remains a rolling 24-hour intelligence window. X is handled
+    # separately so stored/manual X does not disappear merely because no
+    # live X API token is configured.
+    news_lookback_hours = max(1, env_int("BACKGROUND_LOOKBACK_HOURS", 24))
+    x_fresh_hours = max(1, env_int("X_FRESH_HOURS", 24))
+    x_fallback_max_posts = max(10, env_int("X_FALLBACK_MAX_POSTS", 50))
+    x_min_report_posts = max(10, env_int("X_MIN_REPORT_POSTS", env_int("X_MIN_POSTS", 10)))
     report_max_records = max(50, env_int("BACKGROUND_MAX_RECORDS", 1500))
     force_send = env_bool("FORCE_SEND", False)
     fail_on_email_error = env_bool("FAIL_ON_EMAIL_ERROR", False)
+    email_only_on_change = env_bool("EMAIL_ONLY_ON_CHANGE", False)
     trigger_source = env("TRIGGER_SOURCE", "unknown")
 
     routine_recipients = parse_recipients("REPORT_RECIPIENTS_30MIN")
@@ -347,9 +387,9 @@ def main() -> None:
         routine_recipients = parse_recipients("REPORT_RECIPIENTS")
     alert_recipients = parse_recipients("ALERT_RECIPIENTS")
 
-    print(f"Build 5.13.3 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
+    print(f"Build 5.14.3 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
     print(f"Trigger source: {trigger_source}")
-    print(f"Slot: {slot_key}; query={query!r}; lookback={lookback_hours}h")
+    print(f"Slot: {slot_key}; query={query!r}; news_window={news_lookback_hours}h; x_fresh_window={x_fresh_hours}h")
 
     table_ok, current_state = monitoring_current(slot_key)
     _, previous_state = monitoring_previous(slot_key)
@@ -360,13 +400,24 @@ def main() -> None:
         routine_delivered.clear()
         alert_delivered.clear()
 
-    # Load persistent posts first.
+    # Load persistent posts first. The optional X collector has already run
+    # in the workflow, so any newly fetched X rows are visible here.
     stored = load_supabase_posts(limit=5000)
     print(f"Loaded {len(stored):,} stored posts from Supabase.")
+    stored_ids_before_news = set(stored["external_id"].astype(str)) if not stored.empty else set()
 
-    # Refresh free News independently of the Streamlit browser.
+    # Read the X collector diagnostic even when it was disabled/denied.
+    x_collection = load_x_collection_summary()
+    x_new_count = int(x_collection.get("new_count", 0) or 0)
+    x_collector_status = str(x_collection.get("status", "unknown") or "unknown")
+    x_collector_reason = str(x_collection.get("reason", "") or "")
+
+    # Refresh free News independently of the Streamlit browser. Repeated feed
+    # items are retained in the 24-hour snapshot but counted as new only when
+    # their external_id was not already stored before this run.
     fresh_news = pd.DataFrame(columns=core.STANDARD_COLUMNS)
     news_source = "not fetched"
+    new_news_count = 0
     try:
         fresh_news, news_source = core.fetch_free_news(
             query=query,
@@ -374,23 +425,95 @@ def main() -> None:
             max_records=100,
         )
         if len(fresh_news):
+            fresh_news = core.normalize_posts(fresh_news)
+            fresh_ids = set(fresh_news["external_id"].astype(str))
+            new_news_count = len(fresh_ids - stored_ids_before_news)
             saved = upsert_posts(fresh_news)
-            print(f"Fetched/saved {saved:,} news rows via {news_source}.")
+            print(
+                f"Fetched {len(fresh_news):,} news feed rows via {news_source}; "
+                f"{new_news_count:,} were new external IDs; upserted {saved:,}."
+            )
     except Exception as exc:
         print(f"WARNING: News refresh failed: {type(exc).__name__}: {exc}")
 
-    raw = pd.concat([stored, fresh_news], ignore_index=True)
-    raw = core.normalize_posts(raw)
+    combined_store = core.normalize_posts(pd.concat([stored, fresh_news], ignore_index=True))
 
-    cutoff = pd.Timestamp(now_ist - timedelta(hours=lookback_hours))
-    raw = raw[raw["timestamp"] >= cutoff].copy()
+    # NEWS: always a rolling look-back window (default 24h).
+    news_cutoff = pd.Timestamp(now_ist - timedelta(hours=news_lookback_hours))
+    news_report = combined_store[
+        combined_store["platform"].eq("web_news")
+        & (combined_store["timestamp"] >= news_cutoff)
+    ].copy()
+    news_report = news_report.sort_values("timestamp", ascending=False)
+
+    # X: use fresh rows first. If fewer than the configured minimum are fresh,
+    # backfill with the newest older stored X rows so the report can still show
+    # at least 10 latest available X posts when Supabase contains them.
+    # Backfill is explicitly labelled; nothing is fabricated.
+    stored_x = combined_store[
+        combined_store["platform"].isin(["x", "x_manual"])
+    ].copy()
+    stored_x = stored_x.sort_values("timestamp", ascending=False)
+    x_cutoff = pd.Timestamp(now_ist - timedelta(hours=x_fresh_hours))
+    x_fresh = stored_x[stored_x["timestamp"] >= x_cutoff].copy()
+
+    if len(x_fresh) >= x_min_report_posts:
+        x_report = x_fresh.head(x_fallback_max_posts)
+        x_data_mode = f"fresh <= {x_fresh_hours}h"
+        x_is_stale_fallback = False
+    elif not stored_x.empty:
+        fresh_ids = set(x_fresh["external_id"].astype(str)) if not x_fresh.empty else set()
+        older_pool = stored_x[
+            ~stored_x["external_id"].astype(str).isin(fresh_ids)
+        ].copy()
+        need = max(0, x_min_report_posts - len(x_fresh))
+        backfill = older_pool.head(need)
+        x_report = core.normalize_posts(
+            pd.concat([x_fresh, backfill], ignore_index=True)
+        ).sort_values("timestamp", ascending=False)
+        x_report = x_report.head(x_fallback_max_posts)
+
+        if len(x_fresh):
+            x_data_mode = (
+                f"{len(x_fresh)} fresh <= {x_fresh_hours}h + "
+                f"{len(backfill)} latest stored backfill"
+            )
+        else:
+            x_data_mode = (
+                "stored fallback (no fresh X in current window)"
+            )
+        x_is_stale_fallback = len(backfill) > 0 or len(x_fresh) == 0
+    else:
+        x_report = stored_x
+        x_data_mode = "no X records available"
+        x_is_stale_fallback = True
+
+    x_latest = x_report["timestamp"].max() if not x_report.empty else None
+    x_age_hours = None
+    if x_latest is not None and not pd.isna(x_latest):
+        x_age_hours = max(0.0, (pd.Timestamp(now_ist) - x_latest).total_seconds() / 3600.0)
+
+    news_latest = news_report["timestamp"].max() if not news_report.empty else None
+    news_retained_count = max(0, int(len(news_report)) - int(new_news_count))
+
+    raw = core.normalize_posts(pd.concat([x_report, news_report], ignore_index=True))
     raw = raw.sort_values("timestamp", ascending=False).head(report_max_records)
     raw = raw.sort_values("timestamp").reset_index(drop=True)
 
     if raw.empty:
         raise RuntimeError(
-            "No records are available in the configured background lookback window."
+            "No X fallback records and no News records are available for this run."
         )
+
+    print(
+        f"X reporting mode: {x_data_mode}; records={len(x_report)}; "
+        f"new_this_cycle={x_new_count}; newest={_fmt_ts_ist(x_latest)}."
+    )
+    print(
+        f"News 24h snapshot: records={len(news_report)}; "
+        f"new_this_cycle={new_news_count}; retained={news_retained_count}; "
+        f"newest={_fmt_ts_ist(news_latest)}."
+    )
 
     df, narratives, trend = build_analysis(raw)
 
@@ -436,10 +559,33 @@ def main() -> None:
         monitoring_upsert(run_record)
 
     # Build three analytical PDFs plus separate evidence packs.
+    report_context = {
+        "x_data_mode": x_data_mode,
+        "x_is_stale_fallback": bool(x_is_stale_fallback),
+        "x_collector_status": x_collector_status,
+        "x_collector_reason": x_collector_reason,
+        "x_new_count": int(x_new_count),
+        "x_fresh_count": int(len(x_fresh)),
+        "x_report_count": int(len(x_report)),
+        "x_latest_ist": _fmt_ts_ist(x_latest),
+        "x_age_hours": None if x_age_hours is None else round(float(x_age_hours), 1),
+        "news_new_count": int(new_news_count),
+        "news_window_count": int(len(news_report)),
+        "news_retained_count": int(news_retained_count),
+        "news_latest_ist": _fmt_ts_ist(news_latest),
+        "news_source": news_source,
+        "news_window_hours": int(news_lookback_hours),
+    }
     stamp = now_ist.strftime("%Y%m%d_%H%M%S_IST")
-    social_pdf = core.build_social_media_report(df, alert_threshold=alert_threshold, query=query)
-    news_pdf = core.build_news_media_report(df, alert_threshold=alert_threshold, query=query)
-    combined_pdf = core.build_combined_intelligence_report(df, alert_threshold=alert_threshold, query=query)
+    social_pdf = core.build_social_media_report(
+        df, alert_threshold=alert_threshold, query=query, run_context=report_context
+    )
+    news_pdf = core.build_news_media_report(
+        df, alert_threshold=alert_threshold, query=query, run_context=report_context
+    )
+    combined_pdf = core.build_combined_intelligence_report(
+        df, alert_threshold=alert_threshold, query=query, run_context=report_context
+    )
 
     report_files = [
         (f"ISRO_Social_Media_Intelligence_{stamp}.pdf", social_pdf, "application", "pdf"),
@@ -472,8 +618,15 @@ def main() -> None:
         f"Scheduled slot: {slot_start:%Y-%m-%d %H:%M IST}",
         f"Query: {query}",
         f"Records analyzed: {len(df):,}",
-        f"X/manual X records: {x_records:,}",
-        f"Web News records: {news_records:,}",
+        f"X/manual X records in report: {x_records:,}",
+        f"X new this cycle: {x_new_count:,}",
+        f"X data mode: {x_data_mode}",
+        f"X collector status: {x_collector_status}",
+        f"Newest X record: {_fmt_ts_ist(x_latest)}" + (f" ({x_age_hours:.1f}h old)" if x_age_hours is not None else ""),
+        f"Web News records in rolling {news_lookback_hours}h: {news_records:,}",
+        f"News new this cycle: {new_news_count:,}",
+        f"News retained from prior fetches: {news_retained_count:,}",
+        f"Newest News record: {_fmt_ts_ist(news_latest)}",
         f"Positive: {positive_pct:.1f}%",
         f"Neutral: {neutral_pct:.1f}%",
         f"Negative: {negative_pct:.1f}%",
@@ -496,10 +649,15 @@ def main() -> None:
         if addr.lower() not in routine_delivered
     ]
     routine_failed = {}
+    no_new_content = (int(x_new_count) == 0 and int(new_news_count) == 0)
+    if email_only_on_change and no_new_content and not alert_triggered and not force_send:
+        routine_pending = []
+        print("Routine email skipped because EMAIL_ONLY_ON_CHANGE=true and no new X/News IDs were found.")
+
     if routine_pending:
         subject_prefix = "ALERT · " if alert_triggered else ""
         routine_subject = (
-            f"{subject_prefix}ISRO Social Intelligence Report — "
+            f"{subject_prefix}ISRO Intelligence | +{x_new_count} X / +{new_news_count} News | "
             + now_ist.strftime("%d %b %Y %H:%M IST")
         )
         result = send_email_individually(
@@ -565,12 +723,20 @@ def main() -> None:
         monitoring_upsert(run_record)
 
     summary = {
-        "build": "5.14",
+        "build": "5.14.3",
         "run_time_ist": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
         "slot_key": slot_key,
         "records": len(df),
         "x_records": x_records,
         "news_records": news_records,
+        "x_new_count": int(x_new_count),
+        "x_data_mode": x_data_mode,
+        "x_collector_status": x_collector_status,
+        "x_latest_ist": _fmt_ts_ist(x_latest),
+        "x_age_hours": None if x_age_hours is None else round(float(x_age_hours), 1),
+        "news_new_count": int(new_news_count),
+        "news_retained_count": int(news_retained_count),
+        "news_latest_ist": _fmt_ts_ist(news_latest),
         "positive_pct": round(positive_pct, 3),
         "neutral_pct": round(neutral_pct, 3),
         "negative_pct": round(negative_pct, 3),
@@ -596,12 +762,18 @@ def main() -> None:
         [
             "# SMI Background Monitor",
             "",
-            f"- Build: **5.14**",
+            f"- Build: **5.14.2**",
             f"- Run time: **{now_ist:%Y-%m-%d %H:%M:%S IST}**",
             f"- Status: **{run_record['status']}**",
             f"- Records analyzed: **{len(df):,}**",
-            f"- X/manual X: **{x_records:,}**",
-            f"- Web News: **{news_records:,}**",
+            f"- X/manual X in report: **{x_records:,}**",
+            f"- New X this cycle: **{x_new_count:,}**",
+            f"- X data mode: **{x_data_mode}**",
+            f"- X collector status: **{x_collector_status}**",
+            f"- Newest X: **{_fmt_ts_ist(x_latest)}**",
+            f"- Web News in rolling {news_lookback_hours}h: **{news_records:,}**",
+            f"- New News this cycle: **{new_news_count:,}**",
+            f"- Retained News: **{news_retained_count:,}**",
             f"- Positive: **{positive_pct:.1f}%**",
             f"- Neutral: **{neutral_pct:.1f}%**",
             f"- Negative: **{negative_pct:.1f}%**",

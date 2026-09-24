@@ -1,4 +1,4 @@
-# Social Media Intelligence Platform — Build 5.14
+# Social Media Intelligence Platform — Build 5.14.2
 
 Build 5.13 is based on the uploaded Build 5.12 recipient-email hotfix.
 
@@ -162,3 +162,24 @@ the correct PostgREST conflict targets (`external_id` and `slot_key`).
 ## Build 5.14
 
 Three source-specific intelligence PDFs, a combined PDF, two evidence ZIPs, improved cluster explanations/section summaries, and an optional official X API collector. See `BUILD_5.14_REPORTING_AND_X.md`.
+
+
+## Build 5.14.2 freshness/delta behavior
+
+- News is a rolling 24-hour unique snapshot; reports separately show new vs retained items.
+- X prefers fresh 24-hour data but falls back to the latest stored X posts when the live collector is unavailable.
+- Stale X fallback is labelled explicitly with newest-record timestamp.
+- Optional `EMAIL_ONLY_ON_CHANGE=true` suppresses no-change routine emails.
+
+
+## Build 5.14.3 — X minimum 10 target
+
+The official X collector now targets at least 10 latest real matching X posts.
+It prefers original/non-retweet posts and, only when necessary to reach the
+minimum, makes one broader pass that permits reposts. It never fabricates data.
+
+Set GitHub Actions variables:
+`X_MIN_POSTS=10`, `X_MIN_REPORT_POSTS=10`, `X_MAX_POSTS=25`.
+
+If fewer than 10 fresh X posts are available but Supabase has older X records,
+the report backfills with the latest stored rows and labels them as backfill.

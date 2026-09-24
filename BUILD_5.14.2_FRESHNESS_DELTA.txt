@@ -1,0 +1,38 @@
+BUILD 5.14.2 — X fallback + News delta/freshness hotfix
+
+WHAT THE OBSERVED COUNTS MEAN
+-----------------------------
+1. X = 0 can occur even when Supabase contains old/manual X rows because Build 5.14
+   applied the 24-hour background cutoff to every source. If the live X collector
+   is disabled or denied, no new X arrives, so the report becomes zero-X.
+
+2. News staying at (for example) 26 is not necessarily a fetch failure. The report
+   is a rolling 24-hour snapshot. If the feed returns the same URLs and no items age
+   out, the unique count legitimately stays constant.
+
+BUILD 5.14.2 CHANGES
+--------------------
+- News remains a rolling 24-hour unique snapshot.
+- The email/report now shows NEW News this cycle versus RETAINED News.
+- X uses fresh rows from the last X_FRESH_HOURS (default 24).
+- If no fresh X exists, the report falls back to the latest stored X/manual-X posts
+  (default 50) and labels them as stored fallback/stale rather than pretending they
+  are current.
+- The X collector always writes a diagnostic summary: success / disabled / api_error.
+- Email subject shows the delta: +N X / +M News.
+- Optional GitHub Actions variable EMAIL_ONLY_ON_CHANGE=true suppresses routine emails
+  when both deltas are zero. Default remains false, so 30-minute emails continue.
+
+RECOMMENDED GITHUB ACTIONS VARIABLES
+------------------------------------
+BACKGROUND_LOOKBACK_HOURS = 24
+X_FRESH_HOURS = 24
+X_FALLBACK_MAX_POSTS = 50
+EMAIL_ONLY_ON_CHANGE = false
+X_MAX_POSTS = 100
+
+IMPORTANT X LIMITATION
+----------------------
+Actual fresh X collection still requires a valid X_BEARER_TOKEN and API access to
+X Recent Search. Without it, the system can analyze stored/manual X rows but cannot
+create new public X posts on its own.

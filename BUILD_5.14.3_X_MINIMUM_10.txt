@@ -1,0 +1,47 @@
+BUILD 5.14.3 — X latest-post minimum target
+
+Purpose
+-------
+Improve the official X collector so every scheduled run TARGETS at least
+10 latest real posts matching ISRO / @isro / #ISRO.
+
+Important truthfulness rule
+---------------------------
+The system cannot guarantee that X will return 10 posts if:
+- X_BEARER_TOKEN is absent/invalid,
+- the account/API tier cannot use recent search,
+- X returns an API/rate-limit error,
+- or fewer than 10 matching posts are available to that search access.
+
+In those cases the collector returns only real posts and reports a partial status.
+It never creates synthetic rows.
+
+Collector strategy
+------------------
+1. Search newest-first with the configured query, default:
+     (ISRO OR @isro OR #ISRO) -is:retweet
+2. Stop when at least X_MIN_POSTS (default 10) are collected.
+3. If fewer than 10 originals are returned, repeat once without
+   `-is:retweet` to allow real reposts as a minimum-fill fallback.
+4. Deduplicate by X post ID.
+5. Upsert into Supabase.
+6. Save output/x_latest_collected.csv and x_collection_summary.json.
+
+Reporting strategy
+------------------
+- Prefer fresh X posts.
+- If fewer than X_MIN_REPORT_POSTS are fresh, backfill with the newest
+  older X posts already stored in Supabase.
+- The PDF/email labels this as stored backfill.
+- If Supabase itself contains fewer than 10 X posts, the report shows only
+  those genuinely available.
+
+Recommended GitHub Actions variables
+------------------------------------
+X_MIN_POSTS = 10
+X_MIN_REPORT_POSTS = 10
+X_MAX_POSTS = 25
+X_FRESH_HOURS = 24
+X_FALLBACK_MAX_POSTS = 50
+
+No change to Gmail/Supabase secrets is required.

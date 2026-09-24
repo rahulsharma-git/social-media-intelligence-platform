@@ -2887,7 +2887,7 @@ def _overall_conclusion_text(dataframe, narratives, alert_threshold, report_kind
     )
 
 
-def build_intelligence_report_pdf(report_df, alert_threshold=35.0, report_kind="combined", query="ISRO"):
+def build_intelligence_report_pdf(report_df, alert_threshold=35.0, report_kind="combined", query="ISRO", run_context=None):
     """
     Build one of three cleaner intelligence reports:
       social   -> X/social-media only
@@ -3015,6 +3015,32 @@ def build_intelligence_report_pdf(report_df, alert_threshold=35.0, report_kind="
     ))
     story.append(Spacer(1, 6))
 
+    if run_context:
+        if report_kind == "social":
+            freshness = (
+                f"X mode: {run_context.get('x_data_mode', 'n/a')}. "
+                f"New X this cycle: {int(run_context.get('x_new_count', 0) or 0)}. "
+                f"Newest X: {run_context.get('x_latest_ist', 'n/a')}. "
+                f"Collector status: {run_context.get('x_collector_status', 'n/a')}."
+            )
+        elif report_kind == "news":
+            freshness = (
+                f"Rolling News window: {int(run_context.get('news_window_hours', 24) or 24)} hours. "
+                f"New News this cycle: {int(run_context.get('news_new_count', 0) or 0)}. "
+                f"Retained News: {int(run_context.get('news_retained_count', 0) or 0)}. "
+                f"Newest News: {run_context.get('news_latest_ist', 'n/a')}."
+            )
+        else:
+            freshness = (
+                f"X: {run_context.get('x_data_mode', 'n/a')}; "
+                f"+{int(run_context.get('x_new_count', 0) or 0)} new this cycle; "
+                f"newest {run_context.get('x_latest_ist', 'n/a')}. "
+                f"News: +{int(run_context.get('news_new_count', 0) or 0)} new in a "
+                f"{int(run_context.get('news_window_hours', 24) or 24)}h rolling window; "
+                f"{int(run_context.get('news_retained_count', 0) or 0)} retained."
+            )
+        callout("Data freshness", freshness, bg="#FFF8E7", border="#D7B35C")
+
     # 1 Executive overview
     story.append(p("1. Executive overview", h1))
     callout(
@@ -3033,6 +3059,13 @@ def build_intelligence_report_pdf(report_df, alert_threshold=35.0, report_kind="
     ]
     if report_kind in {"social", "combined"}:
         summary_rows.append([p("Stored X engagement", table_text), p(f"{int(x_data.get('engagement', pd.Series(dtype=int)).sum()):,}", table_text)])
+        if run_context:
+            summary_rows.append([p("New X this cycle", table_text), p(str(int(run_context.get("x_new_count", 0) or 0)), table_text)])
+            summary_rows.append([p("X data mode", table_text), p(run_context.get("x_data_mode", "n/a"), table_text)])
+            summary_rows.append([p("Newest X record", table_text), p(run_context.get("x_latest_ist", "n/a"), table_text)])
+    if report_kind in {"news", "combined"} and run_context:
+        summary_rows.append([p("New News this cycle", table_text), p(str(int(run_context.get("news_new_count", 0) or 0)), table_text)])
+        summary_rows.append([p("Retained News in window", table_text), p(str(int(run_context.get("news_retained_count", 0) or 0)), table_text)])
     if report_kind == "social":
         summary_rows.append([p("Top hashtags", table_text), p(_top_hashtag_text(data), table_text)])
     if report_kind == "news":
@@ -3252,16 +3285,16 @@ def build_intelligence_report_pdf(report_df, alert_threshold=35.0, report_kind="
     return buffer.getvalue()
 
 
-def build_social_media_report(report_df, alert_threshold=35.0, query="ISRO"):
-    return build_intelligence_report_pdf(report_df, alert_threshold=alert_threshold, report_kind="social", query=query)
+def build_social_media_report(report_df, alert_threshold=35.0, query="ISRO", run_context=None):
+    return build_intelligence_report_pdf(report_df, alert_threshold=alert_threshold, report_kind="social", query=query, run_context=run_context)
 
 
-def build_news_media_report(report_df, alert_threshold=35.0, query="ISRO"):
-    return build_intelligence_report_pdf(report_df, alert_threshold=alert_threshold, report_kind="news", query=query)
+def build_news_media_report(report_df, alert_threshold=35.0, query="ISRO", run_context=None):
+    return build_intelligence_report_pdf(report_df, alert_threshold=alert_threshold, report_kind="news", query=query, run_context=run_context)
 
 
-def build_combined_intelligence_report(report_df, alert_threshold=35.0, query="ISRO"):
-    return build_intelligence_report_pdf(report_df, alert_threshold=alert_threshold, report_kind="combined", query=query)
+def build_combined_intelligence_report(report_df, alert_threshold=35.0, query="ISRO", run_context=None):
+    return build_intelligence_report_pdf(report_df, alert_threshold=alert_threshold, report_kind="combined", query=query, run_context=run_context)
 
 
 # Compatibility: legacy callers requesting build_pdf_report receive the new combined report.
