@@ -13,11 +13,13 @@ session. Each run:
 from __future__ import annotations
 
 import json
+import io
 import os
 import re
 import smtplib
 import ssl
 import time
+import zipfile
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
@@ -510,6 +512,105 @@ def build_analysis(raw_df: pd.DataFrame):
     return df, narratives, trend
 
 
+def _verify_evidence_zip(filename: str, payload: bytes, expected_count: int) -> dict:
+    """Validate evidence ZIP bytes before saving/emailing."""
+    if payload is None or len(payload) == 0:
+        raise RuntimeError(f"Evidence ZIP is empty: {filename}")
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload), "r") as zf:
+            bad = zf.testzip()
+            if bad:
+                raise RuntimeError(
+                    f"Evidence ZIP contains a corrupt member: {filename} -> {bad}"
+                )
+            members = [n for n in zf.namelist() if n and not n.endswith("/")]
+            pdf_members = [n for n in members if n.lower().endswith(".pdf")]
+            manifest_present = any(
+                n.lower().endswith("manifest.csv") for n in members
+            )
+    except zipfile.BadZipFile as exc:
+        raise RuntimeError(f"Invalid evidence ZIP: {filename}") from exc
+
+    if expected_count > 0 and len(pdf_members) < expected_count:
+        raise RuntimeError(
+            f"Evidence ZIP {filename} contains {len(pdf_members)} PDFs, "
+            f"expected at least {expected_count}."
+        )
+
+    return {
+        "filename": filename,
+        "bytes": len(payload),
+        "members": len(members),
+        "pdfs": len(pdf_members),
+        "manifest_present": bool(manifest_present),
+    }
+
+
+def _send_evidence_messages(
+    recipients: list[str],
+    evidence_files: list[tuple[str, bytes, str, str]],
+    body: str,
+    now_ist,
+) -> dict:
+    """Always send X and News evidence ZIPs after the core report email."""
+    result = {"accepted": [], "failed": {}, "messages": []}
+    recipients = [r for r in recipients if r and "@" in r]
+    if not recipients or not evidence_files:
+        return result
+
+    raw_limit_mb = max(
+        1.0, min(env_float("EMAIL_ATTACHMENT_RAW_LIMIT_MB", 10.0), 15.0)
+    )
+    raw_limit = int(raw_limit_mb * 1024 * 1024)
+    combined_size = sum(len(x[1]) for x in evidence_files)
+
+    groups = [evidence_files] if combined_size <= raw_limit else [[x] for x in evidence_files]
+
+    for idx, group in enumerate(groups, start=1):
+        names = [x[0] for x in group]
+        if len(group) == len(evidence_files):
+            label = "X + News Evidence ZIPs"
+        else:
+            label = (
+                "Social Media Evidence ZIP"
+                if "SocialMedia" in group[0][0]
+                else "News Media Evidence ZIP"
+            )
+
+        subject = (
+            f"ISRO Intelligence | {label} | "
+            + now_ist.strftime("%d %b %Y %H:%M IST")
+        )
+        message_body = (
+            body
+            + "\n\n"
+            + f"Evidence delivery: {label}\n"
+            + "Files attached:\n- "
+            + "\n- ".join(names)
+        )
+        ev = send_email_individually(
+            recipients,
+            subject,
+            message_body,
+            group,
+            message_tag=f"evidence-{idx}",
+        )
+        result["messages"].append(
+            {
+                "files": names,
+                "accepted": ev.get("accepted", []),
+                "failed": ev.get("failed", {}),
+            }
+        )
+        for addr in ev.get("accepted", []):
+            if addr not in result["accepted"]:
+                result["accepted"].append(addr)
+        result["failed"].update(ev.get("failed", {}))
+
+    return result
+
+
 def main() -> None:
     now_ist = datetime.now(IST)
     slot_start = now_ist.replace(
@@ -541,7 +642,7 @@ def main() -> None:
         routine_recipients = parse_recipients("REPORT_RECIPIENTS")
     alert_recipients = parse_recipients("ALERT_RECIPIENTS")
 
-    print(f"Build 5.17.3 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
+    print(f"Build 5.17.4 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
     print(f"Trigger source: {trigger_source}")
     print(f"Slot: {slot_key}; query={query!r}; news_window={news_lookback_hours}h; x_fresh_window={x_fresh_hours}h")
 
@@ -832,9 +933,30 @@ def main() -> None:
         (f"ISRO_SocialMedia_Evidence_{stamp}.zip", x_zip, "application", "zip"),
         (f"ISRO_NewsMedia_Evidence_{stamp}.zip", news_zip, "application", "zip"),
     ]
+
+    evidence_validation = []
+    expected_counts = {
+        evidence_files[0][0]: int(x_evidence_count),
+        evidence_files[1][0]: int(news_evidence_count),
+    }
     for filename, payload, _, _ in evidence_files:
-        (OUTPUT_DIR / filename).write_bytes(payload)
-        print(f"Generated {filename} ({len(payload)/(1024*1024):.2f} MB).")
+        check = _verify_evidence_zip(
+            filename,
+            payload,
+            expected_counts.get(filename, 0),
+        )
+        evidence_validation.append(check)
+        output_path = OUTPUT_DIR / filename
+        output_path.write_bytes(payload)
+        if not output_path.exists() or output_path.stat().st_size != len(payload):
+            raise RuntimeError(
+                f"Evidence ZIP write verification failed: {output_path}"
+            )
+        print(
+            f"Generated and verified {filename} "
+            f"({len(payload)/(1024*1024):.2f} MB; "
+            f"{check['pdfs']} PDFs; manifest={check['manifest_present']})."
+        )
 
     attachments = report_files + evidence_files
     pdf_filename = report_files[2][0]
@@ -924,30 +1046,24 @@ def main() -> None:
             f"failed={len(result['failed'])}."
         )
 
-        # Evidence packs can be sent separately when explicitly enabled.
-        if (
-            env_bool("EMAIL_SEND_EVIDENCE_SEPARATELY", False)
-            and evidence_files
-            and result["accepted"]
-        ):
-            evidence_subject = (
-                f"ISRO Intelligence Evidence Pack | "
-                + now_ist.strftime("%d %b %Y %H:%M IST")
-            )
-            evidence_result = send_email_individually(
+        # Evidence ZIPs are mandatory deliverables. Send them after the core
+        # report so large ZIPs cannot block the analytical PDFs.
+        evidence_result = {"accepted": [], "failed": {}, "messages": []}
+        if evidence_files and result["accepted"]:
+            evidence_result = _send_evidence_messages(
                 result["accepted"],
-                evidence_subject,
-                (
-                    body
-                    + "\n\nThis is the separate evidence-pack message. "
-                    "The main analytical report was sent independently."
-                ),
                 evidence_files,
-                message_tag="evidence-pack",
+                body,
+                now_ist,
+            )
+            print(
+                f"Evidence email SMTP accepted={len(evidence_result['accepted'])}, "
+                f"failed={len(evidence_result['failed'])}, "
+                f"messages={len(evidence_result['messages'])}."
             )
             if evidence_result["failed"]:
                 print(
-                    "::warning::Evidence-pack email had failures: "
+                    "::warning::Evidence ZIP email had failures: "
                     + json.dumps(evidence_result["failed"], ensure_ascii=False)
                 )
     elif routine_recipients:
@@ -1004,7 +1120,7 @@ def main() -> None:
         monitoring_upsert(run_record)
 
     summary = {
-        "build": "5.17.3",
+        "build": "5.17.4",
         "run_time_ist": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
         "slot_key": slot_key,
         "records": len(df),
@@ -1038,8 +1154,17 @@ def main() -> None:
         "pdf_filename": pdf_filename,
         "report_files": [x[0] for x in report_files],
         "evidence_files": [x[0] for x in evidence_files],
+        "evidence_validation": evidence_validation,
         "x_evidence_count": x_evidence_count,
         "news_evidence_count": news_evidence_count,
+        "evidence_email_accepted": sorted(
+            set(evidence_result.get("accepted", []))
+        ) if "evidence_result" in locals() else [],
+        "evidence_email_failed": (
+            evidence_result.get("failed", {})
+            if "evidence_result" in locals()
+            else {}
+        ),
         "status": run_record["status"],
         "error": run_record["error"],
     }
@@ -1052,7 +1177,7 @@ def main() -> None:
         [
             "# SMI Background Monitor",
             "",
-            f"- Build: **5.17.3**",
+            f"- Build: **5.17.4**",
             f"- Run time: **{now_ist:%Y-%m-%d %H:%M:%S IST}**",
             f"- Status: **{run_record['status']}**",
             f"- Records analyzed: **{len(df):,}**",
@@ -1076,8 +1201,10 @@ def main() -> None:
             f"- Attention index: **{attention_index}/100**",
             f"- Assessment confidence: **{assessment_confidence}/100**",
             f"- Combined PDF: `{pdf_filename}`",
-            f"- Social evidence PDFs: **{x_evidence_count}**",
-            f"- News evidence PDFs: **{news_evidence_count}**",
+            f"- Social evidence ZIP: **{evidence_files[0][0]}** ({x_evidence_count} PDFs)",
+            f"- News evidence ZIP: **{evidence_files[1][0]}** ({news_evidence_count} PDFs)",
+            f"- Evidence ZIP validation: **passed**",
+            f"- Evidence email recipients SMTP-accepted: **{len(evidence_result.get('accepted', [])) if 'evidence_result' in locals() else 0}**",
             f"- Routine recipients SMTP-accepted: **{len(routine_delivered)}**",
             f"- Alert recipients SMTP-accepted: **{len(alert_delivered)}**",
             "",

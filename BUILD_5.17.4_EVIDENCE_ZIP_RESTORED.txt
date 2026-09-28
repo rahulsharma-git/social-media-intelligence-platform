@@ -1,0 +1,20 @@
+BUILD 5.17.4 — EVIDENCE ZIP RESTORED
+
+Both evidence deliverables are mandatory again:
+- ISRO_SocialMedia_Evidence_<IST>.zip
+- ISRO_NewsMedia_Evidence_<IST>.zip
+
+Each run now:
+1. Builds both evidence ZIPs.
+2. Verifies ZIP integrity and expected PDF count.
+3. Writes both ZIPs to output/ (included in GitHub Actions artifact).
+4. Emails the analytical PDFs first.
+5. Automatically emails both evidence ZIPs afterward.
+6. If the combined ZIP size is above the safe email limit, splits them into
+   separate Social and News evidence emails so neither is omitted.
+
+No new secret or variable is required.
+The old EMAIL_SEND_EVIDENCE_SEPARATELY switch is no longer used.
+
+Recommended:
+EMAIL_ATTACHMENT_RAW_LIMIT_MB = 10

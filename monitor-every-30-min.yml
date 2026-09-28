@@ -63,7 +63,6 @@ jobs:
       X_FALLBACK_MAX_POSTS: ${{ vars.X_FALLBACK_MAX_POSTS }}
       EMAIL_ONLY_ON_CHANGE: ${{ vars.EMAIL_ONLY_ON_CHANGE }}
       EMAIL_ATTACHMENT_RAW_LIMIT_MB: ${{ vars.EMAIL_ATTACHMENT_RAW_LIMIT_MB }}
-      EMAIL_SEND_EVIDENCE_SEPARATELY: ${{ vars.EMAIL_SEND_EVIDENCE_SEPARATELY }}
       OUTPUT_DIR: output
 
     steps:
@@ -76,7 +75,7 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Preflight - verify deployed Build 5.17.3 files
+      - name: Preflight - verify deployed Build 5.17.4 files
         shell: bash
         run: |
           echo "Trigger source: ${TRIGGER_SOURCE:-unknown}"

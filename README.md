@@ -252,3 +252,10 @@ deleting audit data.
 Fixes `KeyError: sentiment_score` introduced by Build 5.17.2. Story-level News
 deduplication now preserves all enriched analysis columns used by sentiment,
 emotion, clustering, narratives, evidence generation and PDF ranking.
+
+
+## Build 5.17.4 — mandatory evidence ZIP delivery
+
+Both Social Media and News Media evidence ZIPs are generated, validated, stored
+in the GitHub Actions artifact, and automatically emailed after the core report.
+Large evidence packs are split into separate emails instead of being omitted.
