@@ -1,0 +1,47 @@
+BUILD 5.17.1 — EMAIL DELIVERY HOTFIX
+
+Why this build exists
+=====================
+Build 5.17 labeled a recipient as "delivered" when Gmail SMTP accepted the
+message. SMTP acceptance is not proof that the recipient inbox displayed it.
+
+The old routine message could also contain:
+- 3 analytical PDFs
+- Social evidence ZIP
+- News evidence ZIP
+
+The previous 18 MB *raw attachment* ceiling did not account conservatively
+enough for MIME/base64 expansion and email overhead.
+
+Changes
+=======
+1. Status wording is now "SMTP accepted", not "delivered".
+2. Routine/alert emails attach the 3 analytical PDFs only by default.
+3. Evidence ZIPs are optional separate emails.
+4. Conservative raw-attachment safety cap defaults to 10 MB.
+5. Every message gets Date, Message-ID, Reply-To and diagnostic metadata.
+6. GitHub logs print the SMTP transport and Message-ID for each accepted recipient.
+7. Gmail SMTPS 465 is primary with STARTTLS 587 fallback.
+
+Recommended GitHub Actions variables
+====================================
+EMAIL_ATTACHMENT_RAW_LIMIT_MB = 10
+EMAIL_SEND_EVIDENCE_SEPARATELY = false
+
+Set EMAIL_SEND_EVIDENCE_SEPARATELY=true only if you want evidence ZIPs sent
+as a second email. The evidence remains available in the GitHub Actions artifact
+even when separate evidence email is disabled.
+
+How to verify
+=============
+After a manual workflow run:
+1. Open "Run browser-independent monitor".
+2. Look for:
+   SMTP accepted message for <recipient> ... Message-ID=<...>
+3. If SMTP accepted but inbox still has nothing:
+   - check Spam/Junk,
+   - check All Mail,
+   - check the sender Gmail account's Sent folder,
+   - search the exact subject or Message-ID.
+4. If the sender's Sent folder contains the message, GitHub/Gmail SMTP sent it;
+   inbox placement is then a recipient-side filtering/routing issue.

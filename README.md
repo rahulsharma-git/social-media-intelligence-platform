@@ -225,3 +225,23 @@ Analysis now uses confidence-aware sentiment, richer emotion/intensity,
 communication intent, adaptive semantic clustering, robust anomaly detection,
 Attention Index and Assessment Confidence. See `BUILD_5.17_INTELLIGENCE_UPGRADE.txt`
 for full methodology and deployment variables.
+
+
+## Build 5.17.1 — email delivery reliability
+
+Routine and alert emails now send the analytical PDFs as a small core message.
+Evidence ZIPs are not attached to that primary email unless
+`EMAIL_SEND_EVIDENCE_SEPARATELY=true`.
+
+The workflow now reports **SMTP accepted** rather than **delivered**, because an
+SMTP 250 acceptance does not guarantee inbox placement.
+Recommended variable: `EMAIL_ATTACHMENT_RAW_LIMIT_MB=10`.
+
+
+## Build 5.17.2 — News story-level deduplication
+
+News analysis now operates on unique topic-relevant **story families** rather
+than raw RSS/feed rows. Near-identical headlines across publishers are collapsed
+before sentiment/emotion/clustering. Fuzzy off-topic results are rejected.
+This also cleans historical duplicate rows already present in Supabase without
+deleting audit data.

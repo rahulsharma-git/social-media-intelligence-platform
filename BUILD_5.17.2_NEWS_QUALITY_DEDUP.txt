@@ -1,0 +1,39 @@
+BUILD 5.17.2 — NEWS QUALITY / STORY-LEVEL DEDUP HOTFIX
+
+Problem fixed
+=============
+News feeds often syndicate the same story under:
+- slightly different punctuation,
+- publisher/domain variants (for example Rediff vs rediff.com),
+- source suffixes,
+- near-identical rewrites from multiple feeds/outlets.
+
+Build 5.17.1 only removed some duplicates within the same publisher identity.
+Stored duplicates from older runs could therefore re-enter analysis and skew:
+sentiment, emotion, clustering, narratives, source counts and Top 10 lists.
+
+Build 5.17.2 changes
+====================
+1. GLOBAL story-level dedup across publishers and feeds.
+2. Exact + near-duplicate title detection using:
+   - canonical story signatures,
+   - token overlap / containment,
+   - character sequence similarity.
+3. Runs dedup AFTER loading the full Supabase rolling window, so old duplicate
+   rows already stored by previous builds no longer affect current analysis.
+4. ISRO relevance filter rejects fuzzy off-topic search results.
+   Example class now rejected: unrelated NTA/NEET/CISF paper-leak headlines.
+5. Top positive/negative News lists have a second dedup safety layer.
+6. "New News this cycle" now means NEW STORY FAMILIES, not merely a new feed URL.
+7. PDFs / GitHub summary report:
+   - unique News story families analyzed,
+   - duplicate/near-duplicate rows suppressed,
+   - irrelevant fuzzy matches rejected.
+
+No database deletion is required
+================================
+Old duplicate News rows may remain in Supabase for audit/history, but the live
+analysis pipeline suppresses them before sentiment, emotion, clustering and PDF
+generation.
+
+No new GitHub variable is required.

@@ -20,6 +20,7 @@ import ssl
 import time
 from datetime import datetime, timedelta
 from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -236,81 +237,214 @@ def clean_delivered(value) -> set[str]:
     return set()
 
 
+def _encoded_email_size_estimate(raw_bytes: int) -> int:
+    """Conservative MIME/base64 size estimate for attachment payload."""
+    return int(raw_bytes * 1.40) + 256_000
+
+
+def _smtp_connect(sender: str, password: str, context):
+    """Try Gmail SMTPS first, then STARTTLS fallback."""
+    first_error = None
+    try:
+        smtp = smtplib.SMTP_SSL(
+            "smtp.gmail.com", 465, context=context, timeout=45
+        )
+        smtp.login(sender, password)
+        return smtp, "smtp.gmail.com:465/SSL"
+    except Exception as exc:
+        first_error = exc
+
+    try:
+        smtp = smtplib.SMTP("smtp.gmail.com", 587, timeout=45)
+        smtp.ehlo()
+        smtp.starttls(context=context)
+        smtp.ehlo()
+        smtp.login(sender, password)
+        return smtp, "smtp.gmail.com:587/STARTTLS"
+    except Exception as exc:
+        raise RuntimeError(
+            "Gmail SMTP connection failed on both 465/SSL and "
+            f"587/STARTTLS. SSL error={type(first_error).__name__}: "
+            f"{first_error}; STARTTLS error={type(exc).__name__}: {exc}"
+        ) from exc
+
+
 def send_email_individually(
     recipients: list[str],
     subject: str,
     body: str,
     attachments: list[tuple[str, bytes, str, str]],
+    message_tag: str = "report",
 ) -> dict:
-    """Send one message per recipient with a bounded report/evidence pack."""
+    """Send one message per recipient and record SMTP *acceptance* accurately.
+
+    Important: SMTP 250/accepted means Gmail accepted responsibility for the
+    message. It is not proof that the recipient inbox displayed the message.
+    """
     sender = env("SMTP_EMAIL")
     password = env("SMTP_APP_PASSWORD").replace(" ", "")
-    recipients = [x for x in recipients if x and "@" in x]
+    recipients = [x.strip() for x in recipients if x and "@" in x]
     if not recipients:
-        return {"sent": [], "failed": {}}
+        return {"accepted": [], "failed": {}, "diagnostics": []}
     if not sender or not password:
-        msg = "SMTP_EMAIL and SMTP_APP_PASSWORD are not configured in GitHub Actions repository secrets."
-        return {"sent": [], "failed": {x: msg for x in recipients}}
+        msg = (
+            "SMTP_EMAIL and SMTP_APP_PASSWORD are not configured in "
+            "GitHub Actions repository secrets."
+        )
+        return {
+            "accepted": [],
+            "failed": {x: msg for x in recipients},
+            "diagnostics": [],
+        }
 
-    clean = [(str(n), p, str(mt), str(st)) for n, p, mt, st in attachments if p is not None]
-    raw_size = sum(len(p) for _, p, _, _ in clean)
-    if raw_size > 18 * 1024 * 1024:
-        # Keep the 3 analytical PDFs first, then add evidence ZIPs only if they fit.
-        selected = []
-        used = 0
-        for item in clean:
-            name, payload, mt, st = item
-            is_pdf = st == "pdf" or name.lower().endswith(".pdf")
-            if is_pdf and used + len(payload) <= 18 * 1024 * 1024:
-                selected.append(item); used += len(payload)
-        for item in clean:
-            if item in selected:
-                continue
-            if used + len(item[1]) <= 18 * 1024 * 1024:
-                selected.append(item); used += len(item[1])
-        clean = selected
-        print("::warning::Attachment pack exceeded 18 MB; evidence ZIPs were trimmed as needed while keeping analytical PDFs first.")
+    # Gmail's nominal message size limit includes MIME/base64 overhead.
+    # Keep automated report mail well below the limit for reliability.
+    raw_limit_mb = max(
+        1.0, min(env_float("EMAIL_ATTACHMENT_RAW_LIMIT_MB", 10.0), 15.0)
+    )
+    raw_limit = int(raw_limit_mb * 1024 * 1024)
+
+    clean = [
+        (str(n), p, str(mt), str(st))
+        for n, p, mt, st in attachments
+        if p is not None
+    ]
+    selected = []
+    used = 0
+    omitted = []
+    for item in clean:
+        name, payload, mt, st = item
+        if used + len(payload) <= raw_limit:
+            selected.append(item)
+            used += len(payload)
+        else:
+            omitted.append(name)
+
+    estimated_wire = _encoded_email_size_estimate(used)
+    if omitted:
+        print(
+            "::warning::Email attachment safety cap applied. "
+            f"Raw selected={used/(1024*1024):.2f} MB, "
+            f"estimated MIME={estimated_wire/(1024*1024):.2f} MB, "
+            f"omitted={omitted}"
+        )
 
     context = ssl.create_default_context()
     pending = list(recipients)
-    sent: list[str] = []
+    accepted: list[str] = []
     failed: dict[str, str] = {}
+    diagnostics = []
     last_connection_error = ""
 
     for attempt in range(1, 4):
+        smtp = None
+        transport = ""
         try:
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context, timeout=45) as smtp:
-                smtp.login(sender, password)
-                remaining = []
-                for recipient in pending:
-                    try:
-                        msg = EmailMessage()
-                        msg["From"] = sender
-                        msg["To"] = recipient
-                        msg["Subject"] = subject
-                        msg.set_content(body)
-                        for filename, payload, maintype, subtype in clean:
-                            msg.add_attachment(payload, maintype=maintype, subtype=subtype, filename=filename)
-                        refused = smtp.send_message(msg, from_addr=sender, to_addrs=[recipient])
-                        if refused:
-                            failed[recipient] = str(refused); remaining.append(recipient)
-                        else:
-                            sent.append(recipient); failed.pop(recipient, None)
-                    except Exception as exc:
-                        failed[recipient] = f"{type(exc).__name__}: {exc}"; remaining.append(recipient)
-                pending = remaining
-                if not pending:
-                    break
+            smtp, transport = _smtp_connect(sender, password, context)
+            remaining = []
+            for recipient in pending:
+                message_id = make_msgid(
+                    idstring=f"smi-{message_tag}",
+                    domain=(sender.split("@", 1)[1] if "@" in sender else None),
+                )
+                try:
+                    msg = EmailMessage()
+                    msg["From"] = sender
+                    msg["To"] = recipient
+                    msg["Subject"] = subject
+                    msg["Date"] = formatdate(localtime=False)
+                    msg["Message-ID"] = message_id
+                    msg["Reply-To"] = sender
+                    msg["X-SMI-Message-Type"] = message_tag
+                    msg.set_content(body)
+
+                    for filename, payload, maintype, subtype in selected:
+                        msg.add_attachment(
+                            payload,
+                            maintype=maintype,
+                            subtype=subtype,
+                            filename=filename,
+                        )
+
+                    refused = smtp.send_message(
+                        msg,
+                        from_addr=sender,
+                        to_addrs=[recipient],
+                    )
+                    if refused:
+                        failed[recipient] = str(refused)
+                        remaining.append(recipient)
+                        diagnostics.append(
+                            {
+                                "recipient": recipient,
+                                "message_id": message_id,
+                                "transport": transport,
+                                "smtp_accepted": False,
+                                "detail": str(refused),
+                            }
+                        )
+                    else:
+                        accepted.append(recipient)
+                        failed.pop(recipient, None)
+                        diagnostics.append(
+                            {
+                                "recipient": recipient,
+                                "message_id": message_id,
+                                "transport": transport,
+                                "smtp_accepted": True,
+                                "raw_attachment_bytes": used,
+                                "estimated_mime_bytes": estimated_wire,
+                                "attachments": [x[0] for x in selected],
+                                "omitted_attachments": omitted,
+                            }
+                        )
+                        print(
+                            f"SMTP accepted message for {recipient} "
+                            f"via {transport}; Message-ID={message_id}; "
+                            f"raw_attachments={used/(1024*1024):.2f} MB."
+                        )
+                except Exception as exc:
+                    failed[recipient] = f"{type(exc).__name__}: {exc}"
+                    remaining.append(recipient)
+
+            pending = remaining
+            try:
+                smtp.quit()
+            except Exception:
+                try:
+                    smtp.close()
+                except Exception:
+                    pass
+
+            if not pending:
+                break
+
         except Exception as exc:
             last_connection_error = f"{type(exc).__name__}: {exc}"
             for recipient in pending:
                 failed[recipient] = last_connection_error
+        finally:
+            if smtp is not None:
+                try:
+                    smtp.close()
+                except Exception:
+                    pass
+
         if pending and attempt < 3:
             time.sleep(attempt * 5)
 
     if pending and last_connection_error:
         print(f"::warning::SMTP delivery issue: {last_connection_error}")
-    return {"sent": sent, "failed": failed}
+
+    return {
+        "accepted": accepted,
+        "failed": failed,
+        "diagnostics": diagnostics,
+        "selected_attachments": [x[0] for x in selected],
+        "omitted_attachments": omitted,
+        "raw_attachment_bytes": used,
+        "estimated_mime_bytes": estimated_wire,
+    }
 
 def load_x_collection_summary() -> dict:
     path = OUTPUT_DIR / "x_collection_summary.json"
@@ -407,7 +541,7 @@ def main() -> None:
         routine_recipients = parse_recipients("REPORT_RECIPIENTS")
     alert_recipients = parse_recipients("ALERT_RECIPIENTS")
 
-    print(f"Build 5.17 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
+    print(f"Build 5.17.2 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
     print(f"Trigger source: {trigger_source}")
     print(f"Slot: {slot_key}; query={query!r}; news_window={news_lookback_hours}h; x_fresh_window={x_fresh_hours}h")
 
@@ -442,6 +576,15 @@ def main() -> None:
         set(stored["external_id"].astype(str)) if not stored.empty else set()
     )
 
+    stored_news_before = stored[
+        stored["platform"].eq("web_news")
+    ].copy() if not stored.empty else pd.DataFrame(columns=core.STANDARD_COLUMNS)
+    stored_news_story_keys_before = {
+        core.news_story_signature(v)
+        for v in stored_news_before.get("text", pd.Series(dtype=str)).astype(str)
+        if core.news_story_signature(v)
+    }
+
     # Read the X collector diagnostic even when it was disabled/denied.
     x_collection = load_x_collection_summary()
     x_new_count = int(x_collection.get("new_count", 0) or 0)
@@ -465,12 +608,19 @@ def main() -> None:
         )
         if len(fresh_news):
             fresh_news = core.normalize_posts(fresh_news)
-            fresh_ids = set(fresh_news["external_id"].astype(str))
-            new_news_count = len(fresh_ids - stored_ids_before_news)
+            fresh_story_keys = {
+                core.news_story_signature(v)
+                for v in fresh_news["text"].astype(str)
+                if core.news_story_signature(v)
+            }
+            new_news_count = len(
+                fresh_story_keys - stored_news_story_keys_before
+            )
             saved = upsert_posts(fresh_news)
             print(
-                f"Fetched {len(fresh_news):,} news feed rows via {news_source}; "
-                f"{new_news_count:,} were new external IDs; upserted {saved:,}."
+                f"Fetched {len(fresh_news):,} unique/relevant News story rows "
+                f"via {news_source}; {new_news_count:,} were new story families; "
+                f"upserted {saved:,}."
             )
     except Exception as exc:
         print(f"WARNING: News refresh failed: {type(exc).__name__}: {exc}")
@@ -488,11 +638,24 @@ def main() -> None:
 
     # NEWS: always a rolling look-back window (default 24h).
     news_cutoff = pd.Timestamp(now_ist - timedelta(hours=news_lookback_hours))
-    news_report = combined_store[
+    news_report_raw = combined_store[
         combined_store["platform"].eq("web_news")
         & (combined_store["timestamp"] >= news_cutoff)
     ].copy()
+    news_report, news_quality_diag = core.deduplicate_news_for_analysis(
+        news_report_raw,
+        query=query,
+        max_records=news_max_records,
+        return_diagnostics=True,
+    )
     news_report = news_report.sort_values("timestamp", ascending=False)
+    news_duplicates_removed = int(
+        news_quality_diag.get("exact_story_duplicates_removed", 0)
+        + news_quality_diag.get("near_story_duplicates_removed", 0)
+    )
+    news_irrelevant_removed = int(
+        news_quality_diag.get("irrelevant_removed", 0)
+    )
 
     # X: consolidate all available X rows, sort newest-first, and use
     # the latest pool with a minimum target of 10 and hard maximum of 50.
@@ -539,6 +702,7 @@ def main() -> None:
         x_age_hours = max(0.0, (pd.Timestamp(now_ist) - x_latest).total_seconds() / 3600.0)
 
     news_latest = news_report["timestamp"].max() if not news_report.empty else None
+    new_news_count = min(int(new_news_count), int(len(news_report)))
     news_retained_count = max(0, int(len(news_report)) - int(new_news_count))
 
     raw = core.normalize_posts(pd.concat([x_report, news_report], ignore_index=True))
@@ -555,8 +719,10 @@ def main() -> None:
         f"new_this_cycle={x_new_count}; newest={_fmt_ts_ist(x_latest)}."
     )
     print(
-        f"News 24h snapshot: records={len(news_report)}; "
-        f"new_this_cycle={new_news_count}; retained={news_retained_count}; "
+        f"News 24h story snapshot: unique_stories={len(news_report)}; "
+        f"new_story_families={new_news_count}; retained={news_retained_count}; "
+        f"duplicates_suppressed={news_duplicates_removed}; "
+        f"irrelevant_rejected={news_irrelevant_removed}; "
         f"newest={_fmt_ts_ist(news_latest)}."
     )
 
@@ -624,6 +790,8 @@ def main() -> None:
         "news_new_count": int(new_news_count),
         "news_window_count": int(len(news_report)),
         "news_retained_count": int(news_retained_count),
+        "news_duplicates_removed": int(news_duplicates_removed),
+        "news_irrelevant_removed": int(news_irrelevant_removed),
         "news_latest_ist": _fmt_ts_ist(news_latest),
         "news_source": news_source,
         "news_window_hours": int(news_lookback_hours),
@@ -711,6 +879,7 @@ def main() -> None:
         f"News evidence PDFs: {news_evidence_count}",
         "",
         "All displayed/report timestamps are India Standard Time (IST).",
+        "Email status means SMTP accepted, not guaranteed inbox placement.",
         "X data is consolidated from stored/manual rows, public web-index discovery, "
         "and X public embed/syndication sources. No paid X Bearer Token is required.",
     ]
@@ -737,17 +906,50 @@ def main() -> None:
             f"News {news_records} (+{new_news_count}) | "
             + now_ist.strftime("%d %b %Y %H:%M IST")
         )
+        # Core routine email contains analytical PDFs only. Evidence packs are
+        # intentionally excluded from the primary message to improve Gmail
+        # deliverability and stay far below MIME/base64 size limits.
+        core_attachments = report_files
         result = send_email_individually(
             routine_pending,
             routine_subject,
             body,
-            attachments,
+            core_attachments,
+            message_tag="routine-report",
         )
-        routine_delivered.update(x.lower() for x in result["sent"])
+        routine_delivered.update(x.lower() for x in result["accepted"])
         routine_failed = result["failed"]
         print(
-            f"Routine email: sent={len(result['sent'])}, failed={len(result['failed'])}."
+            f"Routine email SMTP accepted={len(result['accepted'])}, "
+            f"failed={len(result['failed'])}."
         )
+
+        # Evidence packs can be sent separately when explicitly enabled.
+        if (
+            env_bool("EMAIL_SEND_EVIDENCE_SEPARATELY", False)
+            and evidence_files
+            and result["accepted"]
+        ):
+            evidence_subject = (
+                f"ISRO Intelligence Evidence Pack | "
+                + now_ist.strftime("%d %b %Y %H:%M IST")
+            )
+            evidence_result = send_email_individually(
+                result["accepted"],
+                evidence_subject,
+                (
+                    body
+                    + "\n\nThis is the separate evidence-pack message. "
+                    "The main analytical report was sent independently."
+                ),
+                evidence_files,
+                message_tag="evidence-pack",
+            )
+            if evidence_result["failed"]:
+                print(
+                    "::warning::Evidence-pack email had failures: "
+                    + json.dumps(evidence_result["failed"], ensure_ascii=False)
+                )
     elif routine_recipients:
         print("Routine email already completed for this slot; no duplicate send.")
     else:
@@ -770,12 +972,14 @@ def main() -> None:
                 alert_pending,
                 alert_subject,
                 body,
-                attachments,
+                report_files,
+                message_tag="alert-report",
             )
-            alert_delivered.update(x.lower() for x in result["sent"])
+            alert_delivered.update(x.lower() for x in result["accepted"])
             alert_failed = result["failed"]
             print(
-                f"Alert email: sent={len(result['sent'])}, failed={len(result['failed'])}."
+                f"Alert email SMTP accepted={len(result['accepted'])}, "
+                f"failed={len(result['failed'])}."
             )
     elif alert_triggered:
         print("Negativity remains above threshold; no duplicate crossing alert email.")
@@ -800,7 +1004,7 @@ def main() -> None:
         monitoring_upsert(run_record)
 
     summary = {
-        "build": "5.17",
+        "build": "5.17.2",
         "run_time_ist": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
         "slot_key": slot_key,
         "records": len(df),
@@ -813,6 +1017,8 @@ def main() -> None:
         "x_age_hours": None if x_age_hours is None else round(float(x_age_hours), 1),
         "news_new_count": int(new_news_count),
         "news_retained_count": int(news_retained_count),
+        "news_duplicates_removed": int(news_duplicates_removed),
+        "news_irrelevant_removed": int(news_irrelevant_removed),
         "news_latest_ist": _fmt_ts_ist(news_latest),
         "positive_pct": round(positive_pct, 3),
         "neutral_pct": round(neutral_pct, 3),
@@ -846,7 +1052,7 @@ def main() -> None:
         [
             "# SMI Background Monitor",
             "",
-            f"- Build: **5.17**",
+            f"- Build: **5.17.2**",
             f"- Run time: **{now_ist:%Y-%m-%d %H:%M:%S IST}**",
             f"- Status: **{run_record['status']}**",
             f"- Records analyzed: **{len(df):,}**",
@@ -855,9 +1061,11 @@ def main() -> None:
             f"- X data mode: **{x_data_mode}**",
             f"- X collector status: **{x_collector_status}**",
             f"- Newest X: **{_fmt_ts_ist(x_latest)}**",
-            f"- Web News in rolling {news_lookback_hours}h: **{news_records:,}**",
-            f"- New News this cycle: **{new_news_count:,}**",
-            f"- Retained News: **{news_retained_count:,}**",
+            f"- Unique News story families in rolling {news_lookback_hours}h: **{news_records:,}**",
+            f"- New News story families this cycle: **{new_news_count:,}**",
+            f"- Retained News story families: **{news_retained_count:,}**",
+            f"- Duplicate/near-duplicate News rows suppressed: **{news_duplicates_removed:,}**",
+            f"- Irrelevant fuzzy News matches rejected: **{news_irrelevant_removed:,}**",
             f"- Weighted Positive: **{positive_pct:.1f}%**",
             f"- Weighted Neutral: **{neutral_pct:.1f}%**",
             f"- Weighted Negative: **{negative_pct:.1f}%**",
@@ -870,8 +1078,8 @@ def main() -> None:
             f"- Combined PDF: `{pdf_filename}`",
             f"- Social evidence PDFs: **{x_evidence_count}**",
             f"- News evidence PDFs: **{news_evidence_count}**",
-            f"- Routine recipients delivered: **{len(routine_delivered)}**",
-            f"- Alert recipients delivered: **{len(alert_delivered)}**",
+            f"- Routine recipients SMTP-accepted: **{len(routine_delivered)}**",
+            f"- Alert recipients SMTP-accepted: **{len(alert_delivered)}**",
             "",
             "News collection: **multi-source fusion over the past 24 hours by default**.",
             (

@@ -13,6 +13,7 @@ import smtplib
 import ssl
 from email.message import EmailMessage
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -59,7 +60,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
 
     st.title("📡 Social Media Intelligence Platform")
     st.caption(
-        "Build 5.17 — resilient source fusion + confidence-aware intelligence analysis"
+        "Build 5.17.2 — story-level news deduplication + relevance-aware intelligence"
     )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -921,50 +922,313 @@ def _filter_news_to_timespan(df, timespan):
 
 
 def _title_token_set(value):
-    stop = {"isro", "the", "a", "an", "of", "to", "in", "on", "for", "and", "with", "from", "by"}
+    """Canonical information-bearing title tokens for story comparison."""
+    stop = {
+        "isro", "the", "a", "an", "of", "to", "in", "on", "for", "and",
+        "with", "from", "by", "at", "as", "after", "amid", "says", "said",
+        "news", "india", "indian", "latest", "live", "update", "updates",
+        "exclusive", "watch", "video", "photos", "photo", "breaking",
+    }
     return {
-        t for t in _news_title_key(value).split()
+        t for t in _news_story_signature(value).split()
         if len(t) > 2 and t not in stop
     }
 
 
+def _news_story_signature(title):
+    """Normalize headline boilerplate so syndicated copies map together."""
+    value = _news_title_key(title)
+
+    # Remove common feed/publisher boilerplate that frequently creates
+    # artificial duplicates while leaving the actual story wording intact.
+    boilerplate_patterns = [
+        r"\blive updates?\b",
+        r"\blatest updates?\b",
+        r"\bbreaking news\b",
+        r"\bindia news\b",
+        r"\bworld news\b",
+        r"\btop news\b",
+        r"\bexplained\b$",
+        r"\bwatch video\b",
+        r"\bvideo\b$",
+    ]
+    for pat in boilerplate_patterns:
+        value = re.sub(pat, " ", value, flags=re.I)
+
+    # Feed items sometimes append a publisher/domain even after source cleanup.
+    value = re.sub(
+        r"\s+(rediff|rediff com|times of india|timesofindia indiatimes com|"
+        r"hindustan times|the hindu|india today|ndtv|news18|the indian express|"
+        r"deccan herald|business standard|firstpost|the print|theprint|"
+        r"reuters|ani|pti)\s*$",
+        " ",
+        value,
+        flags=re.I,
+    )
+
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def news_story_signature(title):
+    """Public wrapper used by the background monitor for cycle-level deltas."""
+    return _news_story_signature(title)
+
+
+_NEWS_STRICT_TOPIC_ANCHORS = {
+    "isro",
+    "indian space research organisation",
+    "indian space research organization",
+    "gaganyaan",
+    "chandrayaan",
+    "aditya l1",
+    "aditya-l1",
+    "pslv",
+    "gslv",
+    "lvm3",
+    "sslv",
+    "nisar",
+    "spadex",
+    "navic",
+    "vyommitra",
+    "bharatiya antariksh station",
+    "indian space station",
+    "satish dhawan space centre",
+    "satish dhawan space center",
+    "sriharikota",
+    "vssc",
+    "vikram sarabhai space centre",
+    "u r rao satellite centre",
+    "ur rao satellite centre",
+}
+
+
+def _is_isro_topic_query(query):
+    q = _news_title_key(query)
+    return (
+        q in {"isro", "indian space research organisation", "indian space research organization"}
+        or "isro" in q.split()
+        or "indian space research" in q
+    )
+
+
+def _news_relevance_score(title, source="", query="ISRO"):
+    """Conservative topic relevance score for ISRO-focused monitoring.
+
+    Free search/RSS endpoints occasionally return fuzzy matches. For an ISRO
+    monitoring run, a headline must contain an ISRO/mission anchor, come from
+    the official ISRO source, or contain a strong India-space-agency phrase.
+    """
+    if not _is_isro_topic_query(query):
+        return 1.0
+
+    text = _news_story_signature(title)
+    source_key = _source_key(source)
+    if not text:
+        return 0.0
+
+    if "isro" in source_key or source_key.startswith("isro "):
+        return 10.0
+
+    score = 0.0
+    for anchor in _NEWS_STRICT_TOPIC_ANCHORS:
+        a = _news_title_key(anchor)
+        if a and a in text:
+            score += 5.0 if a in {"isro", "indian space research organisation", "indian space research organization"} else 3.0
+
+    # A small number of legitimate headlines use only a descriptive phrase.
+    if (
+        "india" in text
+        and ("space agency" in text or "space programme" in text or "space program" in text)
+    ):
+        score += 2.5
+
+    return score
+
+
 def _near_duplicate_title(a, b):
-    aa, bb = _title_token_set(a), _title_token_set(b)
+    """Cross-publisher story similarity, intentionally stricter than clustering."""
+    sa = _news_story_signature(a)
+    sb = _news_story_signature(b)
+    if not sa or not sb:
+        return False
+    if sa == sb:
+        return True
+
+    aa, bb = _title_token_set(sa), _title_token_set(sb)
     if not aa or not bb:
         return False
-    j = len(aa & bb) / max(1, len(aa | bb))
-    containment = len(aa & bb) / max(1, min(len(aa), len(bb)))
-    return j >= 0.86 or containment >= 0.94
+
+    common = len(aa & bb)
+    union = len(aa | bb)
+    jaccard = common / max(1, union)
+    containment = common / max(1, min(len(aa), len(bb)))
+    sequence = SequenceMatcher(None, sa, sb).ratio()
+
+    # Strong exact-ish rephrasing.
+    if sequence >= 0.90:
+        return True
+
+    # Syndicated headlines with a few changed words or punctuation.
+    if jaccard >= 0.72 and containment >= 0.78:
+        return True
+
+    # One headline may contain a publisher-added clause around the same core.
+    if containment >= 0.88 and sequence >= 0.68:
+        return True
+
+    # Short headlines such as "'Leave ISRO ALONE!'" need a slightly different
+    # rule because a single appended source token materially changes Jaccard.
+    if min(len(aa), len(bb)) <= 5 and containment >= 0.80 and sequence >= 0.72:
+        return True
+
+    return False
 
 
-def _merge_news_frames(frames, max_records=150):
+def _story_quality_score(row):
+    """Choose the cleaner representative when several outlets repeat a story."""
+    title = str(row.get("text", "") or "")
+    source = str(row.get("username", "") or "")
+    sig = _news_story_signature(title)
+    score = 0.0
+
+    if source.lower().startswith("isro") or "official" in source.lower():
+        score += 8.0
+    if "isro" in sig:
+        score += 2.0
+    if 35 <= len(title) <= 180:
+        score += 1.0
+    if title.count("|") + title.count(" - ") <= 1:
+        score += 0.5
+    return score
+
+
+def deduplicate_news_for_analysis(
+    df,
+    query="ISRO",
+    max_records=150,
+    return_diagnostics=False,
+):
+    """Return topic-relevant, story-level unique News rows.
+
+    This is applied *after loading Supabase* as well as at fetch time. That is
+    important because older builds may already have persisted duplicate feed
+    rows under different external IDs or publisher names.
+    """
+    diagnostics = {
+        "input_rows": 0,
+        "irrelevant_removed": 0,
+        "exact_story_duplicates_removed": 0,
+        "near_story_duplicates_removed": 0,
+        "output_unique_stories": 0,
+    }
+
+    if df is None or df.empty:
+        empty = pd.DataFrame(columns=STANDARD_COLUMNS)
+        return (empty, diagnostics) if return_diagnostics else empty
+
+    work = normalize_posts(df).copy()
+    work = work[work["platform"].eq("web_news")].copy()
+    work = work.sort_values("timestamp", ascending=False).reset_index(drop=True)
+    diagnostics["input_rows"] = int(len(work))
+
+    # Relevance filtering prevents fuzzy search results such as unrelated
+    # examination/paper-leak stories from entering sentiment/clustering.
+    relevant_rows = []
+    for _, row in work.iterrows():
+        if _news_relevance_score(
+            row.get("text", ""),
+            row.get("username", ""),
+            query=query,
+        ) <= 0:
+            diagnostics["irrelevant_removed"] += 1
+            continue
+        relevant_rows.append(row.to_dict())
+
+    if not relevant_rows:
+        empty = pd.DataFrame(columns=STANDARD_COLUMNS)
+        return (empty, diagnostics) if return_diagnostics else empty
+
+    relevant = normalize_posts(pd.DataFrame(relevant_rows))
+    relevant = relevant.sort_values("timestamp", ascending=False).reset_index(drop=True)
+
+    representatives = []
+    signatures = []
+
+    for _, row in relevant.iterrows():
+        row_dict = row.to_dict()
+        sig = _news_story_signature(row_dict.get("text", ""))
+        if not sig:
+            continue
+
+        duplicate_idx = None
+        exact = False
+        for idx, existing_sig in enumerate(signatures):
+            if sig == existing_sig:
+                duplicate_idx = idx
+                exact = True
+                break
+            if _near_duplicate_title(sig, existing_sig):
+                duplicate_idx = idx
+                break
+
+        if duplicate_idx is None:
+            representatives.append(row_dict)
+            signatures.append(sig)
+            continue
+
+        if exact:
+            diagnostics["exact_story_duplicates_removed"] += 1
+        else:
+            diagnostics["near_story_duplicates_removed"] += 1
+
+        # If the later row is materially cleaner (for example official ISRO),
+        # use it as the representative without increasing analytical weight.
+        current = representatives[duplicate_idx]
+        if _story_quality_score(row_dict) > _story_quality_score(current):
+            representatives[duplicate_idx] = row_dict
+            signatures[duplicate_idx] = sig
+
+    result = (
+        normalize_posts(pd.DataFrame(representatives))
+        if representatives
+        else pd.DataFrame(columns=STANDARD_COLUMNS)
+    )
+    if not result.empty:
+        result = (
+            result.sort_values("timestamp", ascending=False)
+            .head(max(1, int(max_records)))
+            .reset_index(drop=True)
+        )
+
+    diagnostics["output_unique_stories"] = int(len(result))
+    return (result, diagnostics) if return_diagnostics else result
+
+
+def _merge_news_frames(frames, max_records=150, query="ISRO"):
+    """Merge feeds, remove irrelevant/fuzzy results, then dedupe story families."""
     usable = [f for f in frames if f is not None and not f.empty]
     if not usable:
         return pd.DataFrame(columns=STANDARD_COLUMNS)
+
     merged = normalize_posts(pd.concat(usable, ignore_index=True))
     merged = merged.sort_values("timestamp", ascending=False).reset_index(drop=True)
 
-    # Remove near-duplicate headlines from the same publisher/feed identity.
-    kept = []
-    by_source = {}
-    for _, row in merged.iterrows():
-        skey = _source_key(row.get("username"), row.get("source_url"))
-        existing_titles = by_source.setdefault(skey, [])
-        if any(_near_duplicate_title(row.get("text"), t) for t in existing_titles[:30]):
-            continue
-        existing_titles.append(str(row.get("text", "")))
-        kept.append(row.to_dict())
-    merged = normalize_posts(pd.DataFrame(kept)) if kept else pd.DataFrame(columns=STANDARD_COLUMNS)
-    if merged.empty:
-        return merged
+    unique = deduplicate_news_for_analysis(
+        merged,
+        query=query,
+        max_records=max_records,
+        return_diagnostics=False,
+    )
+    if unique.empty:
+        return unique
 
-    # Keep recency dominant but avoid allowing one publisher to consume the whole pack.
-    merged = merged.sort_values("timestamp", ascending=False)
-    cap = max(8, int(max_records * 0.35))
+    # Keep recency dominant but avoid one publisher consuming the whole pack.
+    cap = max(6, int(max_records * 0.30))
     selected = []
     source_counts = {}
     overflow = []
-    for _, row in merged.iterrows():
+    for _, row in unique.sort_values("timestamp", ascending=False).iterrows():
         skey = _source_key(row.get("username"), row.get("source_url"))
         if source_counts.get(skey, 0) < cap:
             selected.append(row.to_dict())
@@ -973,10 +1237,15 @@ def _merge_news_frames(frames, max_records=150):
             overflow.append(row.to_dict())
         if len(selected) >= max_records:
             break
+
     if len(selected) < max_records:
         selected.extend(overflow[: max_records - len(selected)])
-    return normalize_posts(pd.DataFrame(selected)).sort_values("timestamp", ascending=False).reset_index(drop=True)
 
+    return (
+        normalize_posts(pd.DataFrame(selected))
+        .sort_values("timestamp", ascending=False)
+        .reset_index(drop=True)
+    )
 
 def _news_query_variants(query):
     base = re.sub(r"\s+", " ", str(query or "ISRO")).strip() or "ISRO"
@@ -1020,7 +1289,7 @@ def fetch_free_news(query, timespan="24h", max_records=150):
         except Exception as exc:
             diag["errors"][f"Google:{q}"] = f"{type(exc).__name__}: {exc}"
     if google_rows:
-        gnews = _merge_news_frames(google_rows, max_records=120)
+        gnews = _merge_news_frames(google_rows, max_records=120, query=query)
         frames.append(gnews)
         diag["sources"]["Google News RSS"] = int(len(gnews))
 
@@ -1032,7 +1301,7 @@ def fetch_free_news(query, timespan="24h", max_records=150):
         except Exception as exc:
             diag["errors"][f"Bing:{q}"] = f"{type(exc).__name__}: {exc}"
     if bing_rows:
-        bnews = _merge_news_frames(bing_rows, max_records=60)
+        bnews = _merge_news_frames(bing_rows, max_records=60, query=query)
         frames.append(bnews)
         diag["sources"]["Bing News RSS"] = int(len(bnews))
 
@@ -1043,10 +1312,20 @@ def fetch_free_news(query, timespan="24h", max_records=150):
     except Exception as exc:
         diag["errors"]["ISRO official"] = f"{type(exc).__name__}: {exc}"
 
-    merged = _merge_news_frames(frames, max_records=max_records)
+    raw_candidate_count = int(sum(len(f) for f in frames if f is not None))
+    merged = _merge_news_frames(frames, max_records=max_records, query=query)
     merged = _filter_news_to_timespan(merged, timespan)
+    merged, final_quality = deduplicate_news_for_analysis(
+        merged,
+        query=query,
+        max_records=max_records,
+        return_diagnostics=True,
+    )
     merged = merged.head(max_records).reset_index(drop=True)
+    diag["raw_candidate_records"] = raw_candidate_count
+    diag["quality_filter"] = final_quality
     diag["final_unique_records"] = int(len(merged))
+    diag["final_unique_stories"] = int(len(merged))
     diag["publisher_count"] = int(merged["username"].nunique()) if len(merged) else 0
     diag["newest_timestamp"] = (
         merged["timestamp"].max().isoformat() if len(merged) else None
@@ -1655,7 +1934,17 @@ def top_sentiment_items(df, polarity="positive", limit=10, news=False):
         "sentiment_confidence", pd.Series(1.0, index=work.index)
     ).astype(float).clip(0.2, 1.0)
     if news:
-        # Confidence-weighted sentiment strength, then recency.
+        # Story-level dedupe is repeated here as a display safety net.
+        work = deduplicate_news_for_analysis(
+            work,
+            query="ISRO",
+            max_records=max(limit * 4, limit),
+        )
+        if work.empty:
+            return work
+        work["_rank_sentiment"] = work["sentiment_score"].astype(float) * work.get(
+            "sentiment_confidence", pd.Series(1.0, index=work.index)
+        ).astype(float).clip(0.2, 1.0)
         work = work.sort_values(
             ["_rank_sentiment", "timestamp"],
             ascending=[score_ascending, False],
@@ -2180,6 +2469,16 @@ def _report_top_items(dataframe, polarity, limit=10, news=False):
         "sentiment_confidence", pd.Series(1.0, index=work.index)
     ).astype(float).clip(0.2, 1.0)
     if news:
+        work = deduplicate_news_for_analysis(
+            work,
+            query="ISRO",
+            max_records=max(limit * 4, limit),
+        )
+        if work.empty:
+            return work
+        work["_rank_sentiment"] = work["sentiment_score"].astype(float) * work.get(
+            "sentiment_confidence", pd.Series(1.0, index=work.index)
+        ).astype(float).clip(0.2, 1.0)
         return work.sort_values(
             ["_rank_sentiment", "timestamp"],
             ascending=[score_asc, False],
@@ -3460,8 +3759,12 @@ def build_intelligence_report_pdf(report_df, alert_threshold=35.0, report_kind="
         elif report_kind == "news":
             freshness = (
                 f"Rolling News window: {int(run_context.get('news_window_hours', 24) or 24)} hours. "
-                f"New News this cycle: {int(run_context.get('news_new_count', 0) or 0)}. "
-                f"Retained News: {int(run_context.get('news_retained_count', 0) or 0)}. "
+                f"Unique story families analyzed: {int(run_context.get('news_window_count', 0) or 0)}. "
+                f"New story families this cycle: {int(run_context.get('news_new_count', 0) or 0)}. "
+                f"Duplicate/near-duplicate rows suppressed: "
+                f"{int(run_context.get('news_duplicates_removed', 0) or 0)}. "
+                f"Irrelevant fuzzy matches rejected: "
+                f"{int(run_context.get('news_irrelevant_removed', 0) or 0)}. "
                 f"Newest News: {run_context.get('news_latest_ist', 'n/a')}."
             )
         else:
@@ -3469,9 +3772,10 @@ def build_intelligence_report_pdf(report_df, alert_threshold=35.0, report_kind="
                 f"X: {run_context.get('x_data_mode', 'n/a')}; "
                 f"+{int(run_context.get('x_new_count', 0) or 0)} new this cycle; "
                 f"newest {run_context.get('x_latest_ist', 'n/a')}. "
-                f"News: +{int(run_context.get('news_new_count', 0) or 0)} new in a "
+                f"News: {int(run_context.get('news_window_count', 0) or 0)} unique story families in a "
                 f"{int(run_context.get('news_window_hours', 24) or 24)}h rolling window; "
-                f"{int(run_context.get('news_retained_count', 0) or 0)} retained."
+                f"+{int(run_context.get('news_new_count', 0) or 0)} new; "
+                f"{int(run_context.get('news_duplicates_removed', 0) or 0)} duplicate rows suppressed."
             )
         callout("Data freshness", freshness, bg="#FFF8E7", border="#D7B35C")
 
