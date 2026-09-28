@@ -1,4 +1,5 @@
 import base64
+import json
 import hashlib
 import io
 import math
@@ -21,8 +22,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import plotly.express as px
 import requests
+from bs4 import BeautifulSoup
 import xml.etree.ElementTree as ET
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urljoin, urlparse, parse_qs, unquote
 import streamlit as st
 import streamlit.components.v1 as components
 from streamlit_autorefresh import st_autorefresh
@@ -30,7 +32,9 @@ from sklearn.cluster import KMeans
 from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.metrics import silhouette_score, silhouette_samples
 from sklearn.preprocessing import Normalizer
+from scipy.sparse import hstack
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
@@ -55,7 +59,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
 
     st.title("📡 Social Media Intelligence Platform")
     st.caption(
-        "Build 5.16 — three intelligence PDFs + dual evidence packs + optional X collector"
+        "Build 5.17 — resilient source fusion + confidence-aware intelligence analysis"
     )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -590,26 +594,113 @@ def load_background_monitoring_runs(limit=336):
 # Primary: GDELT DOC 2.0
 # Fallback: Google News RSS
 # =========================================================
+
 def parse_gdelt_date(value):
     if not value:
         return pd.NaT
-
     value = str(value).strip()
-
     for fmt in ("%Y%m%dT%H%M%SZ", "%Y%m%d%H%M%S"):
         try:
             dt = datetime.strptime(value, fmt)
             return pd.Timestamp(dt, tz="UTC")
         except ValueError:
             pass
-
     return pd.to_datetime(value, errors="coerce", utc=True)
 
 
-def fetch_gdelt_news(query, timespan="1week", max_records=50):
-    max_records = int(max(10, min(100, max_records)))
+_LAST_NEWS_FETCH_DIAGNOSTICS = {}
 
-    response = requests.get(
+
+def _news_user_agent():
+    return {"User-Agent": "Mozilla/5.0 SocialMediaIntelligence/5.17"}
+
+
+def _request_get(url, *, params=None, timeout=45, retries=3):
+    last = None
+    for attempt in range(max(1, retries)):
+        try:
+            r = requests.get(
+                url,
+                params=params,
+                timeout=timeout,
+                headers=_news_user_agent(),
+                allow_redirects=True,
+            )
+            if r.status_code in (429, 500, 502, 503, 504) and attempt < retries - 1:
+                import time as _time
+                _time.sleep(1.2 * (attempt + 1))
+                last = RuntimeError(f"HTTP {r.status_code}")
+                continue
+            return r
+        except Exception as exc:
+            last = exc
+            if attempt < retries - 1:
+                import time as _time
+                _time.sleep(1.2 * (attempt + 1))
+    raise RuntimeError(f"Request failed: {type(last).__name__}: {last}")
+
+
+def _clean_news_title(title, source=""):
+    title = re.sub(r"\s+", " ", str(title or "")).strip()
+    source = re.sub(r"\s+", " ", str(source or "")).strip()
+    if source:
+        for sep in (" - ", " | ", " — ", " – "):
+            suffix = sep + source
+            if title.lower().endswith(suffix.lower()):
+                title = title[: -len(suffix)].strip()
+                break
+    return title
+
+
+def _news_title_key(title):
+    value = re.sub(r"https?://\S+", " ", str(title or "").lower())
+    value = re.sub(r"[^\w\u0900-\u097f]+", " ", value, flags=re.UNICODE)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def _source_key(source, url=""):
+    value = re.sub(r"\s+", " ", str(source or "").lower()).strip()
+    if value and value not in {"google news", "bing news", "news_source"}:
+        return value
+    try:
+        host = urlparse(str(url or "")).netloc.lower().replace("www.", "")
+        if host:
+            return host
+    except Exception:
+        pass
+    return value or "news_source"
+
+
+def _news_external_id(title, source, url=""):
+    material = _source_key(source, url) + "|" + _news_title_key(title)
+    return "news:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _news_row(title, source, timestamp, url, topic_seed="ISRO News"):
+    title = _clean_news_title(title, source)
+    ts = pd.to_datetime(timestamp, errors="coerce", utc=True)
+    if not title or pd.isna(ts):
+        return None
+    return {
+        "external_id": _news_external_id(title, source, url),
+        "platform": "web_news",
+        "timestamp": ts,
+        "username": str(source or "news_source").strip() or "news_source",
+        "text": title,
+        "hashtags": "",
+        "likes": 0,
+        "reposts": 0,
+        "replies": 0,
+        "followers": 0,
+        "source_url": str(url or "").strip(),
+        "topic_seed": topic_seed,
+    }
+
+
+def fetch_gdelt_news(query, timespan="24h", max_records=100):
+    max_records = int(max(10, min(250, max_records)))
+    response = _request_get(
         "https://api.gdeltproject.org/api/v2/doc/doc",
         params={
             "query": query,
@@ -620,529 +711,904 @@ def fetch_gdelt_news(query, timespan="1week", max_records=50):
             "format": "json",
         },
         timeout=45,
-        headers={
-            "User-Agent": "Mozilla/5.0 SocialMediaIntelligenceMVP/1.0"
-        },
+        retries=3,
     )
-
-    # Let the caller decide whether to fall back.
     if response.status_code == 429:
         raise RuntimeError("GDELT_RATE_LIMIT")
-
     if response.status_code != 200:
-        raise RuntimeError(
-            f"GDELT request failed with HTTP {response.status_code}."
-        )
-
+        raise RuntimeError(f"GDELT HTTP {response.status_code}")
     try:
         payload = response.json()
     except Exception as exc:
-        raise RuntimeError(
-            "GDELT did not return valid JSON."
-        ) from exc
+        raise RuntimeError("GDELT returned invalid JSON") from exc
 
-    articles = payload.get("articles", []) or []
     rows = []
-
-    for article in articles:
-        url = str(article.get("url", "") or "")
-        title = str(article.get("title", "") or "").strip()
-        domain = str(article.get("domain", "") or "").strip()
-        seen = parse_gdelt_date(article.get("seendate"))
-
-        if not title or pd.isna(seen):
-            continue
-
-        if not domain:
-            domain = "news_source"
-
-        rows.append({
-            "external_id": hashlib.sha256(
-                (url or (domain + "|" + title)).encode("utf-8")
-            ).hexdigest(),
-            "platform": "web_news",
-            "timestamp": seen,
-            "username": domain,
-            "text": title,
-            "hashtags": "",
-            "likes": 0,
-            "reposts": 0,
-            "replies": 0,
-            "followers": 0,
-            "source_url": url,
-            "topic_seed": "ISRO News",
-        })
-
+    for article in payload.get("articles", []) or []:
+        row = _news_row(
+            article.get("title"),
+            article.get("domain") or "news_source",
+            parse_gdelt_date(article.get("seendate")),
+            article.get("url") or "",
+            "ISRO News | GDELT",
+        )
+        if row:
+            rows.append(row)
     return normalize_posts(pd.DataFrame(rows))
 
 
-def fetch_google_news_rss(query, max_records=50):
+def fetch_google_news_rss(query, max_records=100):
     max_records = int(max(10, min(100, max_records)))
-
-    # Google News RSS search does not require an API key.
-    rss_url = (
-        "https://news.google.com/rss/search?"
-        f"q={quote_plus(query)}"
-        "&hl=en-IN&gl=IN&ceid=IN:en"
-    )
-
-    response = requests.get(
-        rss_url,
-        timeout=45,
-        headers={
-            "User-Agent": "Mozilla/5.0 SocialMediaIntelligenceMVP/1.0"
+    response = _request_get(
+        "https://news.google.com/rss/search",
+        params={
+            "q": query,
+            "hl": "en-IN",
+            "gl": "IN",
+            "ceid": "IN:en",
         },
+        timeout=45,
+        retries=2,
     )
-
     if response.status_code != 200:
-        raise RuntimeError(
-            f"Google News RSS failed with HTTP {response.status_code}."
-        )
-
+        raise RuntimeError(f"Google News RSS HTTP {response.status_code}")
     try:
         root = ET.fromstring(response.content)
     except Exception as exc:
-        raise RuntimeError(
-            "Google News RSS returned unreadable XML."
-        ) from exc
+        raise RuntimeError("Google News RSS returned unreadable XML") from exc
 
-    items = root.findall(".//item")
     rows = []
-
-    for item in items[:max_records]:
-        title = (item.findtext("title") or "").strip()
-        link = (item.findtext("link") or "").strip()
-        pub_date = (item.findtext("pubDate") or "").strip()
+    for item in root.findall(".//item")[:max_records]:
         source_node = item.find("source")
         source = (
             source_node.text.strip()
             if source_node is not None and source_node.text
             else "Google News"
         )
+        row = _news_row(
+            item.findtext("title") or "",
+            source,
+            item.findtext("pubDate") or "",
+            item.findtext("link") or "",
+            "ISRO News | Google News RSS",
+        )
+        if row:
+            rows.append(row)
+    return normalize_posts(pd.DataFrame(rows))
 
-        ts = pd.to_datetime(pub_date, errors="coerce", utc=True)
 
-        if not title or pd.isna(ts):
+def _unwrap_bing_news_url(link):
+    link = str(link or "").strip()
+    if not link:
+        return link
+    try:
+        parsed = urlparse(link)
+        qs = parse_qs(parsed.query)
+        for key in ("url", "u", "r"):
+            candidate = (qs.get(key) or [""])[0]
+            if candidate.startswith("http"):
+                return unquote(candidate)
+    except Exception:
+        pass
+    return link
+
+
+def fetch_bing_news_rss(query, max_records=50):
+    max_records = int(max(5, min(50, max_records)))
+    response = _request_get(
+        "https://www.bing.com/news/search",
+        params={
+            "q": query,
+            "format": "RSS",
+            "qft": 'sortbydate="1"',
+        },
+        timeout=35,
+        retries=2,
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"Bing News RSS HTTP {response.status_code}")
+    try:
+        root = ET.fromstring(response.content)
+    except Exception as exc:
+        raise RuntimeError("Bing News RSS returned unreadable XML") from exc
+
+    rows = []
+    for item in root.findall(".//item")[:max_records]:
+        title = (item.findtext("title") or "").strip()
+        link = _unwrap_bing_news_url(item.findtext("link") or "")
+        source = ""
+        for node in list(item):
+            tag = str(node.tag).lower()
+            if tag.endswith("source") and node.text:
+                source = node.text.strip()
+                break
+        if not source:
+            try:
+                source = urlparse(link).netloc.replace("www.", "") or "Bing News"
+            except Exception:
+                source = "Bing News"
+        row = _news_row(
+            title,
+            source,
+            item.findtext("pubDate") or "",
+            link,
+            "ISRO News | Bing News RSS",
+        )
+        if row:
+            rows.append(row)
+    return normalize_posts(pd.DataFrame(rows))
+
+
+def fetch_isro_official_press(max_records=40):
+    """Best-effort official ISRO press-release source; no API key required."""
+    url = "https://www.isro.gov.in/Press.html"
+    response = _request_get(url, timeout=40, retries=2)
+    if response.status_code != 200:
+        raise RuntimeError(f"ISRO Press HTTP {response.status_code}")
+    soup = BeautifulSoup(response.text, "html.parser")
+    rows = []
+    seen = set()
+    for tr in soup.find_all("tr"):
+        cells = tr.find_all(["td", "th"])
+        if len(cells) < 2:
             continue
-
-        rows.append({
-            "external_id": hashlib.sha256(
-                (link or (source + "|" + title)).encode("utf-8")
-            ).hexdigest(),
-            "platform": "web_news",
-            "timestamp": ts,
-            "username": source,
-            "text": title,
-            "hashtags": "",
-            "likes": 0,
-            "reposts": 0,
-            "replies": 0,
-            "followers": 0,
-            "source_url": link,
-            "topic_seed": "ISRO News",
-        })
-
+        texts = [re.sub(r"\s+", " ", c.get_text(" ", strip=True)) for c in cells]
+        joined = " | ".join(texts)
+        date = pd.NaT
+        date_idx = None
+        for idx, cell_text in enumerate(texts):
+            candidate = pd.to_datetime(cell_text, errors="coerce", utc=True)
+            if not pd.isna(candidate):
+                date = candidate
+                date_idx = idx
+                break
+        if pd.isna(date):
+            continue
+        title = ""
+        href = ""
+        for idx, cell in enumerate(cells):
+            if idx == date_idx:
+                continue
+            txt = re.sub(r"\s+", " ", cell.get_text(" ", strip=True)).strip()
+            if len(txt) > len(title) and len(txt) > 8 and not txt.isdigit():
+                title = txt
+                a = cell.find("a", href=True)
+                if a:
+                    href = urljoin(url, a.get("href"))
+        if not title:
+            continue
+        key = _news_title_key(title)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        row = _news_row(
+            title,
+            "ISRO (official)",
+            date,
+            href or url,
+            "ISRO Official Press Release",
+        )
+        if row:
+            rows.append(row)
+        if len(rows) >= max_records:
+            break
     return normalize_posts(pd.DataFrame(rows))
 
 
 def _filter_news_to_timespan(df, timespan):
-    """Apply the requested look-back locally as well as at the source."""
     if df is None or df.empty:
         return df
-
     span = str(timespan or "").strip().lower()
-    hours_map = {
-        "24h": 24,
-        "24hours": 24,
-        "1day": 24,
-        "1week": 24 * 7,
-        "7days": 24 * 7,
-        "1month": 24 * 31,
-        "30days": 24 * 30,
-    }
-    hours = hours_map.get(span)
-    if not hours:
-        return df
-
-    result = normalize_posts(df)
-    cutoff = pd.Timestamp.now(tz=IST) - pd.Timedelta(hours=hours)
-    return (
-        result[result["timestamp"] >= cutoff]
-        .sort_values("timestamp", ascending=False)
-        .reset_index(drop=True)
-    )
-
-
-def fetch_free_news(query, timespan="24h", max_records=50):
-    """
-    Try GDELT first. If GDELT rate-limits the host, automatically fall
-    back to Google News RSS. The requested look-back is also enforced
-    locally so the RSS fallback cannot leak older items into the dataset.
-    """
-    try:
-        df = fetch_gdelt_news(
-            query=query,
-            timespan=timespan,
-            max_records=max_records,
-        )
-        df = _filter_news_to_timespan(df, timespan)
-        return df, "GDELT"
-    except Exception as exc:
-        if str(exc) != "GDELT_RATE_LIMIT":
-            gdelt_error = str(exc)
+    m = re.fullmatch(r"(\d+)\s*(min|h|hours|d|days|w|weeks)", span)
+    if m:
+        amount = int(m.group(1))
+        unit = m.group(2)
+        if unit == "min":
+            hours = amount / 60
+        elif unit in {"h", "hours"}:
+            hours = amount
+        elif unit in {"d", "days"}:
+            hours = amount * 24
         else:
-            gdelt_error = "GDELT rate limit (HTTP 429)"
+            hours = amount * 24 * 7
+    else:
+        hours_map = {"24h": 24, "1day": 24, "1week": 168, "7days": 168, "1month": 744, "30days": 720}
+        hours = hours_map.get(span)
+    if not hours:
+        return normalize_posts(df)
+    result = normalize_posts(df)
+    cutoff = pd.Timestamp.now(tz=IST) - pd.Timedelta(hours=float(hours))
+    return result[result["timestamp"] >= cutoff].sort_values("timestamp", ascending=False).reset_index(drop=True)
 
-        fallback = fetch_google_news_rss(
-            query=query,
-            max_records=max_records,
-        )
-        fallback = _filter_news_to_timespan(fallback, timespan)
-        return fallback, f"Google News RSS fallback ({gdelt_error})"
+
+def _title_token_set(value):
+    stop = {"isro", "the", "a", "an", "of", "to", "in", "on", "for", "and", "with", "from", "by"}
+    return {
+        t for t in _news_title_key(value).split()
+        if len(t) > 2 and t not in stop
+    }
+
+
+def _near_duplicate_title(a, b):
+    aa, bb = _title_token_set(a), _title_token_set(b)
+    if not aa or not bb:
+        return False
+    j = len(aa & bb) / max(1, len(aa | bb))
+    containment = len(aa & bb) / max(1, min(len(aa), len(bb)))
+    return j >= 0.86 or containment >= 0.94
+
+
+def _merge_news_frames(frames, max_records=150):
+    usable = [f for f in frames if f is not None and not f.empty]
+    if not usable:
+        return pd.DataFrame(columns=STANDARD_COLUMNS)
+    merged = normalize_posts(pd.concat(usable, ignore_index=True))
+    merged = merged.sort_values("timestamp", ascending=False).reset_index(drop=True)
+
+    # Remove near-duplicate headlines from the same publisher/feed identity.
+    kept = []
+    by_source = {}
+    for _, row in merged.iterrows():
+        skey = _source_key(row.get("username"), row.get("source_url"))
+        existing_titles = by_source.setdefault(skey, [])
+        if any(_near_duplicate_title(row.get("text"), t) for t in existing_titles[:30]):
+            continue
+        existing_titles.append(str(row.get("text", "")))
+        kept.append(row.to_dict())
+    merged = normalize_posts(pd.DataFrame(kept)) if kept else pd.DataFrame(columns=STANDARD_COLUMNS)
+    if merged.empty:
+        return merged
+
+    # Keep recency dominant but avoid allowing one publisher to consume the whole pack.
+    merged = merged.sort_values("timestamp", ascending=False)
+    cap = max(8, int(max_records * 0.35))
+    selected = []
+    source_counts = {}
+    overflow = []
+    for _, row in merged.iterrows():
+        skey = _source_key(row.get("username"), row.get("source_url"))
+        if source_counts.get(skey, 0) < cap:
+            selected.append(row.to_dict())
+            source_counts[skey] = source_counts.get(skey, 0) + 1
+        else:
+            overflow.append(row.to_dict())
+        if len(selected) >= max_records:
+            break
+    if len(selected) < max_records:
+        selected.extend(overflow[: max_records - len(selected)])
+    return normalize_posts(pd.DataFrame(selected)).sort_values("timestamp", ascending=False).reset_index(drop=True)
+
+
+def _news_query_variants(query):
+    base = re.sub(r"\s+", " ", str(query or "ISRO")).strip() or "ISRO"
+    variants = [
+        base,
+        '"Indian Space Research Organisation"',
+        f'({base} OR "Indian Space Research Organisation") (launch OR mission OR satellite OR rocket OR Gaganyaan OR PSLV OR GSLV OR LVM3 OR NISAR)',
+    ]
+    out = []
+    for v in variants:
+        if v not in out:
+            out.append(v)
+    return out
+
+
+def get_last_news_fetch_diagnostics():
+    return dict(_LAST_NEWS_FETCH_DIAGNOSTICS)
+
+
+def fetch_free_news(query, timespan="24h", max_records=150):
+    """Multi-source, no-key news fusion with local recency filtering and dedupe."""
+    global _LAST_NEWS_FETCH_DIAGNOSTICS
+    max_records = int(max(20, min(200, max_records)))
+    frames = []
+    diag = {"timespan": timespan, "query": query, "sources": {}, "errors": {}}
+
+    gdelt_query = f'({query} OR "Indian Space Research Organisation")' if str(query).strip().upper() == "ISRO" else str(query)
+    try:
+        g = fetch_gdelt_news(gdelt_query, timespan=timespan, max_records=min(250, max_records * 2))
+        frames.append(g)
+        diag["sources"]["GDELT"] = int(len(g))
+    except Exception as exc:
+        diag["errors"]["GDELT"] = f"{type(exc).__name__}: {exc}"
+
+    variants = _news_query_variants(query)
+    google_rows = []
+    for q in variants:
+        try:
+            f = fetch_google_news_rss(q, max_records=100)
+            google_rows.append(f)
+        except Exception as exc:
+            diag["errors"][f"Google:{q}"] = f"{type(exc).__name__}: {exc}"
+    if google_rows:
+        gnews = _merge_news_frames(google_rows, max_records=120)
+        frames.append(gnews)
+        diag["sources"]["Google News RSS"] = int(len(gnews))
+
+    bing_rows = []
+    for q in variants[:2]:
+        try:
+            f = fetch_bing_news_rss(q, max_records=50)
+            bing_rows.append(f)
+        except Exception as exc:
+            diag["errors"][f"Bing:{q}"] = f"{type(exc).__name__}: {exc}"
+    if bing_rows:
+        bnews = _merge_news_frames(bing_rows, max_records=60)
+        frames.append(bnews)
+        diag["sources"]["Bing News RSS"] = int(len(bnews))
+
+    try:
+        official = fetch_isro_official_press(max_records=40)
+        frames.append(official)
+        diag["sources"]["ISRO official"] = int(len(official))
+    except Exception as exc:
+        diag["errors"]["ISRO official"] = f"{type(exc).__name__}: {exc}"
+
+    merged = _merge_news_frames(frames, max_records=max_records)
+    merged = _filter_news_to_timespan(merged, timespan)
+    merged = merged.head(max_records).reset_index(drop=True)
+    diag["final_unique_records"] = int(len(merged))
+    diag["publisher_count"] = int(merged["username"].nunique()) if len(merged) else 0
+    diag["newest_timestamp"] = (
+        merged["timestamp"].max().isoformat() if len(merged) else None
+    )
+    _LAST_NEWS_FETCH_DIAGNOSTICS = diag
+    source_text = "Fusion: " + ", ".join(
+        f"{k} {v}" for k, v in diag["sources"].items()
+    )
+    if diag["errors"]:
+        source_text += f"; {len(diag['errors'])} source/query warning(s)"
+    return merged, source_text
 
 
 # =========================================================
-# INTELLIGENCE AGENTS
+# INTELLIGENCE AGENTS — Build 5.17 confidence-aware ensemble
 # =========================================================
+_POSITIVE_LEXICON = {
+    "success": 1.3, "successful": 1.4, "successfully": 1.3, "achievement": 1.2,
+    "milestone": 1.1, "proud": 1.3, "congratulations": 1.4, "excellent": 1.4,
+    "great": 1.0, "historic": 1.0, "breakthrough": 1.3, "progress": 0.8,
+    "improved": 0.8, "improvement": 0.8, "ready": 0.5, "safe": 0.6,
+    "nominal": 0.7, "stable": 0.6, "recovered": 1.0, "resolved": 1.0,
+    "inaugurated": 0.5, "launched successfully": 1.6, "successful launch": 1.6,
+    "hot test successful": 1.5, "विश्वसनीय": 0.8, "सफल": 1.4, "सफलता": 1.3,
+    "गर्व": 1.3, "बधाई": 1.4, "उपलब्धि": 1.2, "शानदार": 1.2,
+    "safal": 1.3, "badhaai": 1.3, "garv": 1.1, "shandaar": 1.1,
+}
+_NEGATIVE_LEXICON = {
+    "fail": -1.3, "failed": -1.5, "failure": -1.5, "unsuccessful": -1.4,
+    "delay": -0.9, "delayed": -1.0, "postponed": -0.9, "abort": -1.4,
+    "aborted": -1.5, "anomaly": -1.0, "malfunction": -1.4, "problem": -0.8,
+    "issue": -0.6, "concern": -0.7, "concerns": -0.7, "risk": -0.8,
+    "crash": -1.6, "lost": -1.1, "loss": -1.1, "damage": -1.3,
+    "criticism": -0.9, "criticised": -0.9, "criticized": -0.9, "slams": -1.0,
+    "controversy": -0.8, "setback": -1.2, "error": -0.8, "uncertain": -0.6,
+    "unsafe": -1.1, "cancelled": -1.1, "canceled": -1.1, "warning": -0.7,
+    "विफल": -1.5, "असफल": -1.5, "देरी": -1.0, "चिंता": -0.8,
+    "समस्या": -0.9, "खतरा": -1.0, "दुर्घटना": -1.5, "नुकसान": -1.2,
+    "नाकाम": -1.4, "vifal": -1.4, "asafal": -1.4, "deri": -0.9,
+    "chinta": -0.7, "samasya": -0.8, "khatra": -1.0,
+}
+_NEGATORS = {"not", "no", "never", "without", "hardly", "isn't", "wasn't", " नहीं", "नहीं", "नही", "मत", "bina", "nahi"}
+_CONTRAST_RE = re.compile(r"\b(?:but|however|yet|although|though|nevertheless|लेकिन|मगर|पर)\b", re.I)
+_SARCASM_RE = re.compile(r"(?:/s\b|yeah\s+right|sure[,!. ]|as if\b|वाह\s+क्या)", re.I)
+_EMOJI_POLARITY = {"🚀": 0.8, "🎉": 1.0, "👏": 0.8, "❤️": 0.8, "❤": 0.8, "👍": 0.6, "🔥": 0.5, "😊": 0.7, "😀": 0.7, "😄": 0.7, "😢": -0.8, "😭": -1.0, "😡": -1.0, "🤬": -1.0, "👎": -0.7, "⚠": -0.5, "⚠️": -0.5, "💔": -0.9}
+
+
+def _analysis_text(value):
+    t = re.sub(r"https?://\S+", " ", str(value or ""))
+    t = re.sub(r"@([A-Za-z0-9_]+)", r" \1 ", t)
+    t = re.sub(r"#([\w_]+)", r" \1 ", t, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _detect_text_language(text):
+    t = str(text or "")
+    devanagari = len(re.findall(r"[\u0900-\u097F]", t))
+    latin = len(re.findall(r"[A-Za-z]", t))
+    if devanagari and latin:
+        return "Hindi/Mixed"
+    if devanagari:
+        return "Hindi/Indic"
+    return "English/Latin"
+
+
+def _lexicon_score(text):
+    t = _analysis_text(text).lower()
+    score = 0.0
+    hits = 0
+    for lexicon in (_POSITIVE_LEXICON, _NEGATIVE_LEXICON):
+        for phrase, weight in lexicon.items():
+            # Unicode-friendly boundary approximation.
+            pattern = r"(?<!\w)" + re.escape(phrase) + r"(?!\w)"
+            for match in re.finditer(pattern, t, flags=re.I):
+                prefix = t[max(0, match.start() - 26):match.start()]
+                negated = any(re.search(r"(?<!\w)" + re.escape(n.strip()) + r"(?!\w)", prefix) for n in _NEGATORS if n.strip())
+                score += (-0.85 * weight) if negated else weight
+                hits += 1
+    for emoji, weight in _EMOJI_POLARITY.items():
+        c = t.count(emoji)
+        if c:
+            score += weight * min(c, 2)
+            hits += min(c, 2)
+    return float(np.tanh(score / 3.0)), hits
+
+
+def _sentiment_one(text, platform=""):
+    clean = _analysis_text(text)
+    analyzer = SentimentIntensityAnalyzer()
+    vader = float(analyzer.polarity_scores(clean)["compound"])
+    lex, hits = _lexicon_score(clean)
+    score = 0.68 * vader + 0.32 * lex
+
+    parts = _CONTRAST_RE.split(clean)
+    if len(parts) > 1 and parts[-1].strip():
+        tail = parts[-1].strip()
+        tail_v = float(analyzer.polarity_scores(tail)["compound"])
+        tail_l, tail_hits = _lexicon_score(tail)
+        tail_score = 0.68 * tail_v + 0.32 * tail_l
+        score = 0.58 * score + 0.42 * tail_score
+        hits += tail_hits
+
+    # Headlines are often factual statements containing polarity-bearing words.
+    # Shrink weak News scores unless explicit evaluative cues are present.
+    platform = str(platform or "")
+    threshold = 0.12
+    if platform == "web_news":
+        threshold = 0.16
+        if hits == 0 and abs(vader) < 0.35:
+            score *= 0.72
+
+    score = float(max(-1.0, min(1.0, score)))
+    sarcasm = bool(_SARCASM_RE.search(clean))
+    sign_agreement = (vader * lex > 0.01) or (abs(lex) < 0.05)
+    lang = _detect_text_language(clean)
+    signal = min(1.0, hits / 3.0)
+
+    if abs(score) < threshold:
+        label = "Neutral"
+        confidence = 0.58 + 0.22 * (1 - min(1, abs(score) / max(threshold, 0.01)))
+        if hits >= 2 and abs(vader) > 0.2 and vader * lex < 0:
+            confidence -= 0.18
+    else:
+        label = "Positive" if score > 0 else "Negative"
+        confidence = 0.34 + 0.34 * abs(score) + 0.18 * float(sign_agreement) + 0.14 * signal
+
+    if sarcasm:
+        confidence *= 0.62
+    if len(clean) < 24:
+        confidence *= 0.88
+    if lang != "English/Latin" and hits == 0:
+        confidence *= 0.72
+    confidence = float(max(0.20, min(0.98, confidence)))
+
+    mag = abs(score)
+    if label == "Neutral":
+        strength = "Neutral"
+    elif mag >= 0.58:
+        strength = "Strong"
+    elif mag >= 0.30:
+        strength = "Moderate"
+    else:
+        strength = "Mild"
+
+    basis = "agreement" if sign_agreement else "mixed-signals"
+    if hits == 0 and abs(vader) < 0.1:
+        basis = "low-signal"
+    if sarcasm:
+        basis += "+sarcasm-flag"
+    return score, label, confidence, vader, lex, strength, basis, lang
+
+
 @st.cache_data
 def run_sentiment_agent(df):
-    analyzer = SentimentIntensityAnalyzer()
     result = df.copy()
-
-    result["sentiment_score"] = result["text"].apply(
-        lambda x: analyzer.polarity_scores(x)["compound"]
-    )
-
-    def label(score):
-        if score >= 0.05:
-            return "Positive"
-        if score <= -0.05:
-            return "Negative"
-        return "Neutral"
-
-    result["sentiment"] = result["sentiment_score"].apply(label)
+    values = [
+        _sentiment_one(row.get("text", ""), row.get("platform", ""))
+        for _, row in result.iterrows()
+    ]
+    if values:
+        cols = list(zip(*values))
+        result["sentiment_score"] = cols[0]
+        result["sentiment"] = cols[1]
+        result["sentiment_confidence"] = cols[2]
+        result["vader_score"] = cols[3]
+        result["lexical_score"] = cols[4]
+        result["sentiment_strength"] = cols[5]
+        result["sentiment_basis"] = cols[6]
+        result["analysis_language"] = cols[7]
+    else:
+        result["sentiment_score"] = pd.Series(dtype=float)
+        result["sentiment"] = pd.Series(dtype=str)
+        result["sentiment_confidence"] = pd.Series(dtype=float)
+        result["vader_score"] = pd.Series(dtype=float)
+        result["lexical_score"] = pd.Series(dtype=float)
+        result["sentiment_strength"] = pd.Series(dtype=str)
+        result["sentiment_basis"] = pd.Series(dtype=str)
+        result["analysis_language"] = pd.Series(dtype=str)
     return result
+
+
+_EMOTION_LEXICON = {
+    "Anger": ["angry", "furious", "outrage", "outraged", "unacceptable", "rage", "slams", "बेहद नाराज़", "गुस्सा", "naraz", "gussa"],
+    "Fear/Concern": ["worried", "worry", "concern", "concerned", "risk", "danger", "threat", "uncertain", "unsafe", "warning", "चिंता", "खतरा", "डर", "chinta", "khatra", "dar"],
+    "Joy": ["happy", "delighted", "excellent", "great", "congratulations", "celebrate", "celebration", "wonderful", "खुश", "बधाई", "khush", "badhaai"],
+    "Pride": ["proud", "pride", "historic", "milestone", "achievement", "inspiring", "गर्व", "उपलब्धि", "garv", "uplabdhi"],
+    "Sadness/Disappointment": ["sad", "disappointed", "disappointing", "setback", "regret", "loss", "दुख", "निराश", "निराशा", "dukh", "nirash"],
+    "Surprise": ["wow", "surprise", "surprised", "surprising", "unexpected", "astonishing", "चौंक", "अप्रत्याशित", "hairan"],
+    "Trust/Confidence": ["confident", "confidence", "reliable", "trusted", "trust", "assured", "nominal", "विश्वास", "भरोसा", "bharosa", "vishwas"],
+    "Anticipation": ["await", "awaiting", "expected", "upcoming", "soon", "ready for", "looking forward", "anticipat", "इंतजार", "उम्मीद", "intezar", "umeed"],
+    "Relief": ["relieved", "relief", "finally", "resolved", "recovered", "restored", "राहत", "समाधान", "rahat"],
+}
+
+
+def _emotion_scores(text):
+    t = _analysis_text(text).lower()
+    scores = {k: 0.0 for k in _EMOTION_LEXICON}
+    for emotion, terms in _EMOTION_LEXICON.items():
+        for term in terms:
+            pattern = r"(?<!\w)" + re.escape(term) + r"(?!\w)"
+            for m in re.finditer(pattern, t, flags=re.I):
+                prefix = t[max(0, m.start() - 24):m.start()]
+                negated = any(n.strip() and n.strip() in prefix.split()[-4:] for n in _NEGATORS)
+                scores[emotion] += 0.35 if negated else 1.0
+    # Emoji cues.
+    for emo, val in {"Joy": ["😀", "😄", "😊", "🎉", "👏", "❤️", "❤"], "Anger": ["😡", "🤬"], "Sadness/Disappointment": ["😢", "😭", "💔"], "Surprise": ["😮", "🤯"]}.items():
+        scores[emo] += sum(min(2, t.count(e)) * 0.8 for e in val)
+    if "!" in t:
+        top = max(scores, key=scores.get)
+        if scores[top] > 0:
+            scores[top] += min(0.5, t.count("!") * 0.12)
+    return scores
 
 
 @st.cache_data
 def run_emotion_agent(df):
-    emotion_terms = {
-        "Anger": [
-            "angry", "frustrated", "furious", "outrage",
-            "unacceptable", "criticism", "slams"
-        ],
-        "Fear/Worry": [
-            "worried", "concern", "concerned", "risk", "uncertain",
-            "failure", "problem", "issue", "delay"
-        ],
-        "Joy": [
-            "happy", "excellent", "great", "impressed", "proud",
-            "congratulations", "success", "successful"
-        ],
-        "Sadness/Disappointment": [
-            "disappointing", "disappointed", "sad", "setback"
-        ],
-        "Surprise": [
-            "wow", "surprise", "surprising", "unexpected"
-        ],
-        "Relief": [
-            "relieved", "finally", "resolved", "recovered"
-        ],
-    }
-
-    def classify(text):
-        t = text.lower()
-        scores = {
-            emotion: sum(1 for term in terms if term in t)
-            for emotion, terms in emotion_terms.items()
-        }
-        best = max(scores, key=scores.get)
-        return best if scores[best] > 0 else "Other/Neutral"
-
     result = df.copy()
-    result["emotion"] = result["text"].apply(classify)
+    primaries, secondaries, strengths, confidences, intensities = [], [], [], [], []
+    for _, row in result.iterrows():
+        scores = _emotion_scores(row.get("text", ""))
+        ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+        best_name, best = ranked[0]
+        second_name, second = ranked[1]
+        sent_mag = abs(float(row.get("sentiment_score", 0) or 0))
+        total = sum(scores.values())
+        if best < 0.75:
+            primary = "Other/Neutral"
+            secondary = ""
+            strength = 0.0
+            confidence = 0.62 if sent_mag < 0.18 else 0.45
+            intensity = min(1.0, 0.35 * sent_mag)
+        else:
+            primary = best_name
+            secondary = second_name if second >= max(0.75, best * 0.60) else ""
+            strength = min(1.0, best / 3.0)
+            margin = max(0.0, best - second)
+            confidence = min(0.97, 0.48 + 0.28 * strength + 0.20 * min(1.0, margin / max(best, 0.1)))
+            intensity = min(1.0, 0.60 * min(1.0, total / 4.0) + 0.40 * sent_mag)
+        if bool(_SARCASM_RE.search(str(row.get("text", "")))):
+            confidence *= 0.65
+        primaries.append(primary)
+        secondaries.append(secondary)
+        strengths.append(round(float(strength), 4))
+        confidences.append(round(float(max(0.2, confidence)), 4))
+        intensities.append(round(float(intensity), 4))
+    result["emotion"] = primaries
+    result["emotion_secondary"] = secondaries
+    result["emotion_score"] = strengths
+    result["emotion_confidence"] = confidences
+    result["emotional_intensity"] = intensities
     return result
 
 
-def run_semantic_topic_agent(df, requested_clusters=6):
+@st.cache_data
+def run_intent_agent(df):
     result = df.copy()
+    intents = []
+    confidences = []
+    for _, row in result.iterrows():
+        t = _analysis_text(row.get("text", "")).lower()
+        scores = {
+            "Question/Request": 2.0 if ("?" in t or re.search(r"\b(why|when|where|how|please|can|could|क्या|कब|क्यों|कैसे)\b", t)) else 0.0,
+            "Praise/Support": 1.5 if re.search(r"\b(proud|congratulations|great|excellent|support|salute|गर्व|बधाई|शानदार)\b", t) else 0.0,
+            "Concern/Criticism": 1.5 if re.search(r"\b(concern|worry|fail|failed|delay|criticism|unacceptable|problem|risk|चिंता|विफल|देरी|समस्या)\b", t) else 0.0,
+            "Speculation/Prediction": 1.5 if re.search(r"\b(may|might|could|likely|possibly|expect|prediction|rumou?r|perhaps|शायद|संभावना|umeed)\b", t) else 0.0,
+            "Humor/Sarcasm": 2.0 if _SARCASM_RE.search(t) else 0.0,
+            "Information/Update": 1.0,
+        }
+        if str(row.get("platform", "")) == "web_news":
+            scores["Information/Update"] += 0.7
+        best = max(scores, key=scores.get)
+        sorted_vals = sorted(scores.values(), reverse=True)
+        margin = sorted_vals[0] - sorted_vals[1] if len(sorted_vals) > 1 else sorted_vals[0]
+        intents.append(best)
+        confidences.append(round(float(min(0.95, 0.55 + 0.15 * margin)), 4))
+    result["intent"] = intents
+    result["intent_confidence"] = confidences
+    return result
 
-    if len(result) < 8:
-        result["semantic_cluster"] = 0
-        result["semantic_x"] = 0.0
-        result["semantic_y"] = 0.0
+
+def _semantic_clean(value):
+    t = _analysis_text(value).lower()
+    t = re.sub(r"\b(?:https|http|amp|rt)\b", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def run_semantic_topic_agent(df, requested_clusters=7):
+    result = df.copy()
+    n = len(result)
+    result["semantic_cluster"] = 0
+    result["semantic_x"] = 0.0
+    result["semantic_y"] = 0.0
+    result["cluster_confidence"] = 0.5
+    if n < 6:
         return result, None, None, np.array([])
 
-    vectorizer = TfidfVectorizer(
+    corpus = result["text"].map(_semantic_clean)
+    min_df = 1 if n < 25 else 2
+    word_vectorizer = TfidfVectorizer(
         stop_words="english",
         ngram_range=(1, 2),
-        min_df=2,
-        max_df=0.95,
+        min_df=min_df,
+        max_df=0.98,
+        max_features=5000,
+        sublinear_tf=True,
+        strip_accents="unicode",
     )
-
+    char_vectorizer = TfidfVectorizer(
+        analyzer="char_wb",
+        ngram_range=(3, 5),
+        min_df=2 if n >= 12 else 1,
+        max_features=3500,
+        sublinear_tf=True,
+    )
     try:
-        tfidf = vectorizer.fit_transform(result["text"])
+        word_tfidf = word_vectorizer.fit_transform(corpus)
+        char_tfidf = char_vectorizer.fit_transform(corpus)
+        combined = hstack([word_tfidf, char_tfidf * 0.45], format="csr")
     except ValueError:
-        result["semantic_cluster"] = 0
-        result["semantic_x"] = 0.0
-        result["semantic_y"] = 0.0
         return result, None, None, np.array([])
 
-    max_components = min(
-        10,
-        tfidf.shape[0] - 1,
-        tfidf.shape[1] - 1
-    )
-
+    max_components = min(16, combined.shape[0] - 1, combined.shape[1] - 1)
     if max_components < 2:
-        result["semantic_cluster"] = 0
-        result["semantic_x"] = 0.0
-        result["semantic_y"] = 0.0
-        return (
-            result,
-            vectorizer,
-            tfidf,
-            np.array(vectorizer.get_feature_names_out())
-        )
+        return result, word_vectorizer, word_tfidf, np.array(word_vectorizer.get_feature_names_out())
 
-    latent = TruncatedSVD(
-        n_components=max_components,
-        random_state=42
-    ).fit_transform(tfidf)
-
+    latent = TruncatedSVD(n_components=max_components, random_state=42).fit_transform(combined)
     latent = Normalizer(copy=False).fit_transform(latent)
 
-    cluster_count = max(
-        2,
-        min(requested_clusters, max(2, len(result) // 8))
-    )
-    cluster_count = min(cluster_count, len(result))
+    max_k = min(requested_clusters, max(2, int(round(math.sqrt(n)))), n - 1)
+    candidates = range(2, max_k + 1)
+    best = None
+    for k in candidates:
+        try:
+            model = KMeans(n_clusters=k, random_state=42, n_init=20).fit(latent)
+            labels = model.labels_
+            if len(set(labels)) < 2:
+                continue
+            sil = float(silhouette_score(latent, labels))
+            min_size = min(np.bincount(labels))
+            # discourage singleton/tiny clusters
+            adjusted = sil - (0.08 if min_size < 2 else 0.0)
+            if best is None or adjusted > best[0]:
+                best = (adjusted, sil, model, labels)
+        except Exception:
+            continue
 
-    labels = KMeans(
-        n_clusters=cluster_count,
-        random_state=42,
-        n_init=10
-    ).fit_predict(latent)
+    if best is None or (n >= 12 and best[1] < 0.045):
+        labels = np.zeros(n, dtype=int)
+        sil_samples = np.zeros(n)
+    else:
+        labels = best[3]
+        try:
+            sil_samples = silhouette_samples(latent, labels)
+        except Exception:
+            sil_samples = np.zeros(n)
 
     result["semantic_cluster"] = labels
     result["semantic_x"] = latent[:, 0]
-    result["semantic_y"] = (
-        latent[:, 1] if latent.shape[1] > 1 else 0.0
-    )
-
-    return (
-        result,
-        vectorizer,
-        tfidf,
-        np.array(vectorizer.get_feature_names_out())
-    )
+    result["semantic_y"] = latent[:, 1] if latent.shape[1] > 1 else 0.0
+    result["cluster_confidence"] = np.clip((np.asarray(sil_samples) + 1.0) / 2.0, 0.0, 1.0)
+    return result, word_vectorizer, word_tfidf, np.array(word_vectorizer.get_feature_names_out())
 
 
 def run_narrative_agent(df, vectorizer, tfidf, feature_names):
-    if (
-        vectorizer is None
-        or tfidf is None
-        or len(feature_names) == 0
-    ):
+    if vectorizer is None or tfidf is None or len(feature_names) == 0 or df.empty:
         return pd.DataFrame()
-
     narratives = []
     latest_time = df["timestamp"].max()
+    global_mean = np.asarray(tfidf.mean(axis=0)).ravel() + 1e-6
+    generic = {"isro", "india", "indian", "space", "research", "organisation", "organization", "says", "news"}
 
     for cluster_id in sorted(df["semantic_cluster"].unique()):
         mask = df["semantic_cluster"].eq(cluster_id).to_numpy()
         cluster_df = df[mask].copy()
         cluster_matrix = tfidf[mask]
+        mean_tfidf = np.asarray(cluster_matrix.mean(axis=0)).ravel()
+        distinctiveness = mean_tfidf * np.log1p(mean_tfidf / global_mean)
+        order = distinctiveness.argsort()[::-1]
+        top_terms = []
+        for i in order:
+            term = str(feature_names[i])
+            if distinctiveness[i] <= 0:
+                continue
+            if term.lower() in generic:
+                continue
+            top_terms.append(term)
+            if len(top_terms) >= 6:
+                break
+        if not top_terms:
+            top_terms = [str(feature_names[i]) for i in mean_tfidf.argsort()[::-1][:5] if mean_tfidf[i] > 0]
 
-        mean_tfidf = np.asarray(
-            cluster_matrix.mean(axis=0)
-        ).ravel()
-
-        top_indices = mean_tfidf.argsort()[::-1][:5]
-        top_terms = [
-            feature_names[i]
-            for i in top_indices
-            if mean_tfidf[i] > 0
-        ]
-
-        title = (
-            " / ".join(term.title() for term in top_terms[:3])
-            if top_terms
-            else f"Cluster {cluster_id}"
-        )
-
+        title = " / ".join(term.title() for term in top_terms[:3]) if top_terms else f"Cluster {cluster_id}"
         centroid = np.asarray(cluster_matrix.mean(axis=0))
-        similarities = cosine_similarity(
-            cluster_matrix, centroid
-        ).ravel()
-        representative = cluster_df.iloc[
-            int(np.argmax(similarities))
-        ]["text"]
+        similarities = cosine_similarity(cluster_matrix, centroid).ravel()
+        representative = cluster_df.iloc[int(np.argmax(similarities))]["text"]
 
-        recent = cluster_df[
-            cluster_df["timestamp"]
-            >= latest_time - pd.Timedelta(hours=12)
-        ]
-        previous = cluster_df[
-            (
-                cluster_df["timestamp"]
-                < latest_time - pd.Timedelta(hours=12)
-            )
-            & (
-                cluster_df["timestamp"]
-                >= latest_time - pd.Timedelta(hours=24)
-            )
-        ]
+        recent = cluster_df[cluster_df["timestamp"] >= latest_time - pd.Timedelta(hours=12)]
+        previous = cluster_df[(cluster_df["timestamp"] < latest_time - pd.Timedelta(hours=12)) & (cluster_df["timestamp"] >= latest_time - pd.Timedelta(hours=24))]
+        if len(previous) == 0:
+            growth = 100.0 if len(recent) >= 2 else 0.0
+            emerging = bool(len(recent) >= 2)
+        else:
+            growth = ((len(recent) - len(previous)) / len(previous)) * 100
+            emerging = False
 
-        growth = (
-            0.0
-            if len(previous) == 0
-            else (
-                (len(recent) - len(previous))
-                / len(previous)
-            ) * 100
-        )
+        conf = cluster_df.get("sentiment_confidence", pd.Series(1.0, index=cluster_df.index)).astype(float).clip(0.2, 1.0)
+        neg_weight = float(conf[cluster_df["sentiment"].eq("Negative")].sum())
+        weighted_neg = 100 * neg_weight / max(float(conf.sum()), 1e-9)
+        sentiment_index = 100 * float(np.average(cluster_df["sentiment_score"], weights=conf))
+        expressive = cluster_df[cluster_df.get("emotion", "Other/Neutral") != "Other/Neutral"] if "emotion" in cluster_df else pd.DataFrame()
+        dominant_emotion = expressive["emotion"].value_counts().idxmax() if len(expressive) else "Other/Neutral"
+        cohesion = 100 * float(cluster_df.get("cluster_confidence", pd.Series(0.5, index=cluster_df.index)).mean())
+        source_div = int(cluster_df["username"].nunique())
+        momentum = max(0.0, min(100.0, 0.55 * max(0.0, min(growth, 100.0)) + 0.45 * weighted_neg))
 
         narratives.append({
             "cluster": int(cluster_id),
             "narrative": title,
             "posts": len(cluster_df),
-            "negative_pct": round(
-                cluster_df["sentiment"]
-                .eq("Negative")
-                .mean() * 100,
-                1,
-            ),
-            "engagement": int(
-                cluster_df["engagement"].sum()
-            ),
-            "12h_growth_pct": round(
-                float(growth), 1
-            ),
+            "negative_pct": round(weighted_neg, 1),
+            "engagement": int(cluster_df.get("engagement", pd.Series(0, index=cluster_df.index)).sum()),
+            "12h_growth_pct": round(float(growth), 1),
             "top_terms": ", ".join(top_terms),
             "representative_post": representative,
+            "sentiment_index": round(sentiment_index, 1),
+            "dominant_emotion": dominant_emotion,
+            "cohesion_pct": round(cohesion, 1),
+            "source_diversity": source_div,
+            "momentum_score": round(momentum, 1),
+            "is_emerging": emerging,
         })
-
-    return (
-        pd.DataFrame(narratives)
-        .sort_values(
-            ["12h_growth_pct", "posts"],
-            ascending=[False, False]
-        )
-        .reset_index(drop=True)
-    )
+    return pd.DataFrame(narratives).sort_values(["momentum_score", "posts"], ascending=[False, False]).reset_index(drop=True)
 
 
 def run_trend_agent(df):
-    if df.empty:
-        return pd.DataFrame(
-            columns=[
-                "hour", "posts", "rolling_avg",
-                "anomaly_score", "is_anomaly"
-            ]
-        )
-
-    hourly = (
-        df.groupby(df["timestamp"].dt.floor("h"))
-        .size()
-        .reset_index(name="posts")
-    )
-    hourly.columns = ["hour", "posts"]
-
-    hourly["rolling_avg"] = (
-        hourly["posts"]
-        .rolling(6, min_periods=2)
-        .mean()
-        .shift(1)
-    )
-
-    def score(row):
-        baseline = row["rolling_avg"]
-        if pd.isna(baseline) or baseline <= 0:
-            return 0.0
-        return row["posts"] / baseline
-
-    hourly["anomaly_score"] = hourly.apply(
-        score, axis=1
-    )
-    hourly["is_anomaly"] = (
-        hourly["anomaly_score"] >= 2.0
-    )
-    return hourly
+    cols = ["hour", "posts", "rolling_avg", "anomaly_score", "robust_z", "is_anomaly"]
+    if df is None or df.empty:
+        return pd.DataFrame(columns=cols)
+    hourly = df.groupby(df["timestamp"].dt.floor("h")).size()
+    full_index = pd.date_range(hourly.index.min(), hourly.index.max(), freq="h", tz=hourly.index.tz)
+    hourly = hourly.reindex(full_index, fill_value=0).rename("posts").reset_index().rename(columns={"index": "hour"})
+    history = hourly["posts"].shift(1)
+    baseline = history.rolling(12, min_periods=3).median()
+    mad = history.rolling(12, min_periods=3).apply(lambda x: float(np.median(np.abs(x - np.median(x)))), raw=True)
+    hourly["rolling_avg"] = baseline
+    hourly["anomaly_score"] = hourly.apply(lambda r: 0.0 if pd.isna(r["rolling_avg"]) else float(r["posts"] / max(0.5, r["rolling_avg"])), axis=1)
+    denom = 1.4826 * mad.replace(0, np.nan)
+    robust_z = (hourly["posts"] - baseline) / denom
+    robust_z = robust_z.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    hourly["robust_z"] = robust_z
+    hourly["is_anomaly"] = ((hourly["robust_z"] >= 3.0) & (hourly["posts"] >= 2)) | ((hourly["anomaly_score"] >= 2.5) & (hourly["posts"] >= 3))
+    return hourly[cols]
 
 
-def run_risk_agent(df, trend_df, narratives):
-    if df.empty:
+def _weighted_sentiment_shares(df):
+    if df is None or df.empty:
+        return {"Positive": 0.0, "Neutral": 0.0, "Negative": 0.0}
+    weights = df.get("sentiment_confidence", pd.Series(1.0, index=df.index)).astype(float).clip(0.2, 1.0)
+    denom = max(float(weights.sum()), 1e-9)
+    return {label: 100.0 * float(weights[df["sentiment"].eq(label)].sum()) / denom for label in ("Positive", "Neutral", "Negative")}
+
+
+def compute_intelligence_summary(df, narratives=None, trend_df=None):
+    if df is None or df.empty:
         return {
-            "risk": 0,
-            "negative_pct": 0,
-            "recent_growth_pct": 0,
+            "weighted_positive_pct": 0.0, "weighted_neutral_pct": 0.0, "weighted_negative_pct": 0.0,
+            "raw_negative_pct": 0.0, "sentiment_index": 0.0, "sentiment_confidence_pct": 0.0,
+            "dominant_emotion": "Other/Neutral", "emotional_intensity_pct": 0.0,
+            "source_diversity_pct": 0.0, "narrative_concentration_pct": 0.0,
+            "volume_velocity_pct": 0.0, "negative_velocity_pct": 0.0,
+            "max_robust_anomaly_z": 0.0, "attention_index": 0, "assessment_confidence": 0,
+            "strong_negative_pct": 0.0,
         }
+    shares = _weighted_sentiment_shares(df)
+    weights = df.get("sentiment_confidence", pd.Series(1.0, index=df.index)).astype(float).clip(0.2, 1.0)
+    sentiment_index = 100.0 * float(np.average(df["sentiment_score"].astype(float), weights=weights))
+    raw_negative = 100.0 * float(df["sentiment"].eq("Negative").mean())
+    strong_negative = 100.0 * float(((df["sentiment_score"] <= -0.45) & (weights >= 0.55)).mean())
 
-    negative_pct = (
-        df["sentiment"].eq("Negative").mean() * 100
+    expressive = df[df.get("emotion", pd.Series("Other/Neutral", index=df.index)).ne("Other/Neutral")]
+    dominant_emotion = expressive["emotion"].value_counts().idxmax() if len(expressive) else "Other/Neutral"
+    emotional_intensity = 100.0 * float(df.get("emotional_intensity", pd.Series(0.0, index=df.index)).astype(float).mean())
+    avg_sent_conf = 100.0 * float(weights.mean())
+
+    source_counts = df["username"].fillna("Unknown").astype(str).value_counts()
+    if len(source_counts) <= 1:
+        source_div = 0.0
+    else:
+        p = source_counts / source_counts.sum()
+        entropy = -float((p * np.log(p)).sum())
+        source_div = 100.0 * entropy / max(np.log(len(p)), 1e-9)
+
+    if "semantic_cluster" in df and len(df):
+        narrative_concentration = 100.0 * float(df["semantic_cluster"].value_counts(normalize=True).iloc[0])
+    else:
+        narrative_concentration = 100.0
+
+    latest = df["timestamp"].max()
+    recent = df[df["timestamp"] >= latest - pd.Timedelta(hours=6)]
+    previous = df[(df["timestamp"] < latest - pd.Timedelta(hours=6)) & (df["timestamp"] >= latest - pd.Timedelta(hours=12))]
+    volume_velocity = 0.0 if len(previous) == 0 else 100.0 * (len(recent) - len(previous)) / len(previous)
+    recent_neg = float(recent["sentiment"].eq("Negative").sum())
+    prev_neg = float(previous["sentiment"].eq("Negative").sum())
+    negative_velocity = 0.0 if prev_neg == 0 else 100.0 * (recent_neg - prev_neg) / prev_neg
+
+    max_z = float(trend_df.get("robust_z", pd.Series(dtype=float)).max()) if trend_df is not None and len(trend_df) else 0.0
+    if not np.isfinite(max_z):
+        max_z = 0.0
+    negative_cluster_concentration = 0.0
+    neg_df = df[df["sentiment"].eq("Negative")]
+    if len(neg_df) and "semantic_cluster" in neg_df:
+        negative_cluster_concentration = 100.0 * float(neg_df["semantic_cluster"].value_counts(normalize=True).iloc[0])
+
+    neg_pressure = shares["Negative"]
+    anomaly_component = max(0.0, min(100.0, max_z * 18.0))
+    neg_velocity_component = max(0.0, min(100.0, negative_velocity))
+    attention = round(
+        0.43 * neg_pressure
+        + 0.17 * strong_negative
+        + 0.14 * negative_cluster_concentration * (neg_pressure / 100.0)
+        + 0.14 * anomaly_component * (0.35 + 0.65 * neg_pressure / 100.0)
+        + 0.12 * neg_velocity_component
     )
-    latest_time = df["timestamp"].max()
 
-    recent = df[
-        df["timestamp"]
-        >= latest_time - pd.Timedelta(hours=12)
-    ]
-    previous = df[
-        (
-            df["timestamp"]
-            < latest_time - pd.Timedelta(hours=12)
-        )
-        & (
-            df["timestamp"]
-            >= latest_time - pd.Timedelta(hours=24)
-        )
-    ]
-
-    growth = (
-        0
-        if len(previous) == 0
-        else (
-            (len(recent) - len(previous))
-            / len(previous)
-        ) * 100
-    )
-
-    anomaly_multiplier = (
-        float(trend_df["anomaly_score"].max())
-        if len(trend_df)
-        else 0
-    )
-
-    narrative_growth = (
-        max(
-            0.0,
-            float(narratives["12h_growth_pct"].max())
-        )
-        if len(narratives)
-        else 0.0
-    )
-
-    risk = round(
-        0.45 * negative_pct
-        + 0.20 * max(0, min(growth, 100))
-        + 0.20 * max(
-            0,
-            min((anomaly_multiplier - 1) * 50, 100)
-        )
-        + 0.15 * max(
-            0,
-            min(narrative_growth, 100)
-        )
-    )
+    now = pd.Timestamp.now(tz=IST)
+    latest_age_h = max(0.0, (now - latest).total_seconds() / 3600.0)
+    freshness = 100.0 if latest_age_h <= 2 else 85.0 if latest_age_h <= 6 else 70.0 if latest_age_h <= 12 else 55.0 if latest_age_h <= 24 else 30.0 if latest_age_h <= 72 else 10.0
+    sample_score = min(100.0, 100.0 * math.sqrt(len(df) / 50.0))
+    confidence = round(0.38 * avg_sent_conf + 0.27 * sample_score + 0.18 * source_div + 0.17 * freshness)
 
     return {
-        "risk": min(100, max(0, risk)),
-        "negative_pct": negative_pct,
-        "recent_growth_pct": growth,
+        "weighted_positive_pct": round(shares["Positive"], 2),
+        "weighted_neutral_pct": round(shares["Neutral"], 2),
+        "weighted_negative_pct": round(shares["Negative"], 2),
+        "raw_negative_pct": round(raw_negative, 2),
+        "sentiment_index": round(sentiment_index, 2),
+        "sentiment_confidence_pct": round(avg_sent_conf, 1),
+        "dominant_emotion": dominant_emotion,
+        "emotional_intensity_pct": round(emotional_intensity, 1),
+        "source_diversity_pct": round(source_div, 1),
+        "narrative_concentration_pct": round(narrative_concentration, 1),
+        "volume_velocity_pct": round(volume_velocity, 1),
+        "negative_velocity_pct": round(negative_velocity, 1),
+        "max_robust_anomaly_z": round(max_z, 2),
+        "attention_index": min(100, max(0, attention)),
+        "assessment_confidence": min(100, max(0, confidence)),
+        "strong_negative_pct": round(strong_negative, 2),
     }
 
 
+def run_risk_agent(df, trend_df, narratives):
+    summary = compute_intelligence_summary(df, narratives, trend_df)
+    return {
+        "risk": summary["attention_index"],
+        "negative_pct": summary["weighted_negative_pct"],
+        "raw_negative_pct": summary["raw_negative_pct"],
+        "recent_growth_pct": summary["volume_velocity_pct"],
+        "assessment_confidence": summary["assessment_confidence"],
+        "sentiment_index": summary["sentiment_index"],
+        "dominant_emotion": summary["dominant_emotion"],
+        "emotional_intensity_pct": summary["emotional_intensity_pct"],
+    }
 
 # =========================================================
 # TOP SENTIMENT BRIEFING HELPERS
@@ -1185,17 +1651,19 @@ def top_sentiment_items(df, polarity="positive", limit=10, news=False):
     if work.empty:
         return work
 
+    work["_rank_sentiment"] = work["sentiment_score"].astype(float) * work.get(
+        "sentiment_confidence", pd.Series(1.0, index=work.index)
+    ).astype(float).clip(0.2, 1.0)
     if news:
-        # News has no meaningful social engagement in this free feed,
-        # so rank by sentiment strength and then recency.
+        # Confidence-weighted sentiment strength, then recency.
         work = work.sort_values(
-            ["sentiment_score", "timestamp"],
+            ["_rank_sentiment", "timestamp"],
             ascending=[score_ascending, False],
         )
     else:
-        # For X/manual-X, use engagement as a secondary ranking signal.
+        # Confidence-weighted sentiment, then engagement and recency.
         work = work.sort_values(
-            ["sentiment_score", "engagement", "timestamp"],
+            ["_rank_sentiment", "engagement", "timestamp"],
             ascending=[score_ascending, False, False],
         )
 
@@ -1218,17 +1686,18 @@ def render_brief_list(df, polarity="positive", news=False):
         summary = brief_text(row.get("text", ""))
         source = str(row.get("username", "") or "Unknown")
         score = float(row.get("sentiment_score", 0.0))
+        confidence = float(row.get("sentiment_confidence", 0.0) or 0.0)
         engagement = int(row.get("engagement", 0) or 0)
 
         st.markdown(f"**{rank}. {summary}**")
 
         if news:
             st.caption(
-                f"Source: {source} · sentiment {score:+.2f}"
+                f"Source: {source} · sentiment {score:+.2f} · confidence {confidence:.0%}"
             )
         else:
             st.caption(
-                f"Source/user: {source} · sentiment {score:+.2f} · "
+                f"Source/user: {source} · sentiment {score:+.2f} · confidence {confidence:.0%} · "
                 f"engagement {engagement}"
             )
 
@@ -1446,6 +1915,22 @@ def _pdf_chart_emotions(dataframe):
     ax.grid(axis="x", alpha=0.2)
     fig.tight_layout()
     return _fig_to_png_buffer(fig)
+
+
+def _pdf_chart_intents(dataframe):
+    if dataframe is None or dataframe.empty or "intent" not in dataframe:
+        return None
+    counts = dataframe["intent"].fillna("Information/Update").value_counts().head(10)
+    fig, ax = plt.subplots(figsize=(8.2, 3.5))
+    ax.barh(counts.index[::-1], counts.values[::-1])
+    ax.set_title("Communication intent signals")
+    ax.set_xlabel("Records")
+    fig.tight_layout()
+    out = io.BytesIO()
+    fig.savefig(out, format="png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    out.seek(0)
+    return out
 
 
 def _pdf_chart_clusters(dataframe):
@@ -1691,62 +2176,23 @@ def _report_top_items(dataframe, polarity, limit=10, news=False):
     if work.empty:
         return work
 
+    work["_rank_sentiment"] = work["sentiment_score"].astype(float) * work.get(
+        "sentiment_confidence", pd.Series(1.0, index=work.index)
+    ).astype(float).clip(0.2, 1.0)
     if news:
         return work.sort_values(
-            ["sentiment_score", "timestamp"],
+            ["_rank_sentiment", "timestamp"],
             ascending=[score_asc, False],
         ).head(limit)
 
     return work.sort_values(
-        ["sentiment_score", "engagement", "timestamp"],
+        ["_rank_sentiment", "engagement", "timestamp"],
         ascending=[score_asc, False, False],
     ).head(limit)
 
 
 def _report_monitoring_score(dataframe, trend_frame, narrative_frame):
-    if dataframe is None or dataframe.empty:
-        return 0
-
-    negative_pct = dataframe["sentiment"].eq("Negative").mean() * 100
-    latest_time = dataframe["timestamp"].max()
-
-    recent = dataframe[
-        dataframe["timestamp"] >= latest_time - pd.Timedelta(hours=12)
-    ]
-    previous = dataframe[
-        (dataframe["timestamp"] < latest_time - pd.Timedelta(hours=12))
-        & (
-            dataframe["timestamp"]
-            >= latest_time - pd.Timedelta(hours=24)
-        )
-    ]
-
-    growth = (
-        0
-        if len(previous) == 0
-        else ((len(recent) - len(previous)) / len(previous)) * 100
-    )
-
-    anomaly = (
-        float(trend_frame["anomaly_score"].max())
-        if trend_frame is not None and len(trend_frame)
-        else 0.0
-    )
-
-    narrative_growth = (
-        max(0.0, float(narrative_frame["12h_growth_pct"].max()))
-        if narrative_frame is not None and len(narrative_frame)
-        else 0.0
-    )
-
-    score = round(
-        0.45 * negative_pct
-        + 0.20 * max(0, min(growth, 100))
-        + 0.20 * max(0, min((anomaly - 1) * 50, 100))
-        + 0.15 * max(0, min(narrative_growth, 100))
-    )
-    return min(100, max(0, score))
-
+    return int(compute_intelligence_summary(dataframe, narrative_frame, trend_frame)["attention_index"])
 
 def _prepare_news_evidence_frame(report_df):
     """Return Web News rows with stable evidence numbers (newest first)."""
@@ -2331,16 +2777,11 @@ def build_pdf_report(report_df, narrative_df, trend_df, alert_threshold=35.0):
     legends = [
         (
             "Sentiment",
-            "VADER compound score from -1 to +1. Positive is >= +0.05; "
-            "Negative is <= -0.05; values between are Neutral. For News this "
-            "is headline-framing sentiment, not a measurement of public opinion. "
-            "Sarcasm and multilingual text can reduce accuracy."
+            "Confidence-aware sentiment ensemble combining VADER, domain/event lexicons, negation, contrast, emoji and Hindi/roman-Hindi cues. News uses stricter neutral calibration and remains headline framing rather than public opinion."
         ),
         (
             "Emotion",
-            "Lightweight keyword/rule signals such as Anger, Fear/Worry, Joy, "
-            "Sadness/Disappointment, Surprise and Relief. 'Other/Neutral' means "
-            "no configured emotional cue was found."
+            "Multi-cue emotion analysis with primary/secondary emotion, confidence and intensity. Other/Neutral means evidence was insufficient for a specific emotion."
         ),
         (
             "Engagement",
@@ -2368,14 +2809,11 @@ def build_pdf_report(report_df, narrative_df, trend_df, alert_threshold=35.0):
         ),
         (
             "Trend anomaly",
-            "Hourly record volume divided by a rolling six-hour baseline. "
-            "The prototype marks >= 2.0x baseline as an anomaly."
+            "Hourly volume is compared with a rolling 12-hour median baseline and robust MAD z-score; sparse low-volume spikes require minimum absolute volume before being flagged."
         ),
         (
-            "Monitoring score",
-            "Prototype composite: 45% negative share + 20% recent growth + "
-            "20% anomaly component + 15% fastest narrative growth. It is a "
-            "triage aid, not a validated probability or official risk rating."
+            "Attention index",
+            "Confidence-weighted triage index combining negative pressure, strong negativity, negative-cluster concentration, robust anomaly and negative velocity. It is not a probability or official risk rating."
         ),
         (
             "Automatic monitoring",
@@ -2816,76 +3254,72 @@ def _source_summary_text(dataframe, limit=5):
 
 
 def _dominant_sentiment_text(dataframe, news=False):
-    counts = _sentiment_counts(dataframe)
-    total = int(counts.sum())
-    if total == 0:
+    if dataframe is None or dataframe.empty:
         return "No records were available for automated tone classification."
-    dominant = counts.idxmax()
-    share = _pct(counts[dominant], total)
-    label = "headline tone" if news else "sentiment"
+    s = compute_intelligence_summary(dataframe)
+    shares = {
+        "Positive": s["weighted_positive_pct"],
+        "Neutral": s["weighted_neutral_pct"],
+        "Negative": s["weighted_negative_pct"],
+    }
+    dominant = max(shares, key=shares.get)
+    label = "headline framing" if news else "sentiment"
     return (
-        f"{dominant} was the largest automated {label} category at {share:.1f}% "
-        f"({int(counts[dominant])} of {total} records)."
+        f"{dominant} is the largest confidence-weighted {label} category at "
+        f"{shares[dominant]:.1f}%. The overall sentiment index is "
+        f"{s['sentiment_index']:+.1f}/100 with analytical confidence "
+        f"{s['assessment_confidence']}/100."
     )
-
 
 def _cluster_takeaway_text(dataframe, narratives):
     if dataframe is None or dataframe.empty or narratives is None or narratives.empty:
-        return "The dataset was too small or sparse for a detailed multi-cluster narrative summary."
-    largest = narratives.sort_values(["posts", "12h_growth_pct"], ascending=[False, False]).iloc[0]
-    fastest = narratives.sort_values(["12h_growth_pct", "posts"], ascending=[False, False]).iloc[0]
+        return "The dataset was too small or semantically diffuse for a reliable multi-cluster narrative summary."
+    largest = narratives.sort_values(["posts", "momentum_score"], ascending=[False, False]).iloc[0]
+    fastest = narratives.sort_values(["momentum_score", "posts"], ascending=[False, False]).iloc[0]
     return (
         f"The largest cluster is C{int(largest['cluster'])} ({largest['narrative']}) with "
-        f"{int(largest['posts'])} records. The strongest 12-hour growth signal is C{int(fastest['cluster'])} "
-        f"at {float(fastest['12h_growth_pct']):+.1f}%."
+        f"{int(largest['posts'])} records and cohesion {float(largest.get('cohesion_pct', 0)):.0f}%. "
+        f"The strongest current narrative momentum is C{int(fastest['cluster'])} "
+        f"at {float(fastest.get('momentum_score', 0)):.0f}/100."
     )
-
 
 def _overall_conclusion_text(dataframe, narratives, alert_threshold, report_kind):
     if dataframe is None or dataframe.empty:
         return "No records were available in this reporting window, so no substantive intelligence conclusion can be drawn."
-
-    counts = _sentiment_counts(dataframe)
-    total = int(counts.sum())
-    neg_pct = _pct(counts["Negative"], total)
-    dom = counts.idxmax()
-    dom_pct = _pct(counts[dom], total)
+    trend = run_trend_agent(dataframe)
+    s = compute_intelligence_summary(dataframe, narratives, trend)
     alert_text = (
-        f"Negative share is {neg_pct:.1f}%, which is above the configured {alert_threshold:.0f}% monitoring threshold."
-        if neg_pct > alert_threshold
-        else f"Negative share is {neg_pct:.1f}%, below the configured {alert_threshold:.0f}% monitoring threshold."
+        f"Confidence-weighted negative share is {s['weighted_negative_pct']:.1f}%, above the configured {alert_threshold:.0f}% monitoring threshold."
+        if s["weighted_negative_pct"] > alert_threshold
+        else f"Confidence-weighted negative share is {s['weighted_negative_pct']:.1f}%, below the configured {alert_threshold:.0f}% monitoring threshold."
     )
-
     largest_text = ""
     if narratives is not None and not narratives.empty:
-        largest = narratives.sort_values(["posts", "12h_growth_pct"], ascending=[False, False]).iloc[0]
+        largest = narratives.sort_values(["posts", "momentum_score"], ascending=[False, False]).iloc[0]
         largest_text = (
             f" The largest narrative cluster is C{int(largest['cluster'])}, labelled "
-            f"'{_report_clean_text(largest['narrative'])}', containing {int(largest['posts'])} records."
+            f"'{_report_clean_text(largest['narrative'])}', with {int(largest['posts'])} records "
+            f"and cohesion {float(largest.get('cohesion_pct', 0)):.0f}%."
         )
-
     if report_kind == "news":
-        context = (
-            "For News, these sentiment values describe headline framing only; they are not a measure of public opinion."
-        )
+        context = " News values describe headline framing rather than public opinion."
     elif report_kind == "social":
-        engagement = int(dataframe.get("engagement", pd.Series(dtype=int)).sum())
-        context = f" Stored social engagement across the analyzed posts totals {engagement:,}."
+        context = f" Stored social engagement totals {int(dataframe.get('engagement', pd.Series(dtype=int)).sum()):,}."
     else:
         x_df = dataframe[dataframe["platform"].isin(["x", "x_manual"])]
         n_df = dataframe[dataframe["platform"].eq("web_news")]
-        social_neg = _pct(_sentiment_counts(x_df)["Negative"], len(x_df)) if len(x_df) else 0.0
-        news_neg = _pct(_sentiment_counts(n_df)["Negative"], len(n_df)) if len(n_df) else 0.0
+        xs = compute_intelligence_summary(x_df) if len(x_df) else None
+        ns = compute_intelligence_summary(n_df) if len(n_df) else None
         context = (
-            f" Cross-source comparison shows {social_neg:.1f}% negative social sentiment versus "
-            f"{news_neg:.1f}% negative News headline framing in the available records."
+            f" Cross-source weighted negative signals are {xs['weighted_negative_pct']:.1f}% for social and {ns['weighted_negative_pct']:.1f}% for News headline framing."
+            if xs and ns else ""
         )
-
     return (
-        f"{dom} is the largest automated tone category at {dom_pct:.1f}% of the analyzed records. "
-        f"{alert_text}{largest_text}{context} Automated outputs should be used for triage and analyst review, not as verified factual conclusions."
+        f"Sentiment index is {s['sentiment_index']:+.1f}/100; dominant expressive emotion is {s['dominant_emotion']} "
+        f"with mean emotional intensity {s['emotional_intensity_pct']:.1f}%. {alert_text} "
+        f"Attention index is {s['attention_index']}/100 and assessment confidence is {s['assessment_confidence']}/100."
+        f"{largest_text}{context} These are triage signals, not verified factual conclusions or probabilities."
     )
-
 
 def build_intelligence_report_pdf(report_df, alert_threshold=35.0, report_kind="combined", query="ISRO", run_context=None):
     """
@@ -3053,7 +3487,12 @@ def build_intelligence_report_pdf(report_df, alert_threshold=35.0, report_kind="
         [p("Positive", table_text), p(f"{int(counts['Positive']):,} ({_pct(counts['Positive'], total):.1f}%)", table_text)],
         [p("Neutral", table_text), p(f"{int(counts['Neutral']):,} ({_pct(counts['Neutral'], total):.1f}%)", table_text)],
         [p("Negative", table_text), p(f"{int(counts['Negative']):,} ({neg_pct:.1f}%)", table_text)],
-        [p("Monitoring score", table_text), p(f"{monitoring_score}/100", table_text)],
+        [p("Attention index", table_text), p(f"{monitoring_score}/100", table_text)],
+        [p("Assessment confidence", table_text), p(f"{compute_intelligence_summary(data, narratives, trend)['assessment_confidence']}/100", table_text)],
+        [p("Sentiment index", table_text), p(f"{compute_intelligence_summary(data, narratives, trend)['sentiment_index']:+.1f}/100", table_text)],
+        [p("Weighted negative", table_text), p(f"{compute_intelligence_summary(data, narratives, trend)['weighted_negative_pct']:.1f}%", table_text)],
+        [p("Dominant emotion", table_text), p(str(compute_intelligence_summary(data, narratives, trend)['dominant_emotion']), table_text)],
+        [p("Emotional intensity", table_text), p(f"{compute_intelligence_summary(data, narratives, trend)['emotional_intensity_pct']:.1f}%", table_text)],
         [p("Negative-share threshold", table_text), p(f"{alert_threshold:.0f}%", table_text)],
         [p("Semantic clusters", table_text), p(str(data['semantic_cluster'].nunique()) if total else "0", table_text)],
     ]
@@ -3099,7 +3538,8 @@ def build_intelligence_report_pdf(report_df, alert_threshold=35.0, report_kind="
         "What this section shows",
         "This section surfaces the strongest positive and negative items using deterministic ranking. It is intended to help an analyst decide what to inspect first, not to validate the underlying claims.",
     )
-    add_chart("Emotion signals", _pdf_chart_emotions(data), "Keyword/rule-based emotion cues; 'Other/Neutral' means no configured cue was found.")
+    add_chart("Emotion signals", _pdf_chart_emotions(data), "Confidence-aware multi-cue emotional signals; Other/Neutral means insufficient evidence for a specific emotion.")
+    add_chart("Communication intent signals", _pdf_chart_intents(data), "Heuristic communication intent classification: update, support, concern, question, speculation or humor/sarcasm.")
 
     if report_kind == "social":
         list_defs = [("Top 10 positive posts", "Positive"), ("Top 10 negative posts", "Negative")]
@@ -3204,14 +3644,18 @@ def build_intelligence_report_pdf(report_df, alert_threshold=35.0, report_kind="
     if report_kind == "combined" and total:
         story.append(p("Cross-source comparison", h2))
         cross_rows = [[p("Measure", table_head), p("X / social", table_head), p("Web News", table_head)]]
-        for label, cat in [("Positive", "Positive"), ("Neutral", "Neutral"), ("Negative", "Negative")]:
-            xc = _sentiment_counts(x_data)
-            nc = _sentiment_counts(news_data)
+        xs = compute_intelligence_summary(x_data) if len(x_data) else None
+        ns = compute_intelligence_summary(news_data) if len(news_data) else None
+        for label, key in [("Weighted positive", "weighted_positive_pct"), ("Weighted neutral", "weighted_neutral_pct"), ("Weighted negative", "weighted_negative_pct")]:
             cross_rows.append([
                 p(label, table_text),
-                p(f"{_pct(xc[cat], len(x_data)):.1f}% ({int(xc[cat])})" if len(x_data) else "n/a", table_text),
-                p(f"{_pct(nc[cat], len(news_data)):.1f}% ({int(nc[cat])})" if len(news_data) else "n/a", table_text),
+                p(f"{xs[key]:.1f}%" if xs else "n/a", table_text),
+                p(f"{ns[key]:.1f}%" if ns else "n/a", table_text),
             ])
+        cross_rows.extend([
+            [p("Sentiment index", table_text), p(f"{xs['sentiment_index']:+.1f}/100" if xs else "n/a", table_text), p(f"{ns['sentiment_index']:+.1f}/100" if ns else "n/a", table_text)],
+            [p("Assessment confidence", table_text), p(f"{xs['assessment_confidence']}/100" if xs else "n/a", table_text), p(f"{ns['assessment_confidence']}/100" if ns else "n/a", table_text)],
+        ])
         add_table(cross_rows, [58 * mm, 56 * mm, 56 * mm])
         story.append(p(
             "Interpretation: X/social sentiment and News headline framing are different signals. A divergence can be analytically useful, but it should not be read as a direct causal relationship.",
@@ -3220,13 +3664,14 @@ def build_intelligence_report_pdf(report_df, alert_threshold=35.0, report_kind="
 
     story.append(p("Methodology and limitations", h2))
     methodology = [
-        ("Sentiment", "VADER compound score: Positive >= +0.05, Negative <= -0.05, otherwise Neutral. News values describe headline framing; sarcasm and multilingual text may reduce accuracy."),
-        ("Emotion", "Lightweight rule/keyword signals. 'Other/Neutral' means no configured cue was detected."),
+        ("Sentiment", "Confidence-aware ensemble: VADER + domain/event lexicon + negation, contrast-clause, emoji and multilingual Hindi/roman-Hindi cues. News uses stricter neutral calibration. Each record has a confidence score; News remains headline framing, not public opinion."),
+        ("Emotion", "Multi-cue primary/secondary emotion analysis with strength, confidence and emotional intensity. Categories include Anger, Fear/Concern, Joy, Pride, Sadness/Disappointment, Surprise, Trust/Confidence, Anticipation and Relief."),
         ("Engagement", "For X/manual X: likes + reposts + replies from stored values. News engagement is not comparable and is normally zero."),
-        ("Clusters", "TF-IDF (1-2 grams, min_df=2, max_df=.95) -> TruncatedSVD -> normalization -> KMeans. Cluster IDs may change when the dataset changes."),
+        ("Clusters", "Word/bigram TF-IDF plus character n-grams -> TruncatedSVD -> normalization -> KMeans. Candidate cluster counts are selected using silhouette quality, with penalties for tiny clusters. Cluster IDs can change as data changes."),
         ("Narrative", "Derived from strongest cluster terms plus a representative record. It is shorthand for analyst navigation, not a verified claim."),
         ("Growth", "12-hour cluster volume compared with the preceding 12 hours; sparse windows can produce zero or volatile percentages."),
-        ("Monitoring score", "Prototype triage composite, not a probability, validated risk score or official assessment."),
+        ("Attention index", "Triage index combining confidence-weighted negative pressure, strong negativity, negative-cluster concentration, robust volume anomaly and negative velocity. It is not a probability or validated official risk score."),
+        ("Assessment confidence", "Quality indicator combining classifier confidence, sample adequacy, source diversity and recency. A low value means conclusions should be treated cautiously."),
         ("Evidence", "Use the separate Social Media and News evidence ZIPs to trace report items back to stored post/feed metadata and source URLs."),
     ]
     meth_rows = [[p("Method", table_head), p("Interpretation", table_head)]]
@@ -3866,6 +4311,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
         with st.spinner("Analyzing uploaded/loaded records..."):
             df = run_sentiment_agent(raw_df)
             df = run_emotion_agent(df)
+            df = run_intent_agent(df)
             df["engagement"] = (
                 df["likes"] + df["reposts"] + df["replies"]
             )
@@ -3887,11 +4333,8 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
             f"✅ Intelligence analysis complete for {len(df):,} loaded records."
         )
 
-        overall_negative_pct = (
-            df["sentiment"].eq("Negative").mean() * 100
-            if len(df)
-            else 0.0
-        )
+        overall_intel = compute_intelligence_summary(df, narratives_df, trend_df)
+        overall_negative_pct = float(overall_intel["weighted_negative_pct"])
         snapshot_df = _record_monitor_snapshot(overall_negative_pct)
 
         alert_latched = bool(
@@ -3900,7 +4343,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
 
         if overall_negative_pct > alert_threshold:
             st.error(
-                f"🚨 NEGATIVITY ALERT: {overall_negative_pct:.1f}% negative, "
+                f"🚨 NEGATIVITY ALERT: {overall_negative_pct:.1f}% confidence-weighted negative, "
                 f"above the {alert_threshold:.0f}% threshold."
             )
             if not alert_latched:
@@ -4031,7 +4474,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
         f"{int(filtered['engagement'].sum()):,}",
     )
     c3.metric(
-        "Negative",
+        "Weighted negative",
         f"{risk_data['negative_pct']:.1f}%",
     )
     c4.metric(
@@ -4043,8 +4486,14 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
         len(filtered_narratives),
     )
     c6.metric(
-        "Monitoring score",
+        "Attention index",
         f"{risk_data['risk']}/100",
+    )
+    st.caption(
+        f"Assessment confidence: {risk_data['assessment_confidence']}/100 · "
+        f"Sentiment index: {risk_data['sentiment_index']:+.1f}/100 · "
+        f"Dominant expressive emotion: {risk_data['dominant_emotion']} · "
+        f"Emotional intensity: {risk_data['emotional_intensity_pct']:.1f}%"
     )
 
 
@@ -4542,17 +4991,16 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
         st.markdown(
             """
             **Sentiment**
-            - VADER compound score ranges from **-1 to +1**.
-            - **Positive:** score ≥ +0.05
-            - **Neutral:** between -0.05 and +0.05
-            - **Negative:** score ≤ -0.05
-            - For **News**, this represents *headline framing*, not public opinion.
-            - Sarcasm and multilingual text can reduce accuracy.
+            - Ensemble score combines **VADER + domain/event lexicon + negation + contrast + emoji + Hindi/roman-Hindi cues**.
+            - Each item gets a **sentiment confidence** score; low-confidence items have less influence on overall weighted percentages.
+            - News uses a stricter neutral calibration and represents **headline framing**, not public opinion.
+            - Sarcasm is flagged as uncertainty rather than automatically inverted.
 
             **Emotion**
-            - Lightweight rule-based signals: Anger, Fear/Worry, Joy,
-              Sadness/Disappointment, Surprise and Relief.
-            - **Other/Neutral** means no configured emotional cue was detected.
+            - Multi-cue primary/secondary emotion model: Anger, Fear/Concern, Joy, Pride,
+              Sadness/Disappointment, Surprise, Trust/Confidence, Anticipation and Relief.
+            - Emotion strength, confidence and overall emotional intensity are calculated.
+            - **Other/Neutral** means evidence was insufficient for a specific emotional label.
 
             **Semantic cluster**
             - An automatically discovered group of textually similar records.
@@ -4577,13 +5025,16 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
               12-hour period.
 
             **Trend anomaly**
-            - Hourly volume divided by a rolling six-hour baseline.
-            - This prototype flags roughly **2× baseline or higher**.
+            - Uses a continuous hourly series, rolling **12-hour median** baseline and robust MAD z-score.
+            - An anomaly requires strong deviation and a minimum absolute volume, reducing false spikes from sparse data.
 
-            **Monitoring score**
-            - Prototype triage score combining negative share, recent growth,
-              anomaly strength and narrative growth.
-            - It is **not** a validated probability or official risk rating.
+            **Attention index**
+            - Combines confidence-weighted negative pressure, strong negativity, negative-cluster concentration, robust anomalies and negative velocity.
+            - It is **not** a probability or official risk rating.
+
+            **Assessment confidence**
+            - Combines item-level classifier confidence, sample size, source diversity and recency.
+            - Low confidence means the interpretation should be treated more cautiously.
 
             **Top-10 sentiment briefs**
             - X: ranked by sentiment strength, then engagement and recency.
@@ -4674,7 +5125,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
     # =========================================================
     st.subheader("📄 Intelligence report pack")
     st.caption(
-        "Build 5.16 generates three cleaner reports: Social Media Intelligence, "
+        "Build 5.17 generates three cleaner reports: Social Media Intelligence, "
         "News Media Intelligence, and Combined Intelligence. Each analytical "
         "section includes a purpose statement and a section takeaway; cluster "
         "profiles explain why records were grouped. All timestamps are IST."
@@ -4909,7 +5360,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
             st.error(f"Report pack could not be generated: {type(exc).__name__}: {exc}")
 
     if st.session_state.get("report_pack_fp_v514") == report_fingerprint:
-        st.info("Latest Build 5.16 report pack is ready.")
+        st.info("Latest Build 5.17 report pack is ready.")
         c1, c2, c3 = st.columns(3)
         with c1:
             st.download_button(

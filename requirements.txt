@@ -8,3 +8,4 @@ requests
 reportlab
 matplotlib
 streamlit-autorefresh
+beautifulsoup4

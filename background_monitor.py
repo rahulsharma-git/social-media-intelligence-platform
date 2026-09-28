@@ -1,4 +1,4 @@
-"""Browser-independent 30-minute monitor for Build 5.14.2.
+"""Browser-independent 30-minute monitor for Build 5.17.
 
 Designed for GitHub Actions. It does not require an active Streamlit/Chrome
 session. Each run:
@@ -366,6 +366,7 @@ def _fmt_ts_ist(value):
 def build_analysis(raw_df: pd.DataFrame):
     df = core.run_sentiment_agent(raw_df)
     df = core.run_emotion_agent(df)
+    df = core.run_intent_agent(df)
     df["engagement"] = df["likes"] + df["reposts"] + df["replies"]
     df, vectorizer, tfidf, feature_names = core.run_semantic_topic_agent(df)
     narratives = core.run_narrative_agent(
@@ -390,6 +391,7 @@ def main() -> None:
     # separately so stored/manual X does not disappear merely because no
     # live X API token is configured.
     news_lookback_hours = max(1, env_int("BACKGROUND_LOOKBACK_HOURS", 24))
+    news_max_records = max(50, min(200, env_int("NEWS_MAX_RECORDS", 150)))
     x_fresh_hours = max(1, env_int("X_FRESH_HOURS", 24))
     x_fallback_max_posts = min(50, max(10, env_int("X_FALLBACK_MAX_POSTS", 50)))
     x_min_report_posts = max(10, env_int("X_MIN_REPORT_POSTS", env_int("X_MIN_POSTS", 10)))
@@ -405,7 +407,7 @@ def main() -> None:
         routine_recipients = parse_recipients("REPORT_RECIPIENTS")
     alert_recipients = parse_recipients("ALERT_RECIPIENTS")
 
-    print(f"Build 5.16.1 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
+    print(f"Build 5.17 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
     print(f"Trigger source: {trigger_source}")
     print(f"Slot: {slot_key}; query={query!r}; news_window={news_lookback_hours}h; x_fresh_window={x_fresh_hours}h")
 
@@ -459,7 +461,7 @@ def main() -> None:
         fresh_news, news_source = core.fetch_free_news(
             query=query,
             timespan="24h",
-            max_records=100,
+            max_records=news_max_records,
         )
         if len(fresh_news):
             fresh_news = core.normalize_posts(fresh_news)
@@ -472,6 +474,15 @@ def main() -> None:
             )
     except Exception as exc:
         print(f"WARNING: News refresh failed: {type(exc).__name__}: {exc}")
+
+    news_fetch_diag = core.get_last_news_fetch_diagnostics() if hasattr(core, "get_last_news_fetch_diagnostics") else {}
+    try:
+        (OUTPUT_DIR / "news_collection_summary.json").write_text(
+            json.dumps(news_fetch_diag, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        print(f"::warning::Could not write news_collection_summary.json: {exc}")
 
     combined_store = core.normalize_posts(pd.concat([stored, fresh_news], ignore_index=True))
 
@@ -551,10 +562,17 @@ def main() -> None:
 
     df, narratives, trend = build_analysis(raw)
 
-    positive_pct = float(df["sentiment"].eq("Positive").mean() * 100)
-    neutral_pct = float(df["sentiment"].eq("Neutral").mean() * 100)
-    negative_pct = float(df["sentiment"].eq("Negative").mean() * 100)
-    alert_triggered = negative_pct > alert_threshold
+    intel = core.compute_intelligence_summary(df, narratives, trend)
+    positive_pct = float(intel["weighted_positive_pct"])
+    neutral_pct = float(intel["weighted_neutral_pct"])
+    negative_pct = float(intel["weighted_negative_pct"])
+    raw_negative_pct = float(intel["raw_negative_pct"])
+    sentiment_index = float(intel["sentiment_index"])
+    assessment_confidence = int(intel["assessment_confidence"])
+    emotional_intensity_pct = float(intel["emotional_intensity_pct"])
+    dominant_emotion = str(intel["dominant_emotion"])
+    attention_index = int(intel["attention_index"])
+    alert_triggered = negative_pct > alert_threshold and len(df) >= 5
 
     x_records = int(df["platform"].isin(["x", "x_manual"]).sum())
     news_records = int(df["platform"].eq("web_news").sum())
@@ -609,6 +627,14 @@ def main() -> None:
         "news_latest_ist": _fmt_ts_ist(news_latest),
         "news_source": news_source,
         "news_window_hours": int(news_lookback_hours),
+        "weighted_negative_pct": round(negative_pct, 2),
+        "raw_negative_pct": round(raw_negative_pct, 2),
+        "sentiment_index": round(sentiment_index, 2),
+        "assessment_confidence": int(assessment_confidence),
+        "attention_index": int(attention_index),
+        "dominant_emotion": dominant_emotion,
+        "emotional_intensity_pct": round(emotional_intensity_pct, 1),
+        "news_fetch_diagnostics": news_fetch_diag,
     }
     stamp = now_ist.strftime("%Y%m%d_%H%M%S_IST")
     social_pdf = core.build_social_media_report(
@@ -669,9 +695,15 @@ def main() -> None:
         f"News new this cycle: {new_news_count:,}",
         f"News retained from prior fetches: {news_retained_count:,}",
         f"Newest News record: {_fmt_ts_ist(news_latest)}",
-        f"Positive: {positive_pct:.1f}%",
-        f"Neutral: {neutral_pct:.1f}%",
-        f"Negative: {negative_pct:.1f}%",
+        f"Confidence-weighted Positive: {positive_pct:.1f}%",
+        f"Confidence-weighted Neutral: {neutral_pct:.1f}%",
+        f"Confidence-weighted Negative: {negative_pct:.1f}%",
+        f"Raw negative label share: {raw_negative_pct:.1f}%",
+        f"Sentiment index: {sentiment_index:+.1f}/100",
+        f"Dominant expressive emotion: {dominant_emotion}",
+        f"Mean emotional intensity: {emotional_intensity_pct:.1f}%",
+        f"Attention index: {attention_index}/100",
+        f"Assessment confidence: {assessment_confidence}/100",
         f"Alert threshold: {alert_threshold:.1f}%",
         f"Free news source: {news_source}",
         f"Scheduler trigger: {trigger_source}",
@@ -700,7 +732,7 @@ def main() -> None:
         subject_prefix = "ALERT · " if alert_triggered else ""
         routine_subject = (
             f"{subject_prefix}ISRO Intelligence | "
-            f"Negative {negative_pct:.1f}% | "
+            f"Weighted Neg {negative_pct:.1f}% | "
             f"X {x_records} (+{x_new_count}) | "
             f"News {news_records} (+{new_news_count}) | "
             + now_ist.strftime("%d %b %Y %H:%M IST")
@@ -731,7 +763,7 @@ def main() -> None:
         ]
         if alert_pending:
             alert_subject = (
-                f"ALERT: ISRO negativity {negative_pct:.1f}% — "
+                f"ALERT: ISRO weighted negativity {negative_pct:.1f}% — "
                 + now_ist.strftime("%d %b %Y %H:%M IST")
             )
             result = send_email_individually(
@@ -768,7 +800,7 @@ def main() -> None:
         monitoring_upsert(run_record)
 
     summary = {
-        "build": "5.16.1",
+        "build": "5.17",
         "run_time_ist": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
         "slot_key": slot_key,
         "records": len(df),
@@ -785,6 +817,13 @@ def main() -> None:
         "positive_pct": round(positive_pct, 3),
         "neutral_pct": round(neutral_pct, 3),
         "negative_pct": round(negative_pct, 3),
+        "raw_negative_pct": round(raw_negative_pct, 3),
+        "sentiment_index": round(sentiment_index, 3),
+        "dominant_emotion": dominant_emotion,
+        "emotional_intensity_pct": round(emotional_intensity_pct, 2),
+        "attention_index": attention_index,
+        "assessment_confidence": assessment_confidence,
+        "news_fetch_diagnostics": news_fetch_diag,
         "alert_threshold": alert_threshold,
         "alert_triggered": alert_triggered,
         "crossed_up": crossed_up,
@@ -807,7 +846,7 @@ def main() -> None:
         [
             "# SMI Background Monitor",
             "",
-            f"- Build: **5.16.1**",
+            f"- Build: **5.17**",
             f"- Run time: **{now_ist:%Y-%m-%d %H:%M:%S IST}**",
             f"- Status: **{run_record['status']}**",
             f"- Records analyzed: **{len(df):,}**",
@@ -819,16 +858,22 @@ def main() -> None:
             f"- Web News in rolling {news_lookback_hours}h: **{news_records:,}**",
             f"- New News this cycle: **{new_news_count:,}**",
             f"- Retained News: **{news_retained_count:,}**",
-            f"- Positive: **{positive_pct:.1f}%**",
-            f"- Neutral: **{neutral_pct:.1f}%**",
-            f"- Negative: **{negative_pct:.1f}%**",
+            f"- Weighted Positive: **{positive_pct:.1f}%**",
+            f"- Weighted Neutral: **{neutral_pct:.1f}%**",
+            f"- Weighted Negative: **{negative_pct:.1f}%**",
+            f"- Raw negative label share: **{raw_negative_pct:.1f}%**",
+            f"- Sentiment index: **{sentiment_index:+.1f}/100**",
+            f"- Dominant expressive emotion: **{dominant_emotion}**",
+            f"- Emotional intensity: **{emotional_intensity_pct:.1f}%**",
+            f"- Attention index: **{attention_index}/100**",
+            f"- Assessment confidence: **{assessment_confidence}/100**",
             f"- Combined PDF: `{pdf_filename}`",
             f"- Social evidence PDFs: **{x_evidence_count}**",
             f"- News evidence PDFs: **{news_evidence_count}**",
             f"- Routine recipients delivered: **{len(routine_delivered)}**",
             f"- Alert recipients delivered: **{len(alert_delivered)}**",
             "",
-            "News collection default: **past 24 hours**.",
+            "News collection: **multi-source fusion over the past 24 hours by default**.",
             (
                 "Email errors: " + run_record["error"]
                 if run_record["error"]

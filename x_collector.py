@@ -1,4 +1,4 @@
-"""Build 5.16 — resilient free X fusion collector.
+"""Build 5.17 — resilient free X fusion collector.
 
 Three free acquisition paths are combined every run:
 
@@ -23,6 +23,7 @@ newest-first. The output target is minimum 10 when available, maximum 50.
 """
 from __future__ import annotations
 
+import base64
 import csv
 import hashlib
 import html as html_lib
@@ -30,12 +31,14 @@ from html.parser import HTMLParser
 import json
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 import xml.etree.ElementTree as ET
 
 import requests
+from bs4 import BeautifulSoup
 
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -65,6 +68,35 @@ def env_int(name, default):
 def env_bool(name, default=False):
     value = env(name, "true" if default else "false").lower()
     return value in {"1", "true", "yes", "on", "y"}
+
+
+def http_get(url, *, params=None, timeout=35, retries=3, headers=None):
+    merged_headers = {
+        "User-Agent": "Mozilla/5.0 SMI-Free-X/5.17",
+        "Accept-Language": "en-IN,en;q=0.9",
+    }
+    if headers:
+        merged_headers.update(headers)
+    last = None
+    for attempt in range(max(1, retries)):
+        try:
+            r = requests.get(
+                url,
+                params=params,
+                headers=merged_headers,
+                timeout=timeout,
+                allow_redirects=True,
+            )
+            if r.status_code in (429, 500, 502, 503, 504) and attempt < retries - 1:
+                last = RuntimeError(f"HTTP {r.status_code}")
+                time.sleep(1.1 * (attempt + 1))
+                continue
+            return r
+        except Exception as exc:
+            last = exc
+            if attempt < retries - 1:
+                time.sleep(1.1 * (attempt + 1))
+    raise RuntimeError(f"GET failed: {type(last).__name__}: {last}")
 
 
 def safe_int(value):
@@ -340,100 +372,125 @@ def load_url_inbox():
 # =====================================================================
 # METHOD 2 — free public web-index discovery
 # =====================================================================
+def _decode_bing_redirect(url):
+    value = html_lib.unescape(str(url or "")).strip()
+    if not value:
+        return value
+    try:
+        parsed = urlparse(value)
+        qs = parse_qs(parsed.query)
+        raw = (qs.get("u") or [""])[0]
+        if raw.startswith("a1"):
+            encoded = raw[2:]
+            encoded += "=" * (-len(encoded) % 4)
+            decoded = base64.urlsafe_b64decode(encoded.encode()).decode("utf-8", "ignore")
+            if decoded.startswith("http"):
+                return decoded
+        for key in ("url", "r"):
+            candidate = (qs.get(key) or [""])[0]
+            candidate = unquote(candidate)
+            if candidate.startswith("http"):
+                return candidate
+    except Exception:
+        pass
+    return value
+
+
+def _unwrap_search_url(url):
+    value = html_lib.unescape(str(url or "")).strip()
+    if not value:
+        return value
+    try:
+        parsed = urlparse(value)
+        qs = parse_qs(parsed.query)
+        if "duckduckgo.com" in parsed.netloc:
+            target = unquote((qs.get("uddg") or [""])[0])
+            if target.startswith("http"):
+                return target
+        if "bing.com" in parsed.netloc:
+            return _decode_bing_redirect(value)
+    except Exception:
+        pass
+    return value
+
+
 def extract_status_urls(text):
+    raw = html_lib.unescape(str(text or ""))
+    candidates = [raw]
+    if "<" in raw and ">" in raw:
+        try:
+            soup = BeautifulSoup(raw, "html.parser")
+            candidates.extend(a.get("href", "") for a in soup.find_all("a", href=True))
+        except Exception:
+            pass
+    candidates.extend(re.findall(r'https?://[^\s"\'<>]+', raw))
+
     found = []
-    for m in STATUS_RE.finditer(html_lib.unescape(str(text or ""))):
-        user = m.group("user")
-        post_id = m.group("id")
-        found.append(
-            f"https://x.com/{user}/status/{post_id}"
-            if user
-            else f"https://x.com/i/status/{post_id}"
-        )
-    return list(dict.fromkeys(found))
+    seen = set()
+    for candidate in candidates:
+        for value in (candidate, _unwrap_search_url(candidate), unquote(str(candidate))):
+            for m in STATUS_RE.finditer(html_lib.unescape(str(value or ""))):
+                user = m.group("user")
+                post_id = m.group("id")
+                url = f"https://x.com/{user}/status/{post_id}" if user else f"https://x.com/i/status/{post_id}"
+                if url not in seen:
+                    seen.add(url)
+                    found.append(url)
+    return found
 
 
 def search_queries(topic):
-    t = topic or "ISRO"
+    t = re.sub(r"\s+", " ", str(topic or "ISRO")).strip() or "ISRO"
     return [
-        f'site:x.com "{t}" /status/',
-        f'site:twitter.com "{t}" /status/',
-        'site:x.com "@isro" /status/',
-        'site:x.com "#ISRO" /status/',
-        'site:x.com/isro/status ISRO',
+        f'site:x.com "{t}" status',
+        f'site:x.com "#{t}" status',
+        'site:x.com "@isro" status',
+        'site:x.com "Indian Space Research Organisation" status',
+        'site:x.com/isro/status',
+        f'site:twitter.com "{t}" status',
+        f'site:x.com "{t}" launch',
+        f'site:x.com "{t}" mission',
+        f'site:x.com "{t}" satellite',
     ]
 
 
 def bing_rss(query):
-    r = requests.get(
+    r = http_get(
         "https://www.bing.com/search",
         params={"q": query, "format": "rss", "count": "50"},
-        headers={"User-Agent": "Mozilla/5.0 SMI-Free-X/5.16"},
         timeout=30,
+        retries=2,
     )
     if r.status_code != 200:
         raise RuntimeError(f"Bing RSS HTTP {r.status_code}")
     root = ET.fromstring(r.content)
     values = []
     for item in root.findall(".//item"):
-        values.extend(
-            [
-                item.findtext("link") or "",
-                item.findtext("title") or "",
-                item.findtext("description") or "",
-            ]
-        )
+        values.extend([item.findtext("link") or "", item.findtext("title") or "", item.findtext("description") or ""])
     return extract_status_urls("\n".join(values))
 
 
 def bing_html(query):
-    r = requests.get(
-        "https://www.bing.com/search",
-        params={"q": query, "count": "50"},
-        headers={"User-Agent": "Mozilla/5.0 SMI-Free-X/5.16"},
-        timeout=30,
-    )
+    r = http_get("https://www.bing.com/search", params={"q": query, "count": "50"}, timeout=30, retries=2)
     if r.status_code != 200:
         raise RuntimeError(f"Bing HTML HTTP {r.status_code}")
     return extract_status_urls(r.text)
 
 
 def ddg_html(query):
-    r = requests.get(
-        "https://html.duckduckgo.com/html/",
-        params={"q": query},
-        headers={"User-Agent": "Mozilla/5.0 SMI-Free-X/5.16"},
-        timeout=30,
-    )
+    r = http_get("https://html.duckduckgo.com/html/", params={"q": query}, timeout=30, retries=2)
     if r.status_code != 200:
         raise RuntimeError(f"DuckDuckGo HTML HTTP {r.status_code}")
-
-    text = html_lib.unescape(r.text)
-    urls = extract_status_urls(text)
-
-    # DDG often wraps outbound links in ?uddg=<encoded-url>.
-    for encoded in re.findall(r"[?&]uddg=([^&\"'>]+)", text):
-        try:
-            target = unquote(encoded)
-            urls.extend(extract_status_urls(target))
-        except Exception:
-            pass
-    return list(dict.fromkeys(urls))
+    return extract_status_urls(r.text)
 
 
-def discover_indexed_urls(topic, limit=150):
+def discover_indexed_urls(topic, limit=200):
     seen = set()
     urls = []
     diagnostics = []
-
     for query in search_queries(topic):
         qdiag = {"query": query}
-        engines = [
-            ("bing_rss", bing_rss),
-            ("bing_html", bing_html),
-            ("duckduckgo", ddg_html),
-        ]
-        for name, fn in engines:
+        for name, fn in [("bing_rss", bing_rss), ("bing_html", bing_html), ("duckduckgo", ddg_html)]:
             try:
                 found = fn(query)
                 qdiag[name] = len(found)
@@ -446,12 +503,18 @@ def discover_indexed_urls(topic, limit=150):
         diagnostics.append(qdiag)
         if len(urls) >= limit:
             break
-
-    urls.sort(
-        key=lambda u: snowflake_timestamp(status_parts(u)[1]) or "",
-        reverse=True,
-    )
+    urls.sort(key=lambda u: snowflake_timestamp(status_parts(u)[1]) or "", reverse=True)
     return urls[:limit], diagnostics
+
+
+def text_matches_topic(text, topic="ISRO"):
+    t = str(text or "").lower()
+    terms = {
+        str(topic or "isro").lower(),
+        "isro", "@isro", "#isro", "indian space research organisation",
+        "gaganyaan", "pslv", "gslv", "lvm3", "chandrayaan", "aditya-l1", "nisar",
+    }
+    return any(term and term in t for term in terms)
 
 
 # =====================================================================
@@ -507,11 +570,7 @@ def fetch_profile_timeline(handle):
         "https://syndication.twitter.com/srv/"
         f"timeline-profile/screen-name/{handle}"
     )
-    r = requests.get(
-        url,
-        headers={"User-Agent": "Mozilla/5.0 SMI-Free-X/5.16"},
-        timeout=45,
-    )
+    r = http_get(url, timeout=45, retries=3)
     if r.status_code != 200:
         return [], f"HTTP {r.status_code}"
 
@@ -549,14 +608,12 @@ def tweet_result(post_url):
         return None, "invalid status URL"
 
     # X's public embedded-post JSON endpoint currently accepts token=0.
-    r = requests.get(
+    r = http_get(
         "https://cdn.syndication.twimg.com/tweet-result",
         params={"id": post_id, "token": "0", "lang": "en"},
-        headers={
-            "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0 SMI-Free-X/5.16",
-        },
+        headers={"Accept": "application/json"},
         timeout=30,
+        retries=2,
     )
     if r.status_code != 200:
         return None, f"tweet-result HTTP {r.status_code}"
@@ -636,7 +693,7 @@ def oembed(post_url):
     last_error = ""
     for endpoint, target in endpoints:
         try:
-            r = requests.get(
+            r = http_get(
                 endpoint,
                 params={
                     "url": target,
@@ -644,8 +701,8 @@ def oembed(post_url):
                     "dnt": "true",
                     "hide_thread": "true",
                 },
-                headers={"User-Agent": "Mozilla/5.0 SMI-Free-X/5.16"},
                 timeout=30,
+                retries=2,
             )
             if r.status_code != 200:
                 last_error = f"{endpoint} HTTP {r.status_code}"
@@ -759,26 +816,35 @@ def main():
     csv_rows, csv_files = collect_csv_inbox()
     url_inbox = load_url_inbox()
 
-    # Method 2
-    indexed_urls, web_diag = discover_indexed_urls(topic, limit=150)
+    # Method 2: multiple public search indexes/query variants.
+    indexed_urls, web_diag = discover_indexed_urls(topic, limit=200)
 
-    # Method 3a: public profile timeline
+    # Method 3a: public profile timelines. In addition to configured official
+    # handles, expand into a bounded set of handles discovered from indexed
+    # status URLs, then retain only their topic-matching posts.
+    discovered_handles = []
+    for u in indexed_urls:
+        user, _ = status_parts(u)
+        if user and user.lower() not in {h.lower() for h in handles} and user.lower() not in {x.lower() for x in discovered_handles}:
+            discovered_handles.append(user)
+    discovered_limit = max(0, min(20, env_int("X_DISCOVERED_PROFILE_LIMIT", 12)))
+    expanded_handles = handles + discovered_handles[:discovered_limit]
+
     timeline_rows = []
     timeline_diag = {}
-    for handle in handles:
+    configured_lower = {h.lower() for h in handles}
+    for handle in expanded_handles:
         rows, err = fetch_profile_timeline(handle)
+        if handle.lower() not in configured_lower:
+            rows = [r for r in rows if text_matches_topic(r.get("text", ""), topic)]
         timeline_rows.extend(rows)
-        timeline_diag[handle] = {
-            "rows": len(rows),
-            "error": err or None,
-        }
+        timeline_diag[handle] = {"rows": len(rows), "error": err or None, "discovered": handle.lower() not in configured_lower}
     timeline_rows = merge_rows(timeline_rows)
 
-    # Method 3b: hydrate discovered/manual URLs
+    # Method 3b: hydrate discovered/manual status URLs. tweet-result is tried
+    # first, with public oEmbed as the fallback.
     candidate_urls = list(dict.fromkeys(url_inbox + indexed_urls))
-    hydrated, hydrate_diag, hydrate_failures = hydrate_urls(
-        candidate_urls, limit=150
-    )
+    hydrated, hydrate_diag, hydrate_failures = hydrate_urls(candidate_urls, limit=200)
 
     acquired = merge_rows(csv_rows, timeline_rows, hydrated)
     upserted = upsert(acquired) if acquired else 0
@@ -795,7 +861,7 @@ def main():
             if len(selected) >= min_posts
             else ("partial" if selected else "empty")
         ),
-        "mode": "free_x_fusion_v2",
+        "mode": "free_x_fusion_v3",
         "minimum_target": min_posts,
         "maximum_target": max_posts,
         "target_met": len(selected) >= min_posts,
@@ -810,6 +876,7 @@ def main():
             "csv_inbox_files": csv_files,
             "manual_url_inbox": len(url_inbox),
             "web_indexed_urls": len(indexed_urls),
+            "discovered_profile_handles": len(discovered_handles[:discovered_limit]),
             "profile_timeline_rows": len(timeline_rows),
             "hydrated_url_rows": len(hydrated),
         },
@@ -820,7 +887,7 @@ def main():
         "latest_csv": str(out_csv),
         "note": (
             f"Consolidated latest {len(selected)} real unique X rows "
-            "from stored/manual, public web index and X public embed/syndication."
+            "from stored/manual, expanded public web-index discovery and X public embed/syndication."
         ),
     }
     write_summary(summary)

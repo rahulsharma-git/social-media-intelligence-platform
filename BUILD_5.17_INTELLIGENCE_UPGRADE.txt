@@ -1,0 +1,204 @@
+BUILD 5.17 — SOURCE FUSION + CONFIDENCE-AWARE INTELLIGENCE
+
+Built directly on the supplied Build 5.16.1 X-zero hotfix.
+The 30-minute scheduler, Supabase persistence, Gmail delivery, three-PDF report
+pack and evidence ZIP architecture are preserved.
+
+1. X ACQUISITION — MORE RESILIENT FREE FUSION
+==============================================
+Existing methods remain:
+- Supabase/manual X + x_inbox/*.csv + x_urls.txt
+- public web-index discovery
+- public X profile syndication + tweet-result/oEmbed hydration
+
+Build 5.17 improvements:
+- retry/backoff on public-source requests
+- richer Bing redirect decoding, including base64-wrapped result URLs
+- broader query family for ISRO / #ISRO / @isro / full organisation name /
+  launch / mission / satellite
+- Bing RSS + Bing HTML + DuckDuckGo HTML remain combined
+- handles discovered from indexed X status URLs can have their public profile
+  timelines checked (bounded by X_DISCOVERED_PROFILE_LIMIT)
+- discovered-profile timeline rows are filtered back to ISRO/topic relevance
+- latest real unique pool remains minimum target 10 when available, maximum 50
+- no synthetic X rows and no paid X bearer token
+
+Important limitation:
+Free public indexes and X public embed/syndication are best-effort and can change
+or omit posts. Build 5.17 reports source diagnostics instead of pretending that
+free discovery is exhaustive.
+
+2. NEWS ACQUISITION — MULTI-SOURCE FUSION, NOT SINGLE FALLBACK
+==============================================================
+Build 5.16.1 used GDELT first and Google News RSS mainly as a fallback.
+Build 5.17 combines all available sources in the same run:
+- GDELT DOC API
+- Google News RSS with multiple query variants
+- Bing News RSS
+- official ISRO Press page
+
+Processing:
+- local rolling time filter (default 24h)
+- stable publisher/title fingerprints
+- near-duplicate headline suppression within the same publisher
+- publisher diversity cap so one outlet does not crowd out the report
+- newest-first final selection
+- output/news_collection_summary.json records source counts/errors
+
+Recommended variable:
+NEWS_MAX_RECORDS = 150
+
+3. SENTIMENT — CONFIDENCE-AWARE ENSEMBLE
+========================================
+Replaces plain VADER-only classification with a deterministic lightweight
+ensemble suitable for free GitHub/Streamlit deployment:
+- VADER base score
+- ISRO/mission/event domain lexicon
+- negation handling
+- contrast-clause weighting (but/however/yet/लेकिन/मगर)
+- emoji cues
+- Hindi + roman-Hindi lexical cues
+- stricter News/headline neutral calibration
+- sarcasm flag reduces confidence instead of blindly reversing polarity
+
+New analytical fields include:
+- sentiment_score
+- sentiment_confidence
+- vader_score
+- lexical_score
+- sentiment_strength
+- sentiment_basis
+- analysis_language
+
+Overall percentages now use sentiment-confidence weighting so weak/ambiguous
+classifications contribute less than strong, internally consistent ones.
+
+4. EMOTION — PRIMARY + SECONDARY + INTENSITY
+============================================
+Expanded emotional categories:
+- Anger
+- Fear/Concern
+- Joy
+- Pride
+- Sadness/Disappointment
+- Surprise
+- Trust/Confidence
+- Anticipation
+- Relief
+- Other/Neutral
+
+New fields:
+- emotion
+- emotion_secondary
+- emotion_score
+- emotion_confidence
+- emotional_intensity
+
+Other/Neutral now means insufficient evidence for a specific emotion, rather
+than simply no exact keyword match.
+
+5. COMMUNICATION INTENT
+=======================
+Adds a lightweight intent layer:
+- Information/Update
+- Praise/Support
+- Concern/Criticism
+- Question/Request
+- Speculation/Prediction
+- Humor/Sarcasm
+
+6. SEMANTIC CLUSTERING / NARRATIVE QUALITY
+==========================================
+Old approach:
+word TF-IDF -> SVD -> fixed-size heuristic KMeans.
+
+Build 5.17:
+- word/bigram TF-IDF + character n-grams
+- SVD + normalization
+- evaluates candidate K values with silhouette quality
+- penalizes tiny/singleton clusters
+- can use one cluster when separation is too weak instead of forcing false themes
+- cluster_confidence / cohesion estimate
+- narrative labels use terms distinctive to the cluster, reducing generic
+  ISRO/space terms
+- narrative momentum combines growth and weighted negativity
+- emerging narrative flag when a cluster appears without a prior-window base
+
+7. TREND / ANOMALY CORRECTNESS
+==============================
+Old anomaly logic used posts / rolling six-hour mean.
+Build 5.17 uses:
+- continuous hourly series (including zero-volume hours)
+- rolling 12-hour median baseline
+- MAD-based robust z-score
+- minimum absolute-volume requirements for anomaly flags
+This reduces false alarms on sparse datasets.
+
+8. OVERALL INTELLIGENCE / ALERTING
+==================================
+New summary metrics:
+- confidence-weighted Positive / Neutral / Negative
+- raw negative share (for audit)
+- sentiment index (-100 to +100)
+- strong negative share
+- dominant expressive emotion
+- emotional intensity
+- source diversity
+- narrative concentration
+- volume velocity
+- negative velocity
+- robust anomaly z-score
+- Attention Index (0-100)
+- Assessment Confidence (0-100)
+
+Attention Index is a triage signal — NOT a probability or validated official
+risk score. It is driven by weighted negativity, strong negative content,
+negative-cluster concentration, robust anomaly and negative velocity.
+
+Assessment Confidence combines classifier confidence, sample adequacy, source
+diversity and recency. Low-confidence runs are explicitly identified.
+
+Negativity alerts now use confidence-weighted negative share and require at
+least five analysed records.
+
+9. REPORTING
+============
+Three analytical PDFs remain:
+- Social Media Intelligence
+- News Media Intelligence
+- Combined Intelligence
+
+Build 5.17 adds to executive reporting:
+- Attention Index
+- Assessment Confidence
+- Sentiment Index
+- confidence-weighted negative share
+- dominant emotion
+- emotional intensity
+- communication-intent chart
+- weighted cross-source comparison
+
+Positive = BLUE, Negative = RED, Neutral = GREY remains unchanged.
+
+RECOMMENDED GITHUB ACTIONS VARIABLES
+====================================
+BACKGROUND_LOOKBACK_HOURS = 24
+NEWS_MAX_RECORDS = 150
+BACKGROUND_MAX_RECORDS = 1500
+
+X_MIN_POSTS = 10
+X_MIN_REPORT_POSTS = 10
+X_MAX_POSTS = 50
+X_FALLBACK_MAX_POSTS = 50
+X_FRESH_HOURS = 24
+X_FREE_TOPIC = ISRO
+X_PROFILE_HANDLES = isro
+X_DISCOVERED_PROFILE_LIMIT = 12
+X_ENABLE_WEB_INDEX = true
+X_ENABLE_OEMBED = true
+
+EMAIL_ONLY_ON_CHANGE = false
+NEGATIVITY_ALERT_THRESHOLD = 35
+
+No new secrets are required.
+No paid X API token is required.

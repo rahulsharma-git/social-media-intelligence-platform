@@ -209,3 +209,19 @@ endpoint, with oEmbed as fallback.
 `background_monitor.py` directly merges `output/x_latest_fused.csv` from the
 collector into the same analytics run, then uses up to the latest 50 X rows.
 Routine email subjects include the overall Negative percentage.
+
+## Build 5.17 — Source Fusion + Confidence-Aware Intelligence
+
+Build 5.17 is based on the supplied Build 5.16.1 hotfix. It preserves the
+working 30-minute scheduler and report/email architecture while upgrading both
+acquisition and analysis.
+
+News now fuses GDELT, Google News RSS, Bing News RSS and the official ISRO press
+page. X free fusion adds more robust public-index discovery, retry/backoff,
+redirect decoding and bounded expansion into topic-relevant public profile
+timelines discovered from indexed status URLs.
+
+Analysis now uses confidence-aware sentiment, richer emotion/intensity,
+communication intent, adaptive semantic clustering, robust anomaly detection,
+Attention Index and Assessment Confidence. See `BUILD_5.17_INTELLIGENCE_UPGRADE.txt`
+for full methodology and deployment variables.

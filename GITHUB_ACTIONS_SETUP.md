@@ -84,3 +84,32 @@ Build 5.13 turns the in-app Streamlit scheduler/email controls into optional
 fallback controls and disables them by default. Keep them off when GitHub
 Actions is enabled. `monitoring_runs` also remembers which recipients already
 received a given half-hour slot, so retries do not resend successful recipients.
+
+## Build 5.17 additional recommended variables
+
+Add/update under **Settings → Secrets and variables → Actions → Variables**:
+
+```text
+NEWS_MAX_RECORDS = 150
+X_DISCOVERED_PROFILE_LIMIT = 12
+```
+
+Existing recommended values remain:
+
+```text
+BACKGROUND_LOOKBACK_HOURS = 24
+BACKGROUND_MAX_RECORDS = 1500
+X_MIN_POSTS = 10
+X_MIN_REPORT_POSTS = 10
+X_MAX_POSTS = 50
+X_FALLBACK_MAX_POSTS = 50
+X_FRESH_HOURS = 24
+X_FREE_TOPIC = ISRO
+X_PROFILE_HANDLES = isro
+X_ENABLE_WEB_INDEX = true
+X_ENABLE_OEMBED = true
+EMAIL_ONLY_ON_CHANGE = false
+NEGATIVITY_ALERT_THRESHOLD = 35
+```
+
+Build 5.17 does not require an X bearer token.

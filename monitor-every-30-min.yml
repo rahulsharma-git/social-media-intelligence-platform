@@ -46,6 +46,7 @@ jobs:
       NEGATIVITY_ALERT_THRESHOLD: ${{ vars.NEGATIVITY_ALERT_THRESHOLD }}
       BACKGROUND_LOOKBACK_HOURS: ${{ vars.BACKGROUND_LOOKBACK_HOURS }}
       BACKGROUND_MAX_RECORDS: ${{ vars.BACKGROUND_MAX_RECORDS }}
+      NEWS_MAX_RECORDS: ${{ vars.NEWS_MAX_RECORDS }}
       FAIL_ON_EMAIL_ERROR: ${{ vars.FAIL_ON_EMAIL_ERROR }}
       FORCE_SEND: ${{ github.event_name == 'workflow_dispatch' && inputs.force_send || false }}
       TRIGGER_SOURCE: ${{ github.event_name == 'workflow_dispatch' && inputs.trigger_source || 'github-schedule' }}
@@ -55,6 +56,7 @@ jobs:
       X_ENABLE_WEB_INDEX: ${{ vars.X_ENABLE_WEB_INDEX }}
       X_ENABLE_OEMBED: ${{ vars.X_ENABLE_OEMBED }}
       X_PROFILE_HANDLES: ${{ vars.X_PROFILE_HANDLES }}
+      X_DISCOVERED_PROFILE_LIMIT: ${{ vars.X_DISCOVERED_PROFILE_LIMIT }}
       X_MIN_POSTS: ${{ vars.X_MIN_POSTS }}
       X_MIN_REPORT_POSTS: ${{ vars.X_MIN_REPORT_POSTS }}
       X_FRESH_HOURS: ${{ vars.X_FRESH_HOURS }}
@@ -72,7 +74,7 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Preflight - verify deployed Build 5.16.1 files
+      - name: Preflight - verify deployed Build 5.17 files
         shell: bash
         run: |
           echo "Trigger source: ${TRIGGER_SOURCE:-unknown}"
@@ -178,6 +180,14 @@ jobs:
             echo "- GitHub event: **${GITHUB_EVENT_NAME:-unknown}**"
             echo "- Completed (IST): **$(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M:%S %Z')**"
           } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -f output/news_collection_summary.json ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "## News Collector" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat output/news_collection_summary.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
           if [ -f output/github_step_summary.md ]; then
             cat output/github_step_summary.md >> "$GITHUB_STEP_SUMMARY"
