@@ -245,3 +245,10 @@ than raw RSS/feed rows. Near-identical headlines across publishers are collapsed
 before sentiment/emotion/clustering. Fuzzy off-topic results are rejected.
 This also cleans historical duplicate rows already present in Supabase without
 deleting audit data.
+
+
+## Build 5.17.3 — report dedup column-preservation hotfix
+
+Fixes `KeyError: sentiment_score` introduced by Build 5.17.2. Story-level News
+deduplication now preserves all enriched analysis columns used by sentiment,
+emotion, clustering, narratives, evidence generation and PDF ranking.

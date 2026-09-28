@@ -60,7 +60,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
 
     st.title("📡 Social Media Intelligence Platform")
     st.caption(
-        "Build 5.17.2 — story-level news deduplication + relevance-aware intelligence"
+        "Build 5.17.3 — dedup enrichment-preservation hotfix"
     )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -1127,7 +1127,36 @@ def deduplicate_news_for_analysis(
         empty = pd.DataFrame(columns=STANDARD_COLUMNS)
         return (empty, diagnostics) if return_diagnostics else empty
 
-    work = normalize_posts(df).copy()
+    # Normalize the canonical source columns, but preserve any analysis columns
+    # already attached to the frame (sentiment_score, sentiment_confidence,
+    # emotion, intent, semantic_cluster, engagement, etc.). Build 5.17.2
+    # accidentally discarded these columns by calling normalize_posts() inside
+    # the report-level deduper, causing KeyError: sentiment_score.
+    original = df.copy()
+    work = normalize_posts(original).copy()
+
+    extra_columns = [
+        c for c in original.columns
+        if c not in STANDARD_COLUMNS and c != "external_id"
+    ]
+    if (
+        extra_columns
+        and "external_id" in original.columns
+        and "external_id" in work.columns
+    ):
+        extras = original[["external_id"] + extra_columns].copy()
+        extras["external_id"] = extras["external_id"].fillna("").astype(str)
+        extras = extras[
+            extras["external_id"].str.strip().ne("")
+        ].drop_duplicates(subset=["external_id"], keep="first")
+        if not extras.empty:
+            work = work.merge(
+                extras,
+                on="external_id",
+                how="left",
+                validate="one_to_one",
+            )
+
     work = work[work["platform"].eq("web_news")].copy()
     work = work.sort_values("timestamp", ascending=False).reset_index(drop=True)
     diagnostics["input_rows"] = int(len(work))
@@ -1149,7 +1178,9 @@ def deduplicate_news_for_analysis(
         empty = pd.DataFrame(columns=STANDARD_COLUMNS)
         return (empty, diagnostics) if return_diagnostics else empty
 
-    relevant = normalize_posts(pd.DataFrame(relevant_rows))
+    # Do not normalize again here: the rows already carry canonical source
+    # columns plus any enriched analysis columns that must survive into reports.
+    relevant = pd.DataFrame(relevant_rows)
     relevant = relevant.sort_values("timestamp", ascending=False).reset_index(drop=True)
 
     representatives = []
@@ -1189,10 +1220,12 @@ def deduplicate_news_for_analysis(
             representatives[duplicate_idx] = row_dict
             signatures[duplicate_idx] = sig
 
+    # Preserve enriched analysis columns in the representative rows. Canonical
+    # source columns were already normalized at function entry.
     result = (
-        normalize_posts(pd.DataFrame(representatives))
+        pd.DataFrame(representatives)
         if representatives
-        else pd.DataFrame(columns=STANDARD_COLUMNS)
+        else pd.DataFrame(columns=list(work.columns))
     )
     if not result.empty:
         result = (
@@ -2464,6 +2497,9 @@ def _report_top_items(dataframe, polarity, limit=10, news=False):
 
     if work.empty:
         return work
+
+    if "sentiment_score" not in work.columns or "sentiment" not in work.columns:
+        work = run_sentiment_agent(work)
 
     work["_rank_sentiment"] = work["sentiment_score"].astype(float) * work.get(
         "sentiment_confidence", pd.Series(1.0, index=work.index)

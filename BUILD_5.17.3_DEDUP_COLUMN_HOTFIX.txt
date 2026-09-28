@@ -1,0 +1,39 @@
+BUILD 5.17.3 — DEDUP ANALYSIS-COLUMN HOTFIX
+
+Observed failure
+================
+Build 5.17.2 failed during News PDF creation with:
+    KeyError: 'sentiment_score'
+
+Root cause
+==========
+The new story-level News deduplication function called normalize_posts() on an
+already analyzed dataframe. normalize_posts() intentionally returns only the
+canonical source columns, so enriched analysis columns such as:
+- sentiment
+- sentiment_score
+- sentiment_confidence
+- emotion
+- emotion_confidence
+- intent
+- semantic_cluster
+- engagement
+were removed before the Top 10 report ranking ran.
+
+Fix
+===
+- News dedup now normalizes canonical source fields once, then safely merges and
+  preserves all enriched analysis columns by external_id.
+- Subsequent dedup stages no longer strip enriched columns.
+- _report_top_items has a defensive fallback that re-runs sentiment only if an
+  unexpected custom dataframe arrives without sentiment fields.
+- Story-level duplicate suppression and ISRO relevance filtering remain enabled.
+
+Deployment
+==========
+Replace:
+  streamlit_app.py
+  background_monitor.py
+  .github/workflows/monitor-every-30-min.yml
+
+No new GitHub variable or secret is required.
