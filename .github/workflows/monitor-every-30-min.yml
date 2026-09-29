@@ -78,7 +78,7 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Preflight - verify deployed Build 5.18 files
+      - name: Preflight - verify deployed Build 5.18.1 files
         shell: bash
         run: |
           echo "Trigger source: ${TRIGGER_SOURCE:-unknown}"
