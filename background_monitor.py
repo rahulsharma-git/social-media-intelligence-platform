@@ -755,7 +755,7 @@ def main() -> None:
         routine_recipients = parse_recipients("REPORT_RECIPIENTS")
     alert_recipients = parse_recipients("ALERT_RECIPIENTS")
 
-    print(f"Build 5.18 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
+    print(f"Build 5.18.1 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
     print(f"Trigger source: {trigger_source}")
     print(f"Slot: {slot_key}; query={query!r}; news_window={news_lookback_hours}h; x_fresh_window={x_fresh_hours}h")
 
@@ -1270,7 +1270,7 @@ def main() -> None:
         monitoring_upsert(run_record)
 
     summary = {
-        "build": "5.18",
+        "build": "5.18.1",
         "run_time_ist": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
         "slot_key": slot_key,
         "records": len(df),
@@ -1324,7 +1324,7 @@ def main() -> None:
         [
             "# SMI Background Monitor",
             "",
-            f"- Build: **5.18**",
+            f"- Build: **5.18.1**",
             f"- Run time: **{now_ist:%Y-%m-%d %H:%M:%S IST}**",
             f"- Status: **{run_record['status']}**",
             f"- Records analyzed: **{len(df):,}**",

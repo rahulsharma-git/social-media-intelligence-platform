@@ -60,7 +60,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
     )
 
     st.title("📡 Social Media Intelligence Platform")
-    st.caption("Build 5.18 - conversation-first X + single-email five-PDF pack")
+    st.caption("Build 5.18.1 - X discovery recovery + single-email five-PDF pack")
 
 IST = ZoneInfo("Asia/Kolkata")
 

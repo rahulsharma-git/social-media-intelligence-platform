@@ -1,4 +1,4 @@
-"""Build 5.18 — public-conversation-first free X collector.
+"""Build 5.18.1 — public-conversation discovery recovery collector.
 
 Three free acquisition paths are combined every run:
 
@@ -76,7 +76,7 @@ def env_bool(name, default=False):
 
 def http_get(url, *, params=None, timeout=35, retries=3, headers=None):
     merged_headers = {
-        "User-Agent": "Mozilla/5.0 SMI-Free-X/5.17",
+        "User-Agent": "Mozilla/5.0 SMI-Free-X/5.18.1",
         "Accept-Language": "en-IN,en;q=0.9",
     }
     if headers:
@@ -444,22 +444,44 @@ def extract_status_urls(text):
 
 
 def search_queries(topic):
-    """Public-web queries aimed at people discussing ISRO."""
+    """Broad public-web discovery queries.
+
+    Do NOT try to exclude the official account inside the search-engine query.
+    Several free engines interpret path-level `-site:` inconsistently and can
+    return zero X URLs. We discover broadly, then exclude @isro deterministically
+    after URL extraction/hydration.
+    """
     t = re.sub(r"\s+", " ", str(topic or "ISRO")).strip() or "ISRO"
     return [
-        f'site:x.com "{t}" status -site:x.com/isro',
-        f'site:x.com "#{t}" status -site:x.com/isro',
-        'site:x.com "@isro" status -site:x.com/isro',
-        'site:x.com "Indian Space Research Organisation" status -site:x.com/isro',
-        f'site:twitter.com "{t}" status -site:twitter.com/isro',
-        f'site:x.com "{t}" launch -site:x.com/isro',
-        f'site:x.com "{t}" mission -site:x.com/isro',
-        f'site:x.com "{t}" satellite -site:x.com/isro',
-        'site:x.com "Gaganyaan" ISRO status -site:x.com/isro',
-        'site:x.com "Chandrayaan" ISRO status -site:x.com/isro',
-        'site:x.com "PSLV" ISRO status -site:x.com/isro',
-        'site:x.com "LVM3" ISRO status -site:x.com/isro',
-        'site:x.com "NISAR" ISRO status -site:x.com/isro',
+        f'site:x.com "{t}" status',
+        f'site:x.com "#{t}" status',
+        'site:x.com "@isro" status',
+        'site:x.com "Indian Space Research Organisation" status',
+        f'site:twitter.com "{t}" status',
+        f'site:x.com "{t}" launch',
+        f'site:x.com "{t}" mission',
+        f'site:x.com "{t}" satellite',
+        'site:x.com "Gaganyaan" ISRO status',
+        'site:x.com "Chandrayaan" ISRO status',
+        'site:x.com "PSLV" ISRO status',
+        'site:x.com "LVM3" ISRO status',
+        'site:x.com "NISAR" ISRO status',
+    ]
+
+
+def fallback_search_queries(topic):
+    """Fallback queries for engines that underperform with `site:` filters."""
+    t = re.sub(r"\s+", " ", str(topic or "ISRO")).strip() or "ISRO"
+    return [
+        f'"{t}" "x.com" status',
+        f'"#{t}" "x.com"',
+        '"@isro" "x.com" status',
+        '"Indian Space Research Organisation" "x.com"',
+        '"Gaganyaan" "x.com" ISRO',
+        '"Chandrayaan" "x.com" ISRO',
+        '"PSLV" "x.com" ISRO',
+        '"LVM3" "x.com" ISRO',
+        f'"{t}" twitter status',
     ]
 
 
@@ -493,36 +515,138 @@ def ddg_html(query):
     return extract_status_urls(r.text)
 
 
+def yahoo_html(query):
+    r = http_get(
+        "https://search.yahoo.com/search",
+        params={"p": query, "n": "50"},
+        timeout=30,
+        retries=2,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"Yahoo HTML HTTP {r.status_code}")
+
+    # Yahoo often wraps outbound URLs in /RU=<encoded-url>/RK=...
+    raw = html_lib.unescape(r.text)
+    expanded = [raw]
+    for m in re.finditer(r"/RU=([^/]+)/RK=", raw):
+        try:
+            expanded.append(unquote(m.group(1)))
+        except Exception:
+            pass
+    return extract_status_urls("\n".join(expanded))
+
+
+def brave_html(query):
+    r = http_get(
+        "https://search.brave.com/search",
+        params={"q": query, "source": "web"},
+        timeout=30,
+        retries=2,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"Brave HTML HTTP {r.status_code}")
+    return extract_status_urls(r.text)
+
+
+def google_html(query):
+    """Last-resort best-effort public web result parsing; may be rate-limited."""
+    r = http_get(
+        "https://www.google.com/search",
+        params={"q": query, "num": "50", "filter": "0"},
+        timeout=30,
+        retries=1,
+        headers={"Accept-Language": "en-IN,en;q=0.9"},
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"Google HTML HTTP {r.status_code}")
+    return extract_status_urls(r.text)
+
+
 def discover_indexed_urls(topic, limit=200):
+    """Discover public X status URLs through multiple no-key web indexes.
+
+    Discovery is intentionally broad. Official-handle exclusion happens only
+    after URL extraction, avoiding the Build 5.18 zero-result regression caused
+    by path-level negative `site:` clauses.
+    """
     seen = set()
     urls = []
     diagnostics = []
-    for query in search_queries(topic):
-        qdiag = {"query": query}
-        for name, fn in [("bing_rss", bing_rss), ("bing_html", bing_html), ("duckduckgo", ddg_html)]:
-            try:
-                found = fn(query)
-                qdiag[name] = len(found)
-                for u in found:
-                    if u not in seen:
-                        seen.add(u)
-                        urls.append(u)
-            except Exception as exc:
-                qdiag[name] = f"error: {type(exc).__name__}: {exc}"
-        diagnostics.append(qdiag)
-        if len(urls) >= limit:
-            break
-    excluded = parse_handle_set(env("X_EXCLUDE_HANDLES", "isro"), default="isro")
+    engine_totals = {
+        "bing_rss": 0,
+        "bing_html": 0,
+        "duckduckgo": 0,
+        "yahoo": 0,
+        "brave": 0,
+        "google": 0,
+    }
+
+    engines = [
+        ("bing_rss", bing_rss),
+        ("bing_html", bing_html),
+        ("duckduckgo", ddg_html),
+        ("yahoo", yahoo_html),
+        ("brave", brave_html),
+        ("google", google_html),
+    ]
+
+    def run_pass(queries, pass_name):
+        nonlocal urls
+        for query in queries:
+            qdiag = {"pass": pass_name, "query": query}
+            for name, fn in engines:
+                try:
+                    found = fn(query)
+                    qdiag[name] = len(found)
+                    engine_totals[name] += len(found)
+                    for u in found:
+                        if u not in seen:
+                            seen.add(u)
+                            urls.append(u)
+                except Exception as exc:
+                    qdiag[name] = f"error: {type(exc).__name__}: {exc}"
+            diagnostics.append(qdiag)
+            if len(urls) >= limit:
+                break
+
+    run_pass(search_queries(topic), "site_queries")
+
+    # If strict site discovery is weak, broaden automatically.
+    if len(urls) < 10:
+        run_pass(fallback_search_queries(topic), "fallback_queries")
+
+    raw_count = len(urls)
+    excluded = parse_handle_set(
+        env("X_EXCLUDE_HANDLES", "isro"),
+        default="isro",
+    )
+
+    official_urls = [
+        u for u in urls
+        if (status_parts(u)[0] or "").lower() in excluded
+    ]
     urls = [
         u for u in urls
         if (status_parts(u)[0] or "").lower() not in excluded
     ]
+
     urls.sort(
         key=lambda u: snowflake_timestamp(status_parts(u)[1]) or "",
         reverse=True,
     )
-    return urls[:limit], diagnostics
+    urls = urls[:limit]
 
+    diagnostics.append(
+        {
+            "summary": True,
+            "raw_unique_status_urls": raw_count,
+            "official_urls_excluded": len(official_urls),
+            "conversation_candidate_urls": len(urls),
+            "engine_totals": engine_totals,
+            "fallback_used": raw_count < 10,
+        }
+    )
+    return urls, diagnostics
 
 def text_matches_topic(text, topic="ISRO"):
     t = str(text or "").lower()
@@ -905,6 +1029,15 @@ def main():
 
     # Method 2: multiple public search indexes/query variants.
     indexed_urls, web_diag = discover_indexed_urls(topic, limit=200)
+    print(
+        f"X web discovery: conversation candidate URLs={len(indexed_urls)}; "
+        f"official handles excluded={','.join(sorted(excluded_handles)) or 'none'}."
+    )
+    if not indexed_urls:
+        print(
+            "::warning::Public web indexes returned zero non-official X status URLs. "
+            "The collector will continue with CSV/manual URL inbox and stored conversation rows."
+        )
 
     # Method 3a: public profile timelines. In addition to configured official
     # handles, expand into a bounded set of handles discovered from indexed
@@ -992,6 +1125,9 @@ def main():
             "csv_inbox_files": csv_files,
             "manual_url_inbox": len(url_inbox),
             "web_indexed_urls": len(indexed_urls),
+            "web_discovery_status": (
+                "conversation_urls_found" if indexed_urls else "zero_conversation_urls"
+            ),
             "discovered_profile_handles": len(discovered_handles[:discovered_limit]),
             "profile_timeline_rows": len(timeline_rows),
             "hydrated_url_rows": len(hydrated),
@@ -1003,7 +1139,8 @@ def main():
         "latest_csv": str(out_csv),
         "note": (
             f"Consolidated latest {len(selected)} real unique public-conversation "
-            "rows ABOUT ISRO; official handles are excluded by default."
+            "rows ABOUT ISRO. Discovery is broad across multiple public web indexes; "
+            "the official @isro handle is excluded only after discovery."
         ),
     }
     write_summary(summary)

@@ -1,0 +1,47 @@
+BUILD 5.18.1 — X DISCOVERY RECOVERY
+
+Observed problem
+================
+Build 5.18 could show zero newly fetched public-conversation X posts.
+
+Root cause corrected
+====================
+Build 5.18 tried to exclude the official ISRO account inside free search-engine
+queries using expressions such as:
+    -site:x.com/isro
+
+Path-level negative site filters are not handled consistently by free search
+surfaces. This could collapse discovery to zero before our own filtering logic
+had a chance to run.
+
+Build 5.18.1 strategy
+=====================
+1. Discover BROADLY first:
+   - Bing RSS
+   - Bing HTML
+   - DuckDuckGo HTML
+   - Yahoo HTML
+   - Brave Search HTML
+   - Google HTML as a last-resort best-effort source
+2. Use normal site:x.com / site:twitter.com queries without path exclusions.
+3. If fewer than 10 status URLs are found, automatically run broader non-site
+   query variants.
+4. Only AFTER extracting X status URLs do we remove official handles such as
+   @isro.
+5. Hydration/timeline stages still require the post text to match ISRO or
+   associated mission terms.
+6. Author diversity remains enabled.
+7. No paid X API or Bearer Token is used.
+
+Important limitation
+====================
+These are public web indexes, not X's paid Recent Search API. They can be delayed
+or incomplete and may occasionally return zero current conversation URLs. The
+collector never fabricates posts.
+
+No new GitHub variable is required.
+Keep:
+X_EXCLUDE_HANDLES = isro
+X_MAX_POSTS_PER_AUTHOR = 3
+X_MIN_POSTS = 10
+X_MAX_POSTS = 50

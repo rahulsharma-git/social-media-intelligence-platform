@@ -274,3 +274,10 @@ The official `@isro` account is excluded by default from X intelligence.
 The report samples diverse public authors discussing ISRO. Routine delivery
 is one email with five PDFs: Social, News, Combined, Social Evidence, News Evidence.
 Evidence ZIP archives remain available in the GitHub Actions artifact.
+
+
+## Build 5.18.1 — X discovery recovery
+
+X discovery now searches broadly across multiple public web indexes and filters
+out `@isro` only after X status URLs are found. This avoids the zero-result
+regression caused by path-level negative `site:` search clauses.
