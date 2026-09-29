@@ -1,4 +1,4 @@
-"""Build 5.17 — resilient free X fusion collector.
+"""Build 5.18 — public-conversation-first free X collector.
 
 Three free acquisition paths are combined every run:
 
@@ -13,9 +13,13 @@ Three free acquisition paths are combined every run:
    This discovers public x.com/twitter.com status URLs.
 
 3. X public embed/syndication:
-   - public profile timeline for configured handles (default: isro)
+   - public profile timelines for non-official handles discovered from indexed posts
+   - optional configured non-official seed handles
    - X CDN tweet-result hydration for discovered URLs
    - official oEmbed fallback for known URLs
+
+Default objective: public conversation ABOUT ISRO. The official @isro publishing
+feed is excluded by default so it cannot dominate the monitoring sample.
 
 All rows are real public/stored posts. No synthetic posts are created.
 The consolidated pool is deduplicated by X post ID/external_id and sorted
@@ -440,17 +444,22 @@ def extract_status_urls(text):
 
 
 def search_queries(topic):
+    """Public-web queries aimed at people discussing ISRO."""
     t = re.sub(r"\s+", " ", str(topic or "ISRO")).strip() or "ISRO"
     return [
-        f'site:x.com "{t}" status',
-        f'site:x.com "#{t}" status',
-        'site:x.com "@isro" status',
-        'site:x.com "Indian Space Research Organisation" status',
-        'site:x.com/isro/status',
-        f'site:twitter.com "{t}" status',
-        f'site:x.com "{t}" launch',
-        f'site:x.com "{t}" mission',
-        f'site:x.com "{t}" satellite',
+        f'site:x.com "{t}" status -site:x.com/isro',
+        f'site:x.com "#{t}" status -site:x.com/isro',
+        'site:x.com "@isro" status -site:x.com/isro',
+        'site:x.com "Indian Space Research Organisation" status -site:x.com/isro',
+        f'site:twitter.com "{t}" status -site:twitter.com/isro',
+        f'site:x.com "{t}" launch -site:x.com/isro',
+        f'site:x.com "{t}" mission -site:x.com/isro',
+        f'site:x.com "{t}" satellite -site:x.com/isro',
+        'site:x.com "Gaganyaan" ISRO status -site:x.com/isro',
+        'site:x.com "Chandrayaan" ISRO status -site:x.com/isro',
+        'site:x.com "PSLV" ISRO status -site:x.com/isro',
+        'site:x.com "LVM3" ISRO status -site:x.com/isro',
+        'site:x.com "NISAR" ISRO status -site:x.com/isro',
     ]
 
 
@@ -503,7 +512,15 @@ def discover_indexed_urls(topic, limit=200):
         diagnostics.append(qdiag)
         if len(urls) >= limit:
             break
-    urls.sort(key=lambda u: snowflake_timestamp(status_parts(u)[1]) or "", reverse=True)
+    excluded = parse_handle_set(env("X_EXCLUDE_HANDLES", "isro"), default="isro")
+    urls = [
+        u for u in urls
+        if (status_parts(u)[0] or "").lower() not in excluded
+    ]
+    urls.sort(
+        key=lambda u: snowflake_timestamp(status_parts(u)[1]) or "",
+        reverse=True,
+    )
     return urls[:limit], diagnostics
 
 
@@ -515,6 +532,65 @@ def text_matches_topic(text, topic="ISRO"):
         "gaganyaan", "pslv", "gslv", "lvm3", "chandrayaan", "aditya-l1", "nisar",
     }
     return any(term and term in t for term in terms)
+
+
+
+def parse_handle_set(raw, default=""):
+    value = str(raw if raw is not None else default)
+    return {
+        h.strip().lstrip("@").lower()
+        for h in re.split(r"[,;\s]+", value)
+        if h.strip()
+    }
+
+
+def row_handle(row):
+    return str((row or {}).get("username", "") or "").strip().lstrip("@").lower()
+
+
+def filter_conversation_rows(rows, topic="ISRO", excluded_handles=None):
+    excluded = set(excluded_handles or set())
+    kept = []
+    for row in rows or []:
+        if row_handle(row) in excluded:
+            continue
+        if not text_matches_topic(row.get("text", ""), topic):
+            continue
+        kept.append(row)
+    return merge_rows(kept)
+
+
+def select_diverse_conversation(rows, max_posts=50, min_posts=10, per_author_cap=3):
+    """Newest-first selection that limits domination by one author."""
+    max_posts = max(1, min(50, int(max_posts)))
+    min_posts = max(1, min(max_posts, int(min_posts)))
+    per_author_cap = max(1, min(10, int(per_author_cap)))
+
+    ordered = merge_rows(rows)
+    selected, overflow = [], []
+    counts = {}
+    for row in ordered:
+        handle = row_handle(row) or "unknown"
+        if counts.get(handle, 0) < per_author_cap and len(selected) < max_posts:
+            selected.append(row)
+            counts[handle] = counts.get(handle, 0) + 1
+        else:
+            overflow.append(row)
+
+    if len(selected) < min_posts:
+        ids = {r.get("external_id") for r in selected}
+        for row in overflow:
+            if len(selected) >= min_posts or len(selected) >= max_posts:
+                break
+            if row.get("external_id") not in ids:
+                selected.append(row)
+                ids.add(row.get("external_id"))
+
+    return sorted(
+        selected,
+        key=lambda r: str(r.get("timestamp", "")),
+        reverse=True,
+    )[:max_posts]
 
 
 # =====================================================================
@@ -803,13 +879,24 @@ def main():
     min_posts = max(10, env_int("X_MIN_POSTS", 10))
     max_posts = min(50, max(min_posts, env_int("X_MAX_POSTS", 50)))
     topic = env("X_FREE_TOPIC", "ISRO") or "ISRO"
+    excluded_handles = parse_handle_set(
+        env("X_EXCLUDE_HANDLES", "isro"),
+        default="isro",
+    )
     handles = [
         h.strip().lstrip("@")
-        for h in env("X_PROFILE_HANDLES", "isro").split(",")
+        for h in env("X_PROFILE_HANDLES", "").split(",")
         if h.strip()
+        and h.strip().lstrip("@").lower() not in excluded_handles
     ]
+    per_author_cap = max(1, min(10, env_int("X_MAX_POSTS_PER_AUTHOR", 3)))
 
-    existing = load_existing_x(limit=5000)
+    existing_all = load_existing_x(limit=5000)
+    existing = filter_conversation_rows(
+        existing_all,
+        topic=topic,
+        excluded_handles=excluded_handles,
+    )
     existing_ids = {r["external_id"] for r in existing}
 
     # Method 1
@@ -834,9 +921,14 @@ def main():
     timeline_diag = {}
     configured_lower = {h.lower() for h in handles}
     for handle in expanded_handles:
+        if handle.lower() in excluded_handles:
+            continue
         rows, err = fetch_profile_timeline(handle)
-        if handle.lower() not in configured_lower:
-            rows = [r for r in rows if text_matches_topic(r.get("text", ""), topic)]
+        rows = [
+            r for r in rows
+            if row_handle(r) not in excluded_handles
+            and text_matches_topic(r.get("text", ""), topic)
+        ]
         timeline_rows.extend(rows)
         timeline_diag[handle] = {"rows": len(rows), "error": err or None, "discovered": handle.lower() not in configured_lower}
     timeline_rows = merge_rows(timeline_rows)
@@ -846,13 +938,26 @@ def main():
     candidate_urls = list(dict.fromkeys(url_inbox + indexed_urls))
     hydrated, hydrate_diag, hydrate_failures = hydrate_urls(candidate_urls, limit=200)
 
-    acquired = merge_rows(csv_rows, timeline_rows, hydrated)
+    acquired = filter_conversation_rows(
+        merge_rows(csv_rows, timeline_rows, hydrated),
+        topic=topic,
+        excluded_handles=excluded_handles,
+    )
     upserted = upsert(acquired) if acquired else 0
     new_ids = {r["external_id"] for r in acquired} - existing_ids
 
-    # Recombine all three methods with prior stored history.
-    combined = merge_rows(existing, acquired)
-    selected = combined[:max_posts]
+    # Recombine all free methods with prior stored conversation history.
+    combined = filter_conversation_rows(
+        merge_rows(existing, acquired),
+        topic=topic,
+        excluded_handles=excluded_handles,
+    )
+    selected = select_diverse_conversation(
+        combined,
+        max_posts=max_posts,
+        min_posts=min_posts,
+        per_author_cap=per_author_cap,
+    )
     out_csv = write_csv(selected)
 
     summary = {
@@ -870,6 +975,17 @@ def main():
         "upserted": upserted,
         "newest_timestamp": selected[0]["timestamp"] if selected else None,
         "oldest_timestamp": selected[-1]["timestamp"] if selected else None,
+        "conversation_policy": {
+            "purpose": "public conversation about ISRO",
+            "excluded_handles": sorted(excluded_handles),
+            "per_author_cap": per_author_cap,
+            "unique_authors_selected": len(
+                {row_handle(r) for r in selected if row_handle(r)}
+            ),
+            "official_or_offtopic_existing_removed": max(
+                0, len(existing_all) - len(existing)
+            ),
+        },
         "sources": {
             "existing_supabase": len(existing),
             "csv_inbox_rows": len(csv_rows),
@@ -886,8 +1002,8 @@ def main():
         "hydration_failures": hydrate_failures,
         "latest_csv": str(out_csv),
         "note": (
-            f"Consolidated latest {len(selected)} real unique X rows "
-            "from stored/manual, expanded public web-index discovery and X public embed/syndication."
+            f"Consolidated latest {len(selected)} real unique public-conversation "
+            "rows ABOUT ISRO; official handles are excluded by default."
         ),
     }
     write_summary(summary)

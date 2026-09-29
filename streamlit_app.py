@@ -44,6 +44,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+from pypdf import PdfReader, PdfWriter
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, PageBreak,
     Table, LongTable, TableStyle, Image as RLImage, KeepTogether
@@ -59,9 +60,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
     )
 
     st.title("📡 Social Media Intelligence Platform")
-    st.caption(
-        "Build 5.17.3 — dedup enrichment-preservation hotfix"
-    )
+    st.caption("Build 5.18 - conversation-first X + single-email five-PDF pack")
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -3478,6 +3477,73 @@ def build_x_evidence_pdf(row, evidence_no, narrative_label="Not available"):
     doc.build(story)
     buffer.seek(0)
     return buffer.getvalue()
+
+
+def build_evidence_book_from_zip(zip_bytes, title="Evidence Book"):
+    """Merge numbered evidence PDFs from a ZIP into one consolidated PDF."""
+    if not zip_bytes:
+        raise ValueError("Evidence ZIP bytes are empty.")
+
+    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as archive:
+        pdf_names = sorted(
+            name for name in archive.namelist()
+            if name.lower().endswith(".pdf")
+        )
+
+        if not pdf_names:
+            empty = io.BytesIO()
+            normal_font, bold_font = _register_report_fonts()
+            doc = SimpleDocTemplate(
+                empty,
+                pagesize=A4,
+                rightMargin=18 * mm,
+                leftMargin=18 * mm,
+                topMargin=18 * mm,
+                bottomMargin=18 * mm,
+                title=title,
+                author="Social Media Intelligence Platform",
+            )
+            styles = getSampleStyleSheet()
+            doc.build([
+                Paragraph(
+                    escape(title),
+                    ParagraphStyle(
+                        "EvidenceBookEmptyTitle",
+                        parent=styles["Title"],
+                        fontName=bold_font,
+                        fontSize=16,
+                    ),
+                ),
+                Spacer(1, 8),
+                Paragraph(
+                    "No evidence records were available in this cycle.",
+                    ParagraphStyle(
+                        "EvidenceBookEmptyBody",
+                        parent=styles["BodyText"],
+                        fontName=normal_font,
+                        fontSize=9,
+                    ),
+                ),
+            ])
+            empty.seek(0)
+            return empty.getvalue(), 0
+
+        writer = PdfWriter()
+        for name in pdf_names:
+            reader = PdfReader(io.BytesIO(archive.read(name)))
+            for page in reader.pages:
+                writer.add_page(page)
+
+        writer.add_metadata({
+            "/Title": title,
+            "/Author": "Social Media Intelligence Platform",
+            "/Subject": "Consolidated evidence pages",
+        })
+        out = io.BytesIO()
+        writer.write(out)
+        out.seek(0)
+        return out.getvalue(), len(pdf_names)
+
 
 
 def build_x_evidence_zip(report_df, narrative_df):

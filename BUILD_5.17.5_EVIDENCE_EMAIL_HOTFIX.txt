@@ -1,0 +1,40 @@
+BUILD 5.17.5 — EVIDENCE EMAIL DELIVERY HOTFIX
+
+What the 5.17.4 screenshot proved
+=================================
+The evidence ZIPs were generated and validated correctly:
+- Social evidence ZIP: 40 PDFs
+- News evidence ZIP: 14 PDFs
+- ZIP validation: passed
+
+But:
+- Routine recipients SMTP-accepted: 2
+- Evidence recipients SMTP-accepted: 0
+
+Build 5.17.4 also had a diagnostics bug: evidence failures were NOT included in
+the final "Email errors" field, so the summary could incorrectly say
+"Email errors: none".
+
+Fixes in 5.17.5
+================
+1. Social evidence ZIP and News evidence ZIP are ALWAYS separate emails.
+2. Each ZIP gets its own Gmail SMTP transaction/diagnostic.
+3. Evidence sends pause briefly after the main report and between ZIP emails.
+4. Evidence attachments use a separate safe raw-size limit, default 15 MB.
+5. Required evidence attachments can no longer be silently omitted because of
+   a size cap. Oversize is reported as an explicit failure.
+6. Evidence failures now contribute to:
+   - partial_email_failure run status
+   - Email errors
+   - GitHub warning output
+7. GitHub summary separately shows:
+   - Social evidence email accepted
+   - News evidence email accepted
+8. Evidence ZIP generation/validation and GitHub artifact preservation remain.
+
+Recommended GitHub Actions variables
+====================================
+EMAIL_ATTACHMENT_RAW_LIMIT_MB = 10
+EVIDENCE_EMAIL_RAW_LIMIT_MB = 15
+
+No new secret is required.

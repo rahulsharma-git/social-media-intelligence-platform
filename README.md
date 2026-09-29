@@ -259,3 +259,18 @@ emotion, clustering, narratives, evidence generation and PDF ranking.
 Both Social Media and News Media evidence ZIPs are generated, validated, stored
 in the GitHub Actions artifact, and automatically emailed after the core report.
 Large evidence packs are split into separate emails instead of being omitted.
+
+
+## Build 5.17.5 — evidence email delivery diagnostics
+
+Social and News evidence ZIPs are now sent as separate messages, with a separate
+15 MB raw attachment safety limit by default. Evidence failures are included in
+the run status and Email errors instead of being hidden.
+
+
+## Build 5.18 - conversation-first X + one email
+
+The official `@isro` account is excluded by default from X intelligence.
+The report samples diverse public authors discussing ISRO. Routine delivery
+is one email with five PDFs: Social, News, Combined, Social Evidence, News Evidence.
+Evidence ZIP archives remain available in the GitHub Actions artifact.

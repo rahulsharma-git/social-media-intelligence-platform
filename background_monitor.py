@@ -277,6 +277,8 @@ def send_email_individually(
     body: str,
     attachments: list[tuple[str, bytes, str, str]],
     message_tag: str = "report",
+    raw_limit_mb_override: float | None = None,
+    require_all_attachments: bool = False,
 ) -> dict:
     """Send one message per recipient and record SMTP *acceptance* accurately.
 
@@ -301,9 +303,12 @@ def send_email_individually(
 
     # Gmail's nominal message size limit includes MIME/base64 overhead.
     # Keep automated report mail well below the limit for reliability.
-    raw_limit_mb = max(
-        1.0, min(env_float("EMAIL_ATTACHMENT_RAW_LIMIT_MB", 10.0), 15.0)
-    )
+    if raw_limit_mb_override is None:
+        raw_limit_mb = max(
+            1.0, min(env_float("EMAIL_ATTACHMENT_RAW_LIMIT_MB", 10.0), 15.0)
+        )
+    else:
+        raw_limit_mb = max(1.0, min(float(raw_limit_mb_override), 17.0))
     raw_limit = int(raw_limit_mb * 1024 * 1024)
 
     clean = [
@@ -330,6 +335,21 @@ def send_email_individually(
             f"estimated MIME={estimated_wire/(1024*1024):.2f} MB, "
             f"omitted={omitted}"
         )
+        if require_all_attachments:
+            detail = (
+                f"Required attachment exceeds the configured raw-email limit "
+                f"of {raw_limit_mb:.1f} MB. Omitted={omitted}. "
+                "No attachment-free placeholder email was sent."
+            )
+            return {
+                "accepted": [],
+                "failed": {x: detail for x in recipients},
+                "diagnostics": [],
+                "selected_attachments": [x[0] for x in selected],
+                "omitted_attachments": omitted,
+                "raw_attachment_bytes": used,
+                "estimated_mime_bytes": estimated_wire,
+            }
 
     context = ssl.create_default_context()
     pending = list(recipients)
@@ -553,31 +573,38 @@ def _send_evidence_messages(
     body: str,
     now_ist,
 ) -> dict:
-    """Always send X and News evidence ZIPs after the core report email."""
-    result = {"accepted": [], "failed": {}, "messages": []}
-    recipients = [r for r in recipients if r and "@" in r]
+    """Send each mandatory evidence ZIP in its own email.
+
+    One ZIP per message makes Gmail delivery more reliable and makes failures
+    attributable to a specific evidence pack. Each send requires the ZIP to be
+    attached; an oversized attachment is reported as a failure rather than
+    silently omitted.
+    """
+    result = {
+        "accepted": [],
+        "failed": {},
+        "messages": [],
+        "by_file": {},
+    }
+    recipients = [r.strip() for r in recipients if r and "@" in r]
     if not recipients or not evidence_files:
         return result
 
-    raw_limit_mb = max(
-        1.0, min(env_float("EMAIL_ATTACHMENT_RAW_LIMIT_MB", 10.0), 15.0)
+    evidence_limit_mb = max(
+        1.0,
+        min(env_float("EVIDENCE_EMAIL_RAW_LIMIT_MB", 15.0), 17.0),
     )
-    raw_limit = int(raw_limit_mb * 1024 * 1024)
-    combined_size = sum(len(x[1]) for x in evidence_files)
 
-    groups = [evidence_files] if combined_size <= raw_limit else [[x] for x in evidence_files]
+    # Give Gmail a short gap after the primary analytical report message.
+    time.sleep(4)
 
-    for idx, group in enumerate(groups, start=1):
-        names = [x[0] for x in group]
-        if len(group) == len(evidence_files):
-            label = "X + News Evidence ZIPs"
-        else:
-            label = (
-                "Social Media Evidence ZIP"
-                if "SocialMedia" in group[0][0]
-                else "News Media Evidence ZIP"
-            )
-
+    for idx, item in enumerate(evidence_files, start=1):
+        filename, payload, maintype, subtype = item
+        label = (
+            "Social Media Evidence ZIP"
+            if "SocialMedia" in filename
+            else "News Media Evidence ZIP"
+        )
         subject = (
             f"ISRO Intelligence | {label} | "
             + now_ist.strftime("%d %b %Y %H:%M IST")
@@ -586,29 +613,107 @@ def _send_evidence_messages(
             body
             + "\n\n"
             + f"Evidence delivery: {label}\n"
-            + "Files attached:\n- "
-            + "\n- ".join(names)
+            + f"Attached file: {filename}\n"
+            + f"Raw ZIP size: {len(payload)/(1024*1024):.2f} MB"
         )
+
         ev = send_email_individually(
             recipients,
             subject,
             message_body,
-            group,
+            [item],
             message_tag=f"evidence-{idx}",
+            raw_limit_mb_override=evidence_limit_mb,
+            require_all_attachments=True,
         )
-        result["messages"].append(
-            {
-                "files": names,
-                "accepted": ev.get("accepted", []),
-                "failed": ev.get("failed", {}),
-            }
-        )
+
+        file_result = {
+            "file": filename,
+            "size_mb": round(len(payload) / (1024 * 1024), 3),
+            "accepted": list(ev.get("accepted", [])),
+            "failed": dict(ev.get("failed", {})),
+            "diagnostics": list(ev.get("diagnostics", [])),
+        }
+        result["messages"].append(file_result)
+        result["by_file"][filename] = file_result
+
         for addr in ev.get("accepted", []):
             if addr not in result["accepted"]:
                 result["accepted"].append(addr)
-        result["failed"].update(ev.get("failed", {}))
+
+        for addr, error in ev.get("failed", {}).items():
+            # Keep both failures if two different ZIPs fail for one recipient.
+            key = f"{filename} -> {addr}"
+            result["failed"][key] = error
+
+        print(
+            f"Evidence send result: file={filename}; "
+            f"size={len(payload)/(1024*1024):.2f} MB; "
+            f"SMTP accepted={len(ev.get('accepted', []))}; "
+            f"failed={len(ev.get('failed', {}))}."
+        )
+
+        # Separate SMTP sessions/messages and avoid immediate back-to-back bursts.
+        if idx < len(evidence_files):
+            time.sleep(3)
 
     return result
+
+
+def _parse_handle_set(raw: str, default: str = "") -> set[str]:
+    value = str(raw or default)
+    return {
+        h.strip().lstrip("@").lower()
+        for h in re.split(r"[,;\s]+", value)
+        if h.strip()
+    }
+
+
+def _x_topic_match(text: str, query: str = "ISRO") -> bool:
+    value = str(text or "").lower()
+    terms = {
+        str(query or "isro").lower(),
+        "isro", "@isro", "#isro",
+        "indian space research organisation",
+        "indian space research organization",
+        "gaganyaan", "chandrayaan", "pslv", "gslv", "lvm3",
+        "aditya-l1", "aditya l1", "nisar", "spadex", "navic",
+    }
+    return any(term and term in value for term in terms)
+
+
+def _select_diverse_x_frame(
+    frame: pd.DataFrame,
+    limit: int,
+    minimum: int,
+    per_author_cap: int,
+) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return frame.copy() if frame is not None else pd.DataFrame()
+
+    work = frame.sort_values("timestamp", ascending=False).copy()
+    selected, overflow, counts = [], [], {}
+    for idx, row in work.iterrows():
+        handle = str(row.get("username", "") or "").strip().lstrip("@").lower() or "unknown"
+        if counts.get(handle, 0) < per_author_cap and len(selected) < limit:
+            selected.append(idx)
+            counts[handle] = counts.get(handle, 0) + 1
+        else:
+            overflow.append(idx)
+
+    if len(selected) < minimum:
+        for idx in overflow:
+            if len(selected) >= minimum or len(selected) >= limit:
+                break
+            selected.append(idx)
+
+    return (
+        work.loc[selected]
+        .sort_values("timestamp", ascending=False)
+        .head(limit)
+        .reset_index(drop=True)
+    )
+
 
 
 def main() -> None:
@@ -630,6 +735,14 @@ def main() -> None:
     x_fresh_hours = max(1, env_int("X_FRESH_HOURS", 24))
     x_fallback_max_posts = min(50, max(10, env_int("X_FALLBACK_MAX_POSTS", 50)))
     x_min_report_posts = max(10, env_int("X_MIN_REPORT_POSTS", env_int("X_MIN_POSTS", 10)))
+    x_excluded_handles = _parse_handle_set(
+        env("X_EXCLUDE_HANDLES", "isro"),
+        default="isro",
+    )
+    x_per_author_cap = max(1, min(10, env_int("X_MAX_POSTS_PER_AUTHOR", 3)))
+    five_pdf_email_limit_mb = max(
+        5.0, min(17.0, env_float("EMAIL_FIVE_PDF_RAW_LIMIT_MB", 17.0))
+    )
     report_max_records = max(50, env_int("BACKGROUND_MAX_RECORDS", 1500))
     force_send = env_bool("FORCE_SEND", False)
     fail_on_email_error = env_bool("FAIL_ON_EMAIL_ERROR", False)
@@ -642,7 +755,7 @@ def main() -> None:
         routine_recipients = parse_recipients("REPORT_RECIPIENTS")
     alert_recipients = parse_recipients("ALERT_RECIPIENTS")
 
-    print(f"Build 5.17.4 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
+    print(f"Build 5.18 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
     print(f"Trigger source: {trigger_source}")
     print(f"Slot: {slot_key}; query={query!r}; news_window={news_lookback_hours}h; x_fresh_window={x_fresh_hours}h")
 
@@ -758,20 +871,39 @@ def main() -> None:
         news_quality_diag.get("irrelevant_removed", 0)
     )
 
-    # X: consolidate all available X rows, sort newest-first, and use
-    # the latest pool with a minimum target of 10 and hard maximum of 50.
-    # Freshness is reported separately; older rows are never mislabelled fresh.
-    stored_x = combined_store[
+    # X objective: public conversation ABOUT ISRO, not the official @isro feed.
+    stored_x_all = combined_store[
         combined_store["platform"].isin(["x", "x_manual"])
     ].copy()
+    stored_x_all["_handle_key"] = (
+        stored_x_all["username"].fillna("").astype(str)
+        .str.strip().str.lstrip("@").str.lower()
+    )
+    official_mask = stored_x_all["_handle_key"].isin(x_excluded_handles)
+    topic_mask = stored_x_all["text"].fillna("").astype(str).apply(
+        lambda value: _x_topic_match(value, query)
+    )
+    x_official_excluded_count = int(official_mask.sum())
+    x_offtopic_excluded_count = int((~official_mask & ~topic_mask).sum())
+
+    stored_x = stored_x_all[
+        (~official_mask) & topic_mask
+    ].drop(columns=["_handle_key"], errors="ignore")
     stored_x = stored_x.sort_values("timestamp", ascending=False)
 
     x_cutoff = pd.Timestamp(now_ist - timedelta(hours=x_fresh_hours))
     x_fresh_count = int((stored_x["timestamp"] >= x_cutoff).sum()) if len(stored_x) else 0
 
-    # Use every latest available row up to 50, not only exactly 10 backfill rows.
     x_report_limit = min(50, x_fallback_max_posts)
-    x_report = stored_x.head(x_report_limit).copy()
+    x_report = _select_diverse_x_frame(
+        stored_x,
+        limit=x_report_limit,
+        minimum=x_min_report_posts,
+        per_author_cap=x_per_author_cap,
+    )
+    x_unique_authors = int(
+        x_report["username"].fillna("").astype(str).str.lower().nunique()
+    ) if len(x_report) else 0
 
     if x_report.empty:
         x_data_mode = "no X records available after all free acquisition methods"
@@ -781,12 +913,13 @@ def main() -> None:
         report_older_count = int(len(x_report) - report_fresh_count)
         if report_older_count == 0:
             x_data_mode = (
-                f"latest {len(x_report)} X rows; all fresh <= {x_fresh_hours}h"
+                f"latest {len(x_report)} public-conversation X rows from {x_unique_authors} authors; all fresh <= {x_fresh_hours}h"
             )
             x_is_stale_fallback = False
         else:
             x_data_mode = (
-                f"latest {len(x_report)} X rows; {report_fresh_count} fresh "
+                f"latest {len(x_report)} public-conversation X rows from "
+                f"{x_unique_authors} authors; {report_fresh_count} fresh "
                 f"<= {x_fresh_hours}h + {report_older_count} stored older rows"
             )
             x_is_stale_fallback = True
@@ -886,6 +1019,9 @@ def main() -> None:
         "x_new_count": int(x_new_count),
         "x_fresh_count": int(x_fresh_count),
         "x_report_count": int(len(x_report)),
+        "x_unique_authors": int(x_unique_authors),
+        "x_official_excluded_count": int(x_official_excluded_count),
+        "x_offtopic_excluded_count": int(x_offtopic_excluded_count),
         "x_latest_ist": _fmt_ts_ist(x_latest),
         "x_age_hours": None if x_age_hours is None else round(float(x_age_hours), 1),
         "news_new_count": int(new_news_count),
@@ -929,6 +1065,33 @@ def main() -> None:
     news_subset, news_narr, _ = core._report_subset_analysis(df, "news")
     x_zip, x_evidence_count = core.build_x_evidence_zip(x_subset, x_narr)
     news_zip, news_evidence_count = core.build_news_evidence_zip(news_subset, news_narr)
+
+    x_evidence_pdf, x_book_count = core.build_evidence_book_from_zip(
+        x_zip, title="ISRO Social Media Evidence Book"
+    )
+    news_evidence_pdf, news_book_count = core.build_evidence_book_from_zip(
+        news_zip, title="ISRO News Media Evidence Book"
+    )
+    if int(x_book_count) != int(x_evidence_count):
+        raise RuntimeError(
+            f"Social evidence PDF count mismatch: book={x_book_count}, zip={x_evidence_count}"
+        )
+    if int(news_book_count) != int(news_evidence_count):
+        raise RuntimeError(
+            f"News evidence PDF count mismatch: book={news_book_count}, zip={news_evidence_count}"
+        )
+
+    evidence_pdf_files = [
+        (f"ISRO_SocialMedia_Evidence_{stamp}.pdf", x_evidence_pdf, "application", "pdf"),
+        (f"ISRO_NewsMedia_Evidence_{stamp}.pdf", news_evidence_pdf, "application", "pdf"),
+    ]
+    for filename, payload, _, _ in evidence_pdf_files:
+        (OUTPUT_DIR / filename).write_bytes(payload)
+        print(
+            f"Generated consolidated evidence PDF {filename} "
+            f"({len(payload)/(1024*1024):.2f} MB)."
+        )
+
     evidence_files = [
         (f"ISRO_SocialMedia_Evidence_{stamp}.zip", x_zip, "application", "zip"),
         (f"ISRO_NewsMedia_Evidence_{stamp}.zip", news_zip, "application", "zip"),
@@ -958,7 +1121,8 @@ def main() -> None:
             f"{check['pdfs']} PDFs; manifest={check['manifest_present']})."
         )
 
-    attachments = report_files + evidence_files
+    five_pdf_files = report_files + evidence_pdf_files
+    attachments = five_pdf_files
     pdf_filename = report_files[2][0]
     run_record["pdf_filename"] = pdf_filename
     status_lines = [
@@ -971,6 +1135,9 @@ def main() -> None:
         f"X/manual X records in report: {x_records:,}",
         f"X new this cycle: {x_new_count:,}",
         f"X data mode: {x_data_mode}",
+        f"X conversation authors represented: {x_unique_authors}",
+        f"Official X rows excluded: {x_official_excluded_count}",
+        f"Off-topic X rows excluded: {x_offtopic_excluded_count}",
         f"X collector status: {x_collector_status}",
         (
             "X source counts: "
@@ -997,13 +1164,14 @@ def main() -> None:
         f"Alert threshold: {alert_threshold:.1f}%",
         f"Free news source: {news_source}",
         f"Scheduler trigger: {trigger_source}",
-        f"Social evidence PDFs: {x_evidence_count}",
-        f"News evidence PDFs: {news_evidence_count}",
+        f"Social evidence pages: {x_evidence_count}",
+        f"News evidence pages: {news_evidence_count}",
+        "Email pack: 5 PDFs in one message (Social, News, Combined, Social Evidence, News Evidence)",
         "",
         "All displayed/report timestamps are India Standard Time (IST).",
         "Email status means SMTP accepted, not guaranteed inbox placement.",
-        "X data is consolidated from stored/manual rows, public web-index discovery, "
-        "and X public embed/syndication sources. No paid X Bearer Token is required.",
+        "X data targets public conversation ABOUT ISRO. The official @isro account is "
+        "excluded by default; acquisition remains free and uses no paid Bearer Token.",
     ]
     body = "\n".join(status_lines)
 
@@ -1028,16 +1196,16 @@ def main() -> None:
             f"News {news_records} (+{new_news_count}) | "
             + now_ist.strftime("%d %b %Y %H:%M IST")
         )
-        # Core routine email contains analytical PDFs only. Evidence packs are
-        # intentionally excluded from the primary message to improve Gmail
-        # deliverability and stay far below MIME/base64 size limits.
-        core_attachments = report_files
+        # One routine email per recipient with exactly five PDFs:
+        # 3 intelligence reports + 2 consolidated evidence books.
         result = send_email_individually(
             routine_pending,
             routine_subject,
             body,
-            core_attachments,
-            message_tag="routine-report",
+            five_pdf_files,
+            message_tag="routine-five-pdf-pack",
+            raw_limit_mb_override=five_pdf_email_limit_mb,
+            require_all_attachments=True,
         )
         routine_delivered.update(x.lower() for x in result["accepted"])
         routine_failed = result["failed"]
@@ -1046,27 +1214,7 @@ def main() -> None:
             f"failed={len(result['failed'])}."
         )
 
-        # Evidence ZIPs are mandatory deliverables. Send them after the core
-        # report so large ZIPs cannot block the analytical PDFs.
-        evidence_result = {"accepted": [], "failed": {}, "messages": []}
-        if evidence_files and result["accepted"]:
-            evidence_result = _send_evidence_messages(
-                result["accepted"],
-                evidence_files,
-                body,
-                now_ist,
-            )
-            print(
-                f"Evidence email SMTP accepted={len(evidence_result['accepted'])}, "
-                f"failed={len(evidence_result['failed'])}, "
-                f"messages={len(evidence_result['messages'])}."
-            )
-            if evidence_result["failed"]:
-                print(
-                    "::warning::Evidence ZIP email had failures: "
-                    + json.dumps(evidence_result["failed"], ensure_ascii=False)
-                )
-    elif routine_recipients:
+        # Evidence ZIP archives remain in the GitHub artifact; no second email is sent.\n    elif routine_recipients:
         print("Routine email already completed for this slot; no duplicate send.")
     else:
         print("No REPORT_RECIPIENTS_30MIN configured; routine email skipped.")
@@ -1088,8 +1236,10 @@ def main() -> None:
                 alert_pending,
                 alert_subject,
                 body,
-                report_files,
-                message_tag="alert-report",
+                five_pdf_files,
+                message_tag="alert-five-pdf-pack",
+                raw_limit_mb_override=five_pdf_email_limit_mb,
+                require_all_attachments=True,
             )
             alert_delivered.update(x.lower() for x in result["accepted"])
             alert_failed = result["failed"]
@@ -1120,7 +1270,7 @@ def main() -> None:
         monitoring_upsert(run_record)
 
     summary = {
-        "build": "5.17.4",
+        "build": "5.18",
         "run_time_ist": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
         "slot_key": slot_key,
         "records": len(df),
@@ -1128,6 +1278,9 @@ def main() -> None:
         "news_records": news_records,
         "x_new_count": int(x_new_count),
         "x_data_mode": x_data_mode,
+        "x_unique_authors": int(x_unique_authors),
+        "x_official_excluded_count": int(x_official_excluded_count),
+        "x_offtopic_excluded_count": int(x_offtopic_excluded_count),
         "x_collector_status": x_collector_status,
         "x_latest_ist": _fmt_ts_ist(x_latest),
         "x_age_hours": None if x_age_hours is None else round(float(x_age_hours), 1),
@@ -1153,18 +1306,12 @@ def main() -> None:
         "alert_delivered": sorted(alert_delivered),
         "pdf_filename": pdf_filename,
         "report_files": [x[0] for x in report_files],
-        "evidence_files": [x[0] for x in evidence_files],
+        "email_pdf_files": [x[0] for x in five_pdf_files],
+        "evidence_pdf_files": [x[0] for x in evidence_pdf_files],
+        "evidence_zip_files": [x[0] for x in evidence_files],
         "evidence_validation": evidence_validation,
         "x_evidence_count": x_evidence_count,
         "news_evidence_count": news_evidence_count,
-        "evidence_email_accepted": sorted(
-            set(evidence_result.get("accepted", []))
-        ) if "evidence_result" in locals() else [],
-        "evidence_email_failed": (
-            evidence_result.get("failed", {})
-            if "evidence_result" in locals()
-            else {}
-        ),
         "status": run_record["status"],
         "error": run_record["error"],
     }
@@ -1177,13 +1324,16 @@ def main() -> None:
         [
             "# SMI Background Monitor",
             "",
-            f"- Build: **5.17.4**",
+            f"- Build: **5.18**",
             f"- Run time: **{now_ist:%Y-%m-%d %H:%M:%S IST}**",
             f"- Status: **{run_record['status']}**",
             f"- Records analyzed: **{len(df):,}**",
             f"- X/manual X in report: **{x_records:,}**",
             f"- New X this cycle: **{x_new_count:,}**",
             f"- X data mode: **{x_data_mode}**",
+            f"- X conversation authors represented: **{x_unique_authors}**",
+            f"- Official X rows excluded: **{x_official_excluded_count}**",
+            f"- Off-topic X rows excluded: **{x_offtopic_excluded_count}**",
             f"- X collector status: **{x_collector_status}**",
             f"- Newest X: **{_fmt_ts_ist(x_latest)}**",
             f"- Unique News story families in rolling {news_lookback_hours}h: **{news_records:,}**",
@@ -1201,10 +1351,10 @@ def main() -> None:
             f"- Attention index: **{attention_index}/100**",
             f"- Assessment confidence: **{assessment_confidence}/100**",
             f"- Combined PDF: `{pdf_filename}`",
-            f"- Social evidence ZIP: **{evidence_files[0][0]}** ({x_evidence_count} PDFs)",
-            f"- News evidence ZIP: **{evidence_files[1][0]}** ({news_evidence_count} PDFs)",
-            f"- Evidence ZIP validation: **passed**",
-            f"- Evidence email recipients SMTP-accepted: **{len(evidence_result.get('accepted', [])) if 'evidence_result' in locals() else 0}**",
+            f"- Social evidence PDF: **{evidence_pdf_files[0][0]}** ({x_evidence_count} evidence pages)",
+            f"- News evidence PDF: **{evidence_pdf_files[1][0]}** ({news_evidence_count} evidence pages)",
+            f"- Evidence ZIP archives retained in artifact: **2**",
+            f"- Routine email attachments: **5 PDFs in one message**",
             f"- Routine recipients SMTP-accepted: **{len(routine_delivered)}**",
             f"- Alert recipients SMTP-accepted: **{len(alert_delivered)}**",
             "",

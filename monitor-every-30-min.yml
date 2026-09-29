@@ -56,6 +56,8 @@ jobs:
       X_ENABLE_WEB_INDEX: ${{ vars.X_ENABLE_WEB_INDEX }}
       X_ENABLE_OEMBED: ${{ vars.X_ENABLE_OEMBED }}
       X_PROFILE_HANDLES: ${{ vars.X_PROFILE_HANDLES }}
+      X_EXCLUDE_HANDLES: ${{ vars.X_EXCLUDE_HANDLES }}
+      X_MAX_POSTS_PER_AUTHOR: ${{ vars.X_MAX_POSTS_PER_AUTHOR }}
       X_DISCOVERED_PROFILE_LIMIT: ${{ vars.X_DISCOVERED_PROFILE_LIMIT }}
       X_MIN_POSTS: ${{ vars.X_MIN_POSTS }}
       X_MIN_REPORT_POSTS: ${{ vars.X_MIN_REPORT_POSTS }}
@@ -63,6 +65,7 @@ jobs:
       X_FALLBACK_MAX_POSTS: ${{ vars.X_FALLBACK_MAX_POSTS }}
       EMAIL_ONLY_ON_CHANGE: ${{ vars.EMAIL_ONLY_ON_CHANGE }}
       EMAIL_ATTACHMENT_RAW_LIMIT_MB: ${{ vars.EMAIL_ATTACHMENT_RAW_LIMIT_MB }}
+      EMAIL_FIVE_PDF_RAW_LIMIT_MB: ${{ vars.EMAIL_FIVE_PDF_RAW_LIMIT_MB }}
       OUTPUT_DIR: output
 
     steps:
@@ -75,7 +78,7 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Preflight - verify deployed Build 5.17.4 files
+      - name: Preflight - verify deployed Build 5.18 files
         shell: bash
         run: |
           echo "Trigger source: ${TRIGGER_SOURCE:-unknown}"

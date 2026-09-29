@@ -1,0 +1,38 @@
+BUILD 5.18 - PUBLIC CONVERSATION X SCAN + SINGLE 5-PDF EMAIL
+
+X monitoring
+------------
+The default X objective is what PEOPLE are saying ABOUT ISRO.
+The official @isro handle is excluded by default.
+
+The collector:
+- searches ISRO / #ISRO / @isro / mission terms across public indexed X posts,
+- expands non-official authors discovered from those posts,
+- keeps only topic-matching rows,
+- limits one author to 3 posts in the primary sample by default,
+- targets minimum 10 real posts when available, maximum 50.
+
+Recommended GitHub Actions variables:
+X_EXCLUDE_HANDLES = isro
+X_MAX_POSTS_PER_AUTHOR = 3
+X_MIN_POSTS = 10
+X_MAX_POSTS = 50
+
+X_PROFILE_HANDLES is optional. If it still contains `isro`, that account is
+ignored because it is in X_EXCLUDE_HANDLES.
+
+Single email
+------------
+Every routine recipient gets ONE email containing exactly five PDFs:
+1. Social Media Intelligence
+2. News Media Intelligence
+3. Combined Intelligence
+4. Social Media Evidence Book
+5. News Media Evidence Book
+
+The detailed Social and News evidence ZIP archives are still generated and
+kept in the GitHub Actions artifact for audit/download, but are not emailed
+separately.
+
+Recommended:
+EMAIL_FIVE_PDF_RAW_LIMIT_MB = 17
