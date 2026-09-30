@@ -1,4 +1,4 @@
-"""Build 5.18.1 — public-conversation discovery recovery collector.
+"""Build 5.18.2 — freshness-first public-conversation collector.
 
 Three free acquisition paths are combined every run:
 
@@ -36,7 +36,8 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from difflib import SequenceMatcher
 from pathlib import Path
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 import xml.etree.ElementTree as ET
@@ -76,7 +77,7 @@ def env_bool(name, default=False):
 
 def http_get(url, *, params=None, timeout=35, retries=3, headers=None):
     merged_headers = {
-        "User-Agent": "Mozilla/5.0 SMI-Free-X/5.18.1",
+        "User-Agent": "Mozilla/5.0 SMI-Free-X/5.18.2",
         "Accept-Language": "en-IN,en;q=0.9",
     }
     if headers:
@@ -630,17 +631,47 @@ def discover_indexed_urls(topic, limit=200):
         if (status_parts(u)[0] or "").lower() not in excluded
     ]
 
-    urls.sort(
+    max_age_hours = max(1, env_int("X_MAX_AGE_HOURS", 24))
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=max_age_hours)
+    future_limit = now + timedelta(minutes=15)
+
+    fresh_urls = []
+    stale_url_count = 0
+    future_url_count = 0
+    for u in urls:
+        _, post_id = status_parts(u)
+        ts_text = snowflake_timestamp(post_id)
+        try:
+            ts = datetime.fromisoformat(str(ts_text).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            ts = ts.astimezone(timezone.utc)
+        except Exception:
+            stale_url_count += 1
+            continue
+        if ts < cutoff:
+            stale_url_count += 1
+            continue
+        if ts > future_limit:
+            future_url_count += 1
+            continue
+        fresh_urls.append(u)
+
+    fresh_urls.sort(
         key=lambda u: snowflake_timestamp(status_parts(u)[1]) or "",
         reverse=True,
     )
-    urls = urls[:limit]
+    urls = fresh_urls[:limit]
 
     diagnostics.append(
         {
             "summary": True,
             "raw_unique_status_urls": raw_count,
             "official_urls_excluded": len(official_urls),
+            "stale_urls_excluded": stale_url_count,
+            "future_timestamp_urls_excluded": future_url_count,
+            "max_age_hours": max_age_hours,
             "conversation_candidate_urls": len(urls),
             "engine_totals": engine_totals,
             "fallback_used": raw_count < 10,
@@ -670,6 +701,97 @@ def parse_handle_set(raw, default=""):
 
 def row_handle(row):
     return str((row or {}).get("username", "") or "").strip().lstrip("@").lower()
+
+
+def _row_datetime_utc(row):
+    try:
+        value = str((row or {}).get("timestamp", "") or "").strip()
+        if not value:
+            return None
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def filter_recent_rows(rows, max_age_hours=24):
+    """Keep only genuinely recent rows; never backfill current analysis with old X."""
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=max(1, int(max_age_hours)))
+    future_limit = now + timedelta(minutes=15)
+    kept, stale, future = [], 0, 0
+    for row in rows or []:
+        dt = _row_datetime_utc(row)
+        if dt is None:
+            stale += 1
+            continue
+        if dt < cutoff:
+            stale += 1
+            continue
+        if dt > future_limit:
+            future += 1
+            continue
+        kept.append(row)
+    return merge_rows(kept), stale, future
+
+
+def _x_text_signature(text):
+    value = html_lib.unescape(str(text or "")).lower()
+    value = re.sub(r"^\s*rt\s+@[a-z0-9_]{1,15}\s*:\s*", "", value)
+    value = re.sub(r"https?://\S+", " ", value)
+    value = re.sub(r"\bt\.co/\S+", " ", value)
+    value = re.sub(r"[^\w#@\u0900-\u097f]+", " ", value, flags=re.UNICODE)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def deduplicate_conversation_text(rows):
+    """Suppress exact and very-near repeated X text across accounts.
+
+    This removes repeated/quoted copies from sentiment weighting while keeping
+    materially different commentary. Coordination analysis can still use raw
+    stored rows separately later.
+    """
+    ordered = merge_rows(rows)
+    kept = []
+    sigs = []
+    duplicates = 0
+
+    for row in ordered:
+        sig = _x_text_signature(row.get("text", ""))
+        if not sig:
+            continue
+
+        is_dup = False
+        sig_tokens = set(sig.split())
+        for existing in sigs:
+            if sig == existing:
+                is_dup = True
+                break
+
+            existing_tokens = set(existing.split())
+            if not sig_tokens or not existing_tokens:
+                continue
+            common = len(sig_tokens & existing_tokens)
+            containment = common / max(1, min(len(sig_tokens), len(existing_tokens)))
+            seq = SequenceMatcher(None, sig, existing).ratio()
+
+            # Intentionally strict: only highly similar copies are suppressed.
+            if containment >= 0.92 and seq >= 0.90:
+                is_dup = True
+                break
+
+        if is_dup:
+            duplicates += 1
+            continue
+
+        kept.append(row)
+        sigs.append(sig)
+
+    return kept, duplicates
+
 
 
 def filter_conversation_rows(rows, topic="ISRO", excluded_handles=None):
@@ -1014,13 +1136,19 @@ def main():
         and h.strip().lstrip("@").lower() not in excluded_handles
     ]
     per_author_cap = max(1, min(10, env_int("X_MAX_POSTS_PER_AUTHOR", 3)))
+    max_age_hours = max(1, env_int("X_MAX_AGE_HOURS", 24))
 
     existing_all = load_existing_x(limit=5000)
-    existing = filter_conversation_rows(
+    existing_topic = filter_conversation_rows(
         existing_all,
         topic=topic,
         excluded_handles=excluded_handles,
     )
+    existing, existing_stale_removed, existing_future_removed = filter_recent_rows(
+        existing_topic,
+        max_age_hours=max_age_hours,
+    )
+    existing, existing_text_duplicates_removed = deduplicate_conversation_text(existing)
     existing_ids = {r["external_id"] for r in existing}
 
     # Method 1
@@ -1071,19 +1199,35 @@ def main():
     candidate_urls = list(dict.fromkeys(url_inbox + indexed_urls))
     hydrated, hydrate_diag, hydrate_failures = hydrate_urls(candidate_urls, limit=200)
 
-    acquired = filter_conversation_rows(
+    acquired_topic = filter_conversation_rows(
         merge_rows(csv_rows, timeline_rows, hydrated),
         topic=topic,
         excluded_handles=excluded_handles,
     )
+    acquired_recent, acquired_stale_removed, acquired_future_removed = filter_recent_rows(
+        acquired_topic,
+        max_age_hours=max_age_hours,
+    )
+    acquired, acquired_text_duplicates_removed = deduplicate_conversation_text(
+        acquired_recent
+    )
     upserted = upsert(acquired) if acquired else 0
     new_ids = {r["external_id"] for r in acquired} - existing_ids
 
-    # Recombine all free methods with prior stored conversation history.
-    combined = filter_conversation_rows(
+    # Current intelligence uses only fresh, topic-matching, non-official,
+    # de-duplicated conversation. Old stored posts remain in Supabase history
+    # but never backfill the current report.
+    combined_recent = filter_conversation_rows(
         merge_rows(existing, acquired),
         topic=topic,
         excluded_handles=excluded_handles,
+    )
+    combined_recent, combined_stale_removed, combined_future_removed = filter_recent_rows(
+        combined_recent,
+        max_age_hours=max_age_hours,
+    )
+    combined, combined_text_duplicates_removed = deduplicate_conversation_text(
+        combined_recent
     )
     selected = select_diverse_conversation(
         combined,
@@ -1116,7 +1260,15 @@ def main():
                 {row_handle(r) for r in selected if row_handle(r)}
             ),
             "official_or_offtopic_existing_removed": max(
-                0, len(existing_all) - len(existing)
+                0, len(existing_all) - len(existing_topic)
+            ),
+            "max_age_hours": max_age_hours,
+            "existing_stale_removed": existing_stale_removed,
+            "acquired_stale_removed": acquired_stale_removed,
+            "text_duplicates_removed": (
+                existing_text_duplicates_removed
+                + acquired_text_duplicates_removed
+                + combined_text_duplicates_removed
             ),
         },
         "sources": {
@@ -1138,9 +1290,10 @@ def main():
         "hydration_failures": hydrate_failures,
         "latest_csv": str(out_csv),
         "note": (
-            f"Consolidated latest {len(selected)} real unique public-conversation "
-            "rows ABOUT ISRO. Discovery is broad across multiple public web indexes; "
-            "the official @isro handle is excluded only after discovery."
+            f"Consolidated {len(selected)} real unique public-conversation rows "
+            f"ABOUT ISRO from the latest {max_age_hours}h only. Older posts are "
+            "kept in Supabase history but excluded from current analysis; highly "
+            "similar repeated text is suppressed."
         ),
     }
     write_summary(summary)

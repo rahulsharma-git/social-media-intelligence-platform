@@ -732,7 +732,13 @@ def main() -> None:
     # live X API token is configured.
     news_lookback_hours = max(1, env_int("BACKGROUND_LOOKBACK_HOURS", 24))
     news_max_records = max(50, min(200, env_int("NEWS_MAX_RECORDS", 150)))
-    x_fresh_hours = max(1, env_int("X_FRESH_HOURS", 24))
+    x_fresh_hours = max(1, env_int("X_MAX_AGE_HOURS", env_int("X_FRESH_HOURS", 24)))
+    news_max_age_hours = max(
+        1, min(news_lookback_hours, env_int("NEWS_MAX_AGE_HOURS", 24))
+    )
+    news_history_dedup_days = max(
+        1, min(90, env_int("NEWS_HISTORY_DEDUP_DAYS", 30))
+    )
     x_fallback_max_posts = min(50, max(10, env_int("X_FALLBACK_MAX_POSTS", 50)))
     x_min_report_posts = max(10, env_int("X_MIN_REPORT_POSTS", env_int("X_MIN_POSTS", 10)))
     x_excluded_handles = _parse_handle_set(
@@ -755,9 +761,9 @@ def main() -> None:
         routine_recipients = parse_recipients("REPORT_RECIPIENTS")
     alert_recipients = parse_recipients("ALERT_RECIPIENTS")
 
-    print(f"Build 5.18.1 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
+    print(f"Build 5.18.2 background run: {now_ist:%Y-%m-%d %H:%M:%S IST}")
     print(f"Trigger source: {trigger_source}")
-    print(f"Slot: {slot_key}; query={query!r}; news_window={news_lookback_hours}h; x_fresh_window={x_fresh_hours}h")
+    print(f"Slot: {slot_key}; query={query!r}; news_max_age={news_max_age_hours}h; x_max_age={x_fresh_hours}h")
 
     table_ok, current_state = monitoring_current(slot_key)
     _, previous_state = monitoring_previous(slot_key)
@@ -817,7 +823,7 @@ def main() -> None:
     try:
         fresh_news, news_source = core.fetch_free_news(
             query=query,
-            timespan="24h",
+            timespan=f"{news_max_age_hours}h",
             max_records=news_max_records,
         )
         if len(fresh_news):
@@ -850,12 +856,32 @@ def main() -> None:
 
     combined_store = core.normalize_posts(pd.concat([stored, fresh_news], ignore_index=True))
 
-    # NEWS: always a rolling look-back window (default 24h).
-    news_cutoff = pd.Timestamp(now_ist - timedelta(hours=news_lookback_hours))
+    # NEWS: strict current window. Old rows remain in Supabase history but are
+    # not allowed to backfill the current report.
+    news_cutoff = pd.Timestamp(now_ist - timedelta(hours=news_max_age_hours))
+    news_future_limit = pd.Timestamp(now_ist + timedelta(minutes=15))
     news_report_raw = combined_store[
         combined_store["platform"].eq("web_news")
         & (combined_store["timestamp"] >= news_cutoff)
+        & (combined_store["timestamp"] <= news_future_limit)
     ].copy()
+
+    # Reject old stories re-surfaced by search/RSS with a newly indexed URL or
+    # a slightly changed publisher suffix.
+    history_floor = pd.Timestamp(
+        now_ist - timedelta(days=news_history_dedup_days)
+    )
+    news_history = combined_store[
+        combined_store["platform"].eq("web_news")
+        & (combined_store["timestamp"] < news_cutoff)
+        & (combined_store["timestamp"] >= history_floor)
+    ].copy()
+    news_report_raw, news_resurfacing_diag = core.suppress_resurfaced_news(
+        news_report_raw,
+        news_history,
+        query=query,
+    )
+
     news_report, news_quality_diag = core.deduplicate_news_for_analysis(
         news_report_raw,
         query=query,
@@ -869,6 +895,10 @@ def main() -> None:
     )
     news_irrelevant_removed = int(
         news_quality_diag.get("irrelevant_removed", 0)
+    )
+    news_resurfaced_removed = int(
+        news_resurfacing_diag.get("resurfaced_exact_removed", 0)
+        + news_resurfacing_diag.get("resurfaced_near_removed", 0)
     )
 
     # X objective: public conversation ABOUT ISRO, not the official @isro feed.
@@ -894,6 +924,31 @@ def main() -> None:
     x_cutoff = pd.Timestamp(now_ist - timedelta(hours=x_fresh_hours))
     x_fresh_count = int((stored_x["timestamp"] >= x_cutoff).sum()) if len(stored_x) else 0
 
+    # Strict freshness: never backfill current X intelligence with older rows.
+    stored_x = stored_x[
+        (stored_x["timestamp"] >= x_cutoff)
+        & (stored_x["timestamp"] <= pd.Timestamp(now_ist + timedelta(minutes=15)))
+    ].copy()
+
+    # Suppress repeated text copies before author-diverse sampling.
+    if len(stored_x):
+        stored_x["_dedup_sig"] = (
+            stored_x["text"].fillna("").astype(str).str.lower()
+            .str.replace(r"^\s*rt\s+@[a-z0-9_]{1,15}\s*:\s*", "", regex=True)
+            .str.replace(r"https?://\S+", " ", regex=True)
+            .str.replace(r"[^\w#@\u0900-\u097f]+", " ", regex=True)
+            .str.replace(r"\s+", " ", regex=True)
+            .str.strip()
+        )
+        x_before_text_dedup = len(stored_x)
+        stored_x = stored_x.drop_duplicates(
+            subset=["_dedup_sig"],
+            keep="first",
+        ).drop(columns=["_dedup_sig"], errors="ignore")
+        x_text_duplicates_removed = int(x_before_text_dedup - len(stored_x))
+    else:
+        x_text_duplicates_removed = 0
+
     x_report_limit = min(50, x_fallback_max_posts)
     x_report = _select_diverse_x_frame(
         stored_x,
@@ -906,28 +961,21 @@ def main() -> None:
     ) if len(x_report) else 0
 
     if x_report.empty:
-        x_data_mode = "no X records available after all free acquisition methods"
-        x_is_stale_fallback = True
+        x_data_mode = (
+            f"no public-conversation X records within the latest {x_fresh_hours}h"
+        )
+        x_is_stale_fallback = False
     else:
-        report_fresh_count = int((x_report["timestamp"] >= x_cutoff).sum())
-        report_older_count = int(len(x_report) - report_fresh_count)
-        if report_older_count == 0:
-            x_data_mode = (
-                f"latest {len(x_report)} public-conversation X rows from {x_unique_authors} authors; all fresh <= {x_fresh_hours}h"
-            )
-            x_is_stale_fallback = False
-        else:
-            x_data_mode = (
-                f"latest {len(x_report)} public-conversation X rows from "
-                f"{x_unique_authors} authors; {report_fresh_count} fresh "
-                f"<= {x_fresh_hours}h + {report_older_count} stored older rows"
-            )
-            x_is_stale_fallback = True
-
+        x_data_mode = (
+            f"{len(x_report)} public-conversation X rows from "
+            f"{x_unique_authors} authors; all within latest {x_fresh_hours}h; "
+            f"{x_text_duplicates_removed} repeated-text rows suppressed"
+        )
+        x_is_stale_fallback = False
         if len(x_report) < x_min_report_posts:
             x_data_mode += (
                 f"; below minimum target {x_min_report_posts} because only "
-                f"{len(x_report)} real rows are available"
+                f"{len(x_report)} fresh real rows are available"
             )
 
     x_latest = x_report["timestamp"].max() if not x_report.empty else None
@@ -953,9 +1001,10 @@ def main() -> None:
         f"new_this_cycle={x_new_count}; newest={_fmt_ts_ist(x_latest)}."
     )
     print(
-        f"News 24h story snapshot: unique_stories={len(news_report)}; "
-        f"new_story_families={new_news_count}; retained={news_retained_count}; "
-        f"duplicates_suppressed={news_duplicates_removed}; "
+        f"News current-window story snapshot: unique_stories={len(news_report)}; "
+        f"max_age={news_max_age_hours}h; new_story_families={new_news_count}; "
+        f"retained={news_retained_count}; duplicates_suppressed={news_duplicates_removed}; "
+        f"resurfaced_old_stories_suppressed={news_resurfaced_removed}; "
         f"irrelevant_rejected={news_irrelevant_removed}; "
         f"newest={_fmt_ts_ist(news_latest)}."
     )
@@ -1022,12 +1071,14 @@ def main() -> None:
         "x_unique_authors": int(x_unique_authors),
         "x_official_excluded_count": int(x_official_excluded_count),
         "x_offtopic_excluded_count": int(x_offtopic_excluded_count),
+        "x_text_duplicates_removed": int(x_text_duplicates_removed),
         "x_latest_ist": _fmt_ts_ist(x_latest),
         "x_age_hours": None if x_age_hours is None else round(float(x_age_hours), 1),
         "news_new_count": int(new_news_count),
         "news_window_count": int(len(news_report)),
         "news_retained_count": int(news_retained_count),
         "news_duplicates_removed": int(news_duplicates_removed),
+        "news_resurfaced_removed": int(news_resurfaced_removed),
         "news_irrelevant_removed": int(news_irrelevant_removed),
         "news_latest_ist": _fmt_ts_ist(news_latest),
         "news_source": news_source,
@@ -1270,7 +1321,7 @@ def main() -> None:
         monitoring_upsert(run_record)
 
     summary = {
-        "build": "5.18.1",
+        "build": "5.18.2",
         "run_time_ist": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
         "slot_key": slot_key,
         "records": len(df),
@@ -1324,7 +1375,7 @@ def main() -> None:
         [
             "# SMI Background Monitor",
             "",
-            f"- Build: **5.18.1**",
+            f"- Build: **5.18.2**",
             f"- Run time: **{now_ist:%Y-%m-%d %H:%M:%S IST}**",
             f"- Status: **{run_record['status']}**",
             f"- Records analyzed: **{len(df):,}**",
@@ -1334,13 +1385,17 @@ def main() -> None:
             f"- X conversation authors represented: **{x_unique_authors}**",
             f"- Official X rows excluded: **{x_official_excluded_count}**",
             f"- Off-topic X rows excluded: **{x_offtopic_excluded_count}**",
+            f"- Repeated-text X rows suppressed: **{x_text_duplicates_removed}**",
+            f"- X freshness window: **latest {x_fresh_hours}h only**",
             f"- X collector status: **{x_collector_status}**",
             f"- Newest X: **{_fmt_ts_ist(x_latest)}**",
             f"- Unique News story families in rolling {news_lookback_hours}h: **{news_records:,}**",
             f"- New News story families this cycle: **{new_news_count:,}**",
             f"- Retained News story families: **{news_retained_count:,}**",
             f"- Duplicate/near-duplicate News rows suppressed: **{news_duplicates_removed:,}**",
+            f"- Resurfaced old News stories suppressed: **{news_resurfaced_removed:,}**",
             f"- Irrelevant fuzzy News matches rejected: **{news_irrelevant_removed:,}**",
+            f"- News freshness window: **latest {news_max_age_hours}h only**",
             f"- Weighted Positive: **{positive_pct:.1f}%**",
             f"- Weighted Neutral: **{neutral_pct:.1f}%**",
             f"- Weighted Negative: **{negative_pct:.1f}%**",

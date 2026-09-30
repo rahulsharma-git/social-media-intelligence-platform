@@ -60,7 +60,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
     )
 
     st.title("📡 Social Media Intelligence Platform")
-    st.caption("Build 5.18.1 - X discovery recovery + single-email five-PDF pack")
+    st.caption("Build 5.18.2 - freshness + cross-cycle dedup + single-email five-PDF pack")
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -612,7 +612,7 @@ _LAST_NEWS_FETCH_DIAGNOSTICS = {}
 
 
 def _news_user_agent():
-    return {"User-Agent": "Mozilla/5.0 SocialMediaIntelligence/5.17"}
+    return {"User-Agent": "Mozilla/5.0 SocialMediaIntelligence/5.18.2"}
 
 
 def _request_get(url, *, params=None, timeout=45, retries=3):
@@ -916,8 +916,17 @@ def _filter_news_to_timespan(df, timespan):
     if not hours:
         return normalize_posts(df)
     result = normalize_posts(df)
-    cutoff = pd.Timestamp.now(tz=IST) - pd.Timedelta(hours=float(hours))
-    return result[result["timestamp"] >= cutoff].sort_values("timestamp", ascending=False).reset_index(drop=True)
+    now = pd.Timestamp.now(tz=IST)
+    cutoff = now - pd.Timedelta(hours=float(hours))
+    future_limit = now + pd.Timedelta(minutes=15)
+    return (
+        result[
+            (result["timestamp"] >= cutoff)
+            & (result["timestamp"] <= future_limit)
+        ]
+        .sort_values("timestamp", ascending=False)
+        .reset_index(drop=True)
+    )
 
 
 def _title_token_set(value):
@@ -972,6 +981,83 @@ def _news_story_signature(title):
 def news_story_signature(title):
     """Public wrapper used by the background monitor for cycle-level deltas."""
     return _news_story_signature(title)
+
+
+def suppress_resurfaced_news(
+    current_df,
+    history_df,
+    query="ISRO",
+    max_history_rows=2500,
+):
+    """Suppress current rows that are the same story as older historical coverage.
+
+    Free search/RSS feeds sometimes re-surface an old article with a fresh feed
+    timestamp or a slightly modified publisher suffix. Those repeats should not
+    become a fresh intelligence event.
+    """
+    diagnostics = {
+        "current_input": 0,
+        "historical_rows_checked": 0,
+        "resurfaced_exact_removed": 0,
+        "resurfaced_near_removed": 0,
+        "output_rows": 0,
+    }
+    if current_df is None or current_df.empty:
+        empty = pd.DataFrame(columns=STANDARD_COLUMNS)
+        return empty, diagnostics
+
+    current = normalize_posts(current_df).copy()
+    diagnostics["current_input"] = int(len(current))
+
+    if history_df is None or history_df.empty:
+        diagnostics["output_rows"] = int(len(current))
+        return current, diagnostics
+
+    history = normalize_posts(history_df).copy()
+    history = history[history["platform"].eq("web_news")].copy()
+    history = history.sort_values("timestamp", ascending=False).head(max_history_rows)
+    diagnostics["historical_rows_checked"] = int(len(history))
+
+    historical_sigs = []
+    for title in history["text"].astype(str):
+        sig = _news_story_signature(title)
+        if sig:
+            historical_sigs.append(sig)
+
+    exact_set = set(historical_sigs)
+    kept = []
+    for _, row in current.sort_values("timestamp", ascending=False).iterrows():
+        sig = _news_story_signature(row.get("text", ""))
+        if not sig:
+            continue
+        if sig in exact_set:
+            diagnostics["resurfaced_exact_removed"] += 1
+            continue
+
+        near = False
+        # Limit expensive similarity checks to plausible candidates sharing
+        # at least two information-bearing words.
+        tokens = _title_token_set(sig)
+        for old_sig in historical_sigs:
+            old_tokens = _title_token_set(old_sig)
+            if len(tokens & old_tokens) < 2:
+                continue
+            if _near_duplicate_title(sig, old_sig):
+                near = True
+                break
+        if near:
+            diagnostics["resurfaced_near_removed"] += 1
+            continue
+
+        kept.append(row.to_dict())
+
+    result = (
+        normalize_posts(pd.DataFrame(kept))
+        if kept
+        else pd.DataFrame(columns=STANDARD_COLUMNS)
+    )
+    diagnostics["output_rows"] = int(len(result))
+    return result, diagnostics
 
 
 _NEWS_STRICT_TOPIC_ANCHORS = {

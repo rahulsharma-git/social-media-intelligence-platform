@@ -281,3 +281,11 @@ Evidence ZIP archives remain available in the GitHub Actions artifact.
 X discovery now searches broadly across multiple public web indexes and filters
 out `@isro` only after X status URLs are found. This avoids the zero-result
 regression caused by path-level negative `site:` search clauses.
+
+
+## Build 5.18.2 — freshness-first analysis
+
+Current X and News intelligence is now strictly time-bounded. Older records stay
+in Supabase for history but do not backfill current analysis. X repeated text is
+suppressed, News story-family dedup remains active, and old News stories
+re-surfaced by search/RSS are checked against recent history and removed.

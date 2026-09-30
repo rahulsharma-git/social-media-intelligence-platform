@@ -1,0 +1,50 @@
+BUILD 5.18.2 — FRESHNESS + CROSS-CYCLE DEDUP
+
+Problem addressed
+=================
+The free acquisition sources can expose:
+- older X posts that still rank in web indexes,
+- old News stories resurfaced by RSS/search,
+- duplicate/near-duplicate X text,
+- syndicated/repeated News stories.
+
+Current intelligence should not be inflated by those rows.
+
+Build 5.18.2 behavior
+=====================
+
+X
+--
+- Current report uses ONLY X rows within X_MAX_AGE_HOURS (default 24h).
+- Old X rows remain in Supabase history but NEVER backfill the current report.
+- X status URLs are rejected before hydration if their Snowflake timestamp is old.
+- Official @isro remains excluded by default.
+- Exact/repeated X text is suppressed before sentiment/emotion/topic analysis.
+- Author diversity remains enabled.
+- Minimum 10 is a TARGET, not a reason to insert old data. If only 6 fresh real
+  posts exist, the report shows 6 and says the minimum target was not met.
+
+News
+----
+- Current report uses ONLY rows within NEWS_MAX_AGE_HOURS (default 24h).
+- Future/bad timestamps >15 minutes ahead are rejected.
+- Existing exact/near-duplicate story-family suppression remains.
+- New cross-cycle suppression checks the current window against older stored
+  stories from NEWS_HISTORY_DEDUP_DAYS (default 30 days).
+- An old story resurfaced by a new search URL/publisher suffix is excluded from
+  current intelligence.
+
+Recommended GitHub Actions variables
+====================================
+X_MAX_AGE_HOURS = 24
+NEWS_MAX_AGE_HOURS = 24
+NEWS_HISTORY_DEDUP_DAYS = 30
+
+Keep:
+X_EXCLUDE_HANDLES = isro
+X_MAX_POSTS_PER_AUTHOR = 3
+X_MIN_POSTS = 10
+X_MAX_POSTS = 50
+NEWS_MAX_RECORDS = 150
+
+The single-email five-PDF delivery remains unchanged.
