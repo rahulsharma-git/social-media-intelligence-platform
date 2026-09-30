@@ -47,6 +47,8 @@ jobs:
       BACKGROUND_LOOKBACK_HOURS: ${{ vars.BACKGROUND_LOOKBACK_HOURS }}
       BACKGROUND_MAX_RECORDS: ${{ vars.BACKGROUND_MAX_RECORDS }}
       NEWS_MAX_RECORDS: ${{ vars.NEWS_MAX_RECORDS }}
+      NEWS_MAX_AGE_HOURS: ${{ vars.NEWS_MAX_AGE_HOURS }}
+      NEWS_HISTORY_DEDUP_DAYS: ${{ vars.NEWS_HISTORY_DEDUP_DAYS }}
       FAIL_ON_EMAIL_ERROR: ${{ vars.FAIL_ON_EMAIL_ERROR }}
       FORCE_SEND: ${{ github.event_name == 'workflow_dispatch' && inputs.force_send || false }}
       TRIGGER_SOURCE: ${{ github.event_name == 'workflow_dispatch' && inputs.trigger_source || 'github-schedule' }}
@@ -58,6 +60,7 @@ jobs:
       X_PROFILE_HANDLES: ${{ vars.X_PROFILE_HANDLES }}
       X_EXCLUDE_HANDLES: ${{ vars.X_EXCLUDE_HANDLES }}
       X_MAX_POSTS_PER_AUTHOR: ${{ vars.X_MAX_POSTS_PER_AUTHOR }}
+      X_MAX_AGE_HOURS: ${{ vars.X_MAX_AGE_HOURS }}
       X_DISCOVERED_PROFILE_LIMIT: ${{ vars.X_DISCOVERED_PROFILE_LIMIT }}
       X_MIN_POSTS: ${{ vars.X_MIN_POSTS }}
       X_MIN_REPORT_POSTS: ${{ vars.X_MIN_REPORT_POSTS }}
@@ -78,7 +81,7 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Preflight - verify deployed Build 5.18.1 files
+      - name: Preflight - verify deployed Build 5.18.2 files
         shell: bash
         run: |
           echo "Trigger source: ${TRIGGER_SOURCE:-unknown}"
