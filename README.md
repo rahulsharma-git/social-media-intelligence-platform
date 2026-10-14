@@ -322,3 +322,25 @@ Presentation changes:
   no recovery label is printed in the report table.
 - Impact explanations are one short sentence in simple English after the
   required `High Impact.`, `Medium Impact.` or `Low Impact.` line.
+
+## Build 5.19.2 — ISRO-perspective report tone (no LLM)
+
+Scheduled media reports now classify **Positive / Negative / Neutral** from the
+perspective of **ISRO, Department of Space, IN-SPACe and NSIL** instead of using
+generic word sentiment.
+
+- **Negative**: coverage is derogatory, accusatory, disparaging, or materially
+  questions the competence, credibility, integrity, governance, performance or
+  decisions of one of the four institutions.
+- **Positive**: coverage praises or validates an institution, reports a clear
+  achievement, or describes a clearly beneficial development for the Indian
+  space/ISRO ecosystem.
+- **Neutral**: factual/balanced reporting without a clear favourable or
+  reputation-damaging stance.
+
+A delay, anomaly, accident, failure, risk or investigation is **not automatically
+Negative**. Operational/strategic impact remains a separate High / Medium / Low
+assessment with its own short ISRO-focused impact analysis.
+
+This implementation is fully local and deterministic. It does **not** call an
+LLM or require an OpenAI/API key.

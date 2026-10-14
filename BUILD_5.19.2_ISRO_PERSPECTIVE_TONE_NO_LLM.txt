@@ -1,0 +1,55 @@
+BUILD 5.19.2 — ISRO-PERSPECTIVE TONE CLASSIFICATION (NO LLM)
+============================================================
+
+Purpose
+-------
+Make the scheduled news report's Positive / Negative / Neutral field reflect the
+meaning of the article from the perspective of ISRO, Department of Space (DoS),
+IN-SPACe and NSIL.
+
+Key change
+----------
+The old generic VADER/negative-keyword rule in scheduled_media_reports.py has
+been replaced for scheduled reports by a local, deterministic stance classifier.
+
+NEGATIVE
+--------
+Negative is used when coverage is directed against ISRO/DoS/IN-SPACe/NSIL and is
+critical, derogatory, accusatory, disparaging or reputation-damaging, including
+material questioning of competence, credibility, integrity, governance,
+performance or decisions.
+
+POSITIVE
+--------
+Positive is used for direct praise/recognition, successful achievements, and
+clearly beneficial developments for the ISRO/Indian-space ecosystem such as
+successful missions, useful cooperation, technology transfer and meaningful
+private-space ecosystem growth.
+
+NEUTRAL
+-------
+Neutral is used for factual/balanced coverage without a clear favourable or
+reputation-damaging stance.
+
+Important separation
+--------------------
+Bad event != Negative tone.
+Examples: weather postponement, technical anomaly, delay, accident or failure do
+not automatically become Negative. They can remain Neutral in tone while still
+receiving Medium/High operational impact.
+
+Direction matters
+-----------------
+"ISRO was criticised ..." -> Negative
+"Experts criticised ISRO ..." -> Negative
+"ISRO criticised a supplier ..." -> Neutral unless the story also attacks ISRO
+"ISRO launch delayed by weather" -> Neutral
+"ISRO successfully completes test" -> Positive
+"Indian private space ecosystem expands" -> Positive when tied to ISRO/DoS/
+IN-SPACe/NSIL and clearly beneficial to the domestic ecosystem.
+
+Architecture
+------------
+No LLM, OpenAI call, or API key is used. The classifier uses directional stance
+patterns, institutional anchoring, event combinations and headline weighting.
+Impact Level and Impact Analysis remain separate fields.

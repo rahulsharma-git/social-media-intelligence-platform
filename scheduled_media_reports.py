@@ -1,4 +1,4 @@
-"""Build 5.19.1 — deterministic scheduled DoS/ISRO media reports.
+"""Build 5.19.2 — deterministic scheduled DoS/ISRO media reports.
 
 This worker implements the user-supplied master reporting policy without any
 ChatGPT/LLM dependency.  It creates and emails three independent editions:
@@ -49,7 +49,7 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 UTC = timezone.utc
-BUILD = "5.19.1"
+BUILD = "5.19.2"
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MASTER_QUERY_FILE = Path(os.getenv(
@@ -58,7 +58,7 @@ MASTER_QUERY_FILE = Path(os.getenv(
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "Chrome/140 Safari/537.36 SMI-ScheduledReports/5.19.1"
+    "Chrome/140 Safari/537.36 SMI-ScheduledReports/5.19.2"
 )
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": USER_AGENT, "Accept-Language": "en-IN,en;q=0.9"})
@@ -625,7 +625,7 @@ def verify_article(candidate: Candidate):
         if terms and sum(1 for t in terms if t in lower) >= min(2, len(terms)):
             concern_ids.append(i)
 
-    tone = classify_tone(title + " " + body[:1200])
+    tone = classify_tone(title, body[:1600], institutions)
     impact_level, impact_text = classify_impact(title + " " + body[:1600], institutions, concern_ids)
 
     return Article(
@@ -650,20 +650,114 @@ def verify_article(candidate: Candidate):
     ), "ok"
 
 
-def classify_tone(text):
-    lower = text.lower()
-    if SENTIMENT:
-        score = SENTIMENT.polarity_scores(text[:5000])["compound"]
-    else:
-        pos = sum(lower.count(w) for w in ("success", "successful", "achievement", "progress", "agreement", "cooperation", "launch"))
-        neg = sum(lower.count(w) for w in NEGATIVE_HINTS)
-        score = max(-1.0, min(1.0, (pos - neg) / max(3.0, pos + neg)))
-    if any(h in lower for h in NEGATIVE_HINTS) and score < 0.20:
+def classify_tone(title, body="", institutions=None):
+    """Classify media tone from the perspective of ISRO/DoS/IN-SPACe/NSIL.
+
+    This is intentionally *not* generic word sentiment.  The label answers:
+    "How is the covered development portraying or affecting the standing of the
+    four institutions?"
+
+    Negative is reserved for coverage that is derogatory, accusatory,
+    disparaging, or materially questions competence, credibility, integrity,
+    governance, performance, or decisions of ISRO/DoS/IN-SPACe/NSIL.
+
+    A delay, anomaly, failure, accident, risk, investigation, or other adverse
+    event is NOT automatically Negative.  Without a reputational/critical stance
+    toward the institution it normally remains Neutral, while operational impact
+    is assessed separately by classify_impact().
+
+    Positive covers direct praise/achievement as well as clearly beneficial
+    ecosystem developments (for example successful missions, useful partnerships,
+    technology transfer, or growth of India's private space ecosystem).
+    """
+    title = re.sub(r"\s+", " ", str(title or "")).strip()
+    body = re.sub(r"\s+", " ", str(body or "")).strip()
+    full = (title + ". " + body).strip()
+    lower = full.lower()
+
+    # Re-use the same institution vocabulary used by the four-institution gate,
+    # so the stance must be tied to ISRO/DoS/IN-SPACe/NSIL or an ISRO centre.
+    inst_pattern = "(?:" + "|".join(
+        p for patterns in INSTITUTION_PATTERNS.values() for p in patterns
+    ) + ")"
+
+    def _sentences(text):
+        return [x.strip() for x in re.split(r"(?<=[.!?])\s+|\s*[;|]\s*", text) if x.strip()]
+
+    # Patterns encode *direction of stance*, not just vocabulary.  For example,
+    # "ISRO criticised X" does not match the negative passive/object patterns,
+    # while "ISRO was criticised" and "criticism of ISRO" do.
+    negative_patterns = [
+        rf"{inst_pattern}.{{0,55}}\b(?:was|is|has been|had been|were|are)\s+(?:sharply\s+|strongly\s+)?(?:criticis(?:ed|zed)|slammed|accused|blamed|questioned|condemned|mocked|ridiculed)",
+        rf"{inst_pattern}.{{0,65}}\b(?:faces?|faced|draws?|drew|attracts?|attracted|came under|is under|remains under)\s+(?:sharp\s+|strong\s+|growing\s+)?(?:criticism|scrutiny|fire|backlash|questions?|accusations?|allegations?)",
+        rf"\b(?:criticis(?:ed|zed)|slammed|accused|blamed|questioned|condemned|mocked|ridiculed)\b.{{0,70}}{inst_pattern}",
+        rf"\b(?:criticism|accusations?|allegations?|backlash|questions?|charges?)\s+(?:of|against|over|towards?|about)\s+.{{0,45}}{inst_pattern}",
+        rf"{inst_pattern}.{{0,70}}\b(?:mismanagement|incompetence|negligence|corruption|opacity|lack of transparency|poor governance|poor handling|mishandling|wastefulness|wasteful spending|unaccountability|serious lapse|major lapse)",
+        rf"{inst_pattern}.{{0,50}}\b(?:failed to|failure to)\b.{{0,65}}\b(?:explain|deliver|prevent|address|respond|disclose|manage|meet|protect|maintain)",
+        rf"\b(?:audit|report|committee|court|experts?|critics?|opposition|employees?|scientists?)\b.{{0,80}}\b(?:faulted|criticis(?:ed|zed)|blamed|questioned|accused)\b.{{0,55}}{inst_pattern}",
+        rf"\b(?:under fire|in the dock|faces backlash)\b.{{0,45}}{inst_pattern}",
+    ]
+
+    positive_patterns = [
+        rf"{inst_pattern}.{{0,55}}\b(?:was|is|has been|were|are)\s+(?:widely\s+|internationally\s+)?(?:praised|lauded|hailed|commended|applauded|congratulated|recognised|recognized)",
+        rf"\b(?:praised|lauded|hailed|commended|applauded|congratulated)\b.{{0,70}}{inst_pattern}",
+        rf"{inst_pattern}.{{0,75}}\b(?:successfully|success|achievement|milestone|breakthrough|record|historic|first-of-its-kind|demonstrated|validated|completed|accomplished)\b",
+        rf"{inst_pattern}.{{0,60}}\b(?:strengthens?|boosts?|enhances?|expands?|advances?)\b.{{0,70}}\b(?:capability|capacity|mission|technology|cooperation|partnership|ecosystem|self-reliance|leadership)",
+    ]
+
+    neg_score = 0
+    pos_score = 0
+
+    title_lower = title.lower()
+    for pat in negative_patterns:
+        if re.search(pat, title_lower, flags=re.I):
+            neg_score += 4  # headline stance is especially important
+    for pat in positive_patterns:
+        if re.search(pat, title_lower, flags=re.I):
+            pos_score += 4
+
+    for sentence in _sentences(body[:1600]):
+        sl = sentence.lower()
+        # Ignore sentences with no institutional anchor for reputational stance.
+        if not re.search(inst_pattern, sl, flags=re.I):
+            continue
+        neg_score += sum(2 for pat in negative_patterns if re.search(pat, sl, flags=re.I))
+        pos_score += sum(2 for pat in positive_patterns if re.search(pat, sl, flags=re.I))
+
+    # Clearly beneficial developments can be Positive from ISRO's perspective
+    # even when the article is not explicitly praising ISRO.  These are event
+    # combinations, not isolated positive words.
+    beneficial_event_rules = [
+        # Indian private-space ecosystem growth, funding, production or capability.
+        (
+            ("startup", "start-up", "private space", "private-sector", "private sector", "space-tech", "space tech"),
+            ("growth", "expansion", "investment", "funding", "manufacturing", "production", "capacity", "indigenous", "fund raise", "raised"),
+        ),
+        # Technology transfer / commercialisation of domestic space capability.
+        (
+            ("technology transfer", "tech transfer", "licensing", "technology licence", "technology license"),
+            ("industry", "company", "startup", "commercial", "manufacturing", "production"),
+        ),
+        # Cooperation or partnership involving one of the institutions.
+        (
+            ("partnership", "cooperation", "collaboration", "agreement", "memorandum of understanding", "mou"),
+            ("joint mission", "technology", "data", "launch", "satellite", "research", "industry", "international"),
+        ),
+    ]
+    institution_present = bool(re.search(inst_pattern, lower, flags=re.I))
+    if institution_present:
+        for left, right in beneficial_event_rules:
+            if any(x in lower for x in left) and any(x in lower for x in right):
+                pos_score += 2
+
+    # Operationally bad events are deliberately excluded from the negative tone
+    # decision unless one of the directed critical/derogatory patterns matched.
+    # This keeps "launch delayed by weather" Neutral but "ISRO criticised over
+    # repeated delays" Negative.
+    if neg_score >= 3 and neg_score > pos_score:
         return "Negative"
-    if score >= 0.22:
+    if pos_score >= 2 and pos_score > neg_score:
         return "Positive"
-    if score <= -0.22:
-        return "Negative"
     return "Neutral"
 
 
@@ -688,13 +782,6 @@ def classify_impact(text, institutions, concern_ids):
 
     def has(*terms):
         return any(term in lower for term in terms)
-
-    # Some strategically relevant topics may not contain the generic impact
-    # keywords above. Give them a sensible minimum level without overstating it.
-    if level == "Low" and has("startup", "start-up", "space-tech", "space tech", "private sector",
-                              "private-sector", "private company", "private companies",
-                              "industry participation", "commercial space"):
-        level = "Medium"
 
     # Private-space/start-up ecosystem: describe the concrete ecosystem effect.
     if (has("startup", "start-up", "space-tech", "space tech", "private sector", "private-sector",
