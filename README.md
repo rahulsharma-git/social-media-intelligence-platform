@@ -16,7 +16,7 @@ This applies to the dashboard sentiment donut, Sentiment mix by source, PDF
 sentiment distribution, PDF Sentiment mix by source, and negative-only charts
 such as historic negativity and negative share by cluster.
 
-### 2. Browser-independent 30-minute execution
+### 2. Browser-independent hourly execution
 
 The Streamlit/Chrome heartbeat is no longer the primary scheduler. It is kept
 only as an optional fallback and is **off by default**.
@@ -29,7 +29,7 @@ The included workflow is:
 
 `.github/workflows/monitor-every-30-min.yml`
 
-It runs every 30 minutes at **:07 and :37 in Asia/Kolkata**. Chrome can be
+It runs every hour at **:07 in Asia/Kolkata**. Chrome can be
 minimized or closed; the phone can be locked. The worker runs on GitHub's
 runner, not inside the phone/browser session.
 
@@ -152,7 +152,7 @@ the correct PostgREST conflict targets (`external_id` and `slot_key`).
 
 - GitHub Actions schedule is explicitly timezone-aware for Asia/Kolkata.
 - Native schedule runs at :07 and :37 IST.
-- Optional Supabase Cron fallback dispatches the GitHub workflow every 30 minutes.
+- Optional Supabase Cron fallback dispatches the GitHub workflow every hour.
 - Slot-based deduplication prevents duplicate routine emails if both schedulers fire.
 - Trigger source is shown in GitHub run summaries and email/report status text.
 - News remains past 24 hours by default.
@@ -213,7 +213,7 @@ Routine email subjects include the overall Negative percentage.
 ## Build 5.17 — Source Fusion + Confidence-Aware Intelligence
 
 Build 5.17 is based on the supplied Build 5.16.1 hotfix. It preserves the
-working 30-minute scheduler and report/email architecture while upgrading both
+working hourly scheduler and report/email architecture while upgrading both
 acquisition and analysis.
 
 News now fuses GDELT, Google News RSS, Bing News RSS and the official ISRO press
@@ -344,3 +344,8 @@ assessment with its own short ISRO-focused impact analysis.
 
 This implementation is fully local and deterministic. It does **not** call an
 LLM or require an OpenAI/API key.
+
+
+## Build 5.19.4 — fresh comprehensive scan per report window
+
+Each Morning, Evening and Weekly run now starts discovery from scratch for its configured reporting window. Candidate sets from previous runs are not reused. All five search passes and all 44 concern checks are re-run, Google News/Bing News/GDELT coverage is unioned more deeply, every discovered candidate is verified, and legacy candidate/verification caps are ignored for scheduled reports. Google News items that do not directly redirect to the publisher receive an exact-title publisher lookup fallback. Publisher article metadata remains authoritative for final publication-window inclusion. Article-level deduplication still removes only duplicate captures of the same original publisher article.

@@ -2114,8 +2114,8 @@ def render_brief_list(df, polarity="positive", news=False):
 # =========================================================
 # MONITORING / HISTORIC NEGATIVITY HELPERS
 # =========================================================
-def compute_negativity_history(dataframe, freq="30min"):
-    """Return 30-minute negativity history for Overall, X and News."""
+def compute_negativity_history(dataframe, freq="1h"):
+    """Return hourly negativity history for Overall, X and News."""
     cols = ["bucket", "series", "negative_pct", "records"]
     if dataframe is None or dataframe.empty:
         return pd.DataFrame(columns=cols)
@@ -2207,9 +2207,9 @@ def _play_alarm_sound():
 
 
 def _record_monitor_snapshot(negative_pct):
-    """Keep one in-session monitoring snapshot per 30-minute bucket."""
+    """Keep one in-session monitoring snapshot per hourly bucket."""
     now = pd.Timestamp.now(tz="Asia/Kolkata")
-    bucket = now.floor("30min")
+    bucket = now.floor("1h")
     history = st.session_state.get("monitor_snapshots_v57", [])
 
     if not history or history[-1]["bucket"] != bucket.isoformat():
@@ -2219,7 +2219,7 @@ def _record_monitor_snapshot(negative_pct):
                 "negative_pct": float(negative_pct),
             }
         )
-        history = history[-336:]  # one week at 30-minute intervals
+        history = history[-168:]  # one week at hourly intervals
         st.session_state["monitor_snapshots_v57"] = history
 
     return pd.DataFrame(history)
@@ -2302,7 +2302,7 @@ def _pdf_chart_negativity(dataframe, threshold=35.0):
         label=f"Alert threshold ({threshold:.0f}%)",
     )
     ax.set_ylim(0, 100)
-    ax.set_title("Historic negativity - 30 minute buckets (IST)")
+    ax.set_title("Historic negativity - hourly buckets (IST)")
     ax.set_ylabel("Negative share (%)")
     ax.tick_params(axis="x", rotation=30)
     ax.legend(loc="best", fontsize=8)
@@ -4012,7 +4012,7 @@ def build_intelligence_report_pdf(report_df, alert_threshold=35.0, report_kind="
         "This section explains how much activity is present, how the automated tone is distributed, and how the activity changes over time. For News, sentiment means headline framing rather than public opinion.",
     )
     add_chart("Tone / sentiment distribution", _pdf_chart_sentiment(data), "Blue = Positive, Grey = Neutral, Red = Negative.")
-    add_chart("30-minute historic negativity", _pdf_chart_negativity(data, alert_threshold), "The dashed line is the configured negative-share monitoring threshold.")
+    add_chart("Hourly historic negativity", _pdf_chart_negativity(data, alert_threshold), "The dashed line is the configured negative-share monitoring threshold.")
     add_chart("Conversation / coverage volume over time", _pdf_chart_volume(data), "Shows hourly record volume in the analyzed source population.")
     if report_kind == "combined":
         add_chart("Sentiment mix by source", _pdf_chart_platform_sentiment(data), "Compares X/social sentiment with News headline framing; the two measures should not be interpreted as identical constructs.")
@@ -4258,7 +4258,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
         )
 
         st.divider()
-        st.header("30-minute monitoring")
+        st.header("Hourly monitoring")
         st.success(
             "Primary scheduler in Build 5.13: GitHub Actions background worker. "
             "It does not depend on Chrome staying active."
@@ -4291,7 +4291,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
             value=True,
             help=(
                 "Generates a fresh PDF automatically when the dataset changes "
-                "or the 30-minute monitoring cycle advances."
+                "or the hourly monitoring cycle advances."
             ),
         )
         auto_pdf_download = st.toggle(
@@ -4329,11 +4329,11 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
         email_cfg = get_email_config()
 
         routine_email_enabled = st.toggle(
-            "In-app email fallback every 30 minutes",
+            "In-app email fallback every hour",
             value=False,
             help=(
                 "Optional browser-session fallback. The GitHub Actions worker "
-                "is the recommended 30-minute email scheduler in Build 5.13."
+                "is the recommended hourly email scheduler."
             ),
         )
 
@@ -4347,7 +4347,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
         )
 
         st.caption(
-            f"30-min recipients: {len(email_cfg['routine_recipients'])} · "
+            f"Hourly recipients: {len(email_cfg['routine_recipients'])} · "
             f"Alert-only recipients: {len(email_cfg['alert_recipients'])}"
         )
         st.caption(
@@ -4376,15 +4376,15 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
             st.caption("Alarm test sent to the browser.")
 
         # Build 5.11 uses a short heartbeat but schedules work by fixed
-        # India Standard Time half-hour slots (:00 and :30). This avoids the
+        # India Standard Time hourly slots (:00). This avoids the
         # drift caused by scheduling from the moment the browser session opened.
         scheduler_now_ist = datetime.now(IST)
         monitor_slot_start = scheduler_now_ist.replace(
-            minute=(scheduler_now_ist.minute // 30) * 30,
+            minute=0,
             second=0,
             microsecond=0,
         )
-        monitor_slot_end = monitor_slot_start + timedelta(minutes=30)
+        monitor_slot_end = monitor_slot_start + timedelta(hours=1)
         monitor_slot_key = monitor_slot_start.strftime("%Y%m%d_%H%M_IST")
 
         if auto_monitor:
@@ -4652,7 +4652,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
                     )
                 else:
                     st.success(
-                        f"30-minute auto refresh fetched {len(fetched):,} "
+                        f"Hourly auto refresh fetched {len(fetched):,} "
                         f"news items via {provider}."
                     )
             except Exception as exc:
@@ -5085,7 +5085,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
             x="run_timestamp",
             y="negative_pct",
             markers=True,
-            title="Browser-independent 30-minute negativity history",
+            title="Browser-independent hourly negativity history",
         )
         bg_fig.update_traces(
             line_color=NEGATIVE_RED,
@@ -5118,7 +5118,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
             markers=True,
             color_discrete_sequence=[NEGATIVE_RED],
             hover_data={"records": True, "negative_pct": ":.1f"},
-            title="Historic negativity - 30 minute buckets (IST)",
+            title="Historic negativity - hourly buckets (IST)",
         )
         neg_fig.add_hline(
             y=alert_threshold,
@@ -5143,7 +5143,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
             x="bucket",
             y="negative_pct",
             markers=True,
-            title="Live 30-minute monitoring snapshots (this app session)",
+            title="Live hourly monitoring snapshots (this app session)",
         )
         snap_fig.update_traces(
             line_color=NEGATIVE_RED,
@@ -5265,7 +5265,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
 
     st.caption(
         "The historic negativity chart uses the timestamps inside the loaded "
-        "records. The GitHub background chart persists independent 30-minute "
+        "records. The GitHub background chart persists independent hourly "
         "runs in Supabase even when the browser is closed; the live snapshot chart "
         "is retained only as an in-session diagnostic."
     )
@@ -5532,8 +5532,8 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
             - X: ranked by sentiment strength, then engagement and recency.
             - News: ranked by headline sentiment strength, then recency.
 
-            **30-minute monitoring**
-            - When enabled, the active Streamlit session reruns every 30 minutes.
+            **Hourly monitoring**
+            - When enabled, the active Streamlit session runs one monitoring cycle per hour.
             - News is automatically fetched again; Supabase is reloaded; CSV data is re-analysed.
             - Free Streamlit hosting may sleep when nobody is using the app, so this is not a guaranteed always-on scheduler.
 
@@ -5750,7 +5750,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
             st.session_state["routine_email_last_attempt_v511"] = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
             routine_subject = "ISRO Intelligence Pack — " + datetime.now(IST).strftime("%d %b %Y %H:%M IST")
             routine_body = (
-                "Automated 30-minute intelligence pack.\n\n"
+                "Automated hourly intelligence pack.\n\n"
                 f"Generated: {current_generated_at}\n"
                 f"Analyzed records: {len(df):,}\n"
                 f"Negativity: {overall_negative_pct:.1f}%\n"
@@ -5782,7 +5782,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
                 st.warning("Routine email partially delivered; pending recipients will be retried. " + failed_text)
         except Exception as exc:
             st.session_state["last_routine_email_error_v511"] = f"{type(exc).__name__}: {exc}"
-            st.error(f"30-minute intelligence-pack email failed: {type(exc).__name__}: {exc}")
+            st.error(f"Hourly intelligence-pack email failed: {type(exc).__name__}: {exc}")
 
     # Alert-only recipients: combined report + the same supporting pack.
     pending_alert_event = st.session_state.get("pending_alert_email_event_v59")
@@ -5836,7 +5836,7 @@ if os.environ.get("SMI_BACKGROUND_IMPORT") != "1":
         st.write("Generated:", st.session_state.get("report_pack_generated_v514", "Not generated"))
         st.write("Social evidence PDFs:", int(st.session_state.get("x_evidence_count_v514", 0) or 0))
         st.write("News evidence PDFs:", int(st.session_state.get("news_evidence_count_v514", 0) or 0))
-        st.write("Last 30-minute email:", st.session_state.get("last_routine_email_v59", "Not sent in this session"))
+        st.write("Last hourly email:", st.session_state.get("last_routine_email_v59", "Not sent in this session"))
         st.write("Last alert email:", st.session_state.get("last_alert_email_v59", "Not sent in this session"))
         st.write("Last routine send error:", st.session_state.get("last_routine_email_error_v511", "None") or "None")
         st.write("Last alert send error:", st.session_state.get("last_alert_email_error_v511", "None") or "None")

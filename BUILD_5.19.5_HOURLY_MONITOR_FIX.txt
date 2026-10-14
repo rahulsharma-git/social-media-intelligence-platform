@@ -1,0 +1,20 @@
+BUILD 5.19.5 — HOURLY BACKGROUND MONITOR FIX
+
+1. Fixed GitHub background scan crash
+   - Root cause: pandas Arrow string backend passed a regex containing \u0900-\u097f
+     to PyArrow/RE2. RE2 rejects the \u escape and raised:
+       pyarrow.lib.ArrowInvalid: Invalid regular expression: invalid escape sequence: \u
+   - X text deduplication now uses Python re.sub, which correctly supports the
+     Devanagari Unicode range and does not depend on the pandas string backend.
+
+2. Changed routine monitoring cadence from 30 minutes to 1 hour
+   - GitHub Actions: once per hour at :07 IST.
+   - Supabase pg_cron fallback: once per hour at :07.
+   - Background run slot/dedup key: hourly.
+   - Streamlit fallback monitoring slot/history: hourly.
+
+3. Compatibility
+   - The legacy workflow filename monitor-every-30-min.yml is retained so existing
+     GitHub/Supabase dispatch URLs do not break. Its actual schedule is now hourly.
+   - REPORT_RECIPIENTS_30MIN remains accepted as the legacy recipient secret.
+   - Scheduled morning/evening/Friday media reports are unchanged.

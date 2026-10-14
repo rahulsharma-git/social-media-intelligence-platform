@@ -1,0 +1,22 @@
+BUILD 5.19.4 — FRESH WINDOW COMPREHENSIVE SCAN
+
+Purpose
+-------
+Prevent scheduled reports from repeatedly containing only one previously discovered article when multiple qualifying news items exist in the intended reporting window.
+
+Changes
+-------
+1. Every run starts a fresh discovery scan for the edition's intended search/report window.
+2. No candidate cache or prior candidate list is reused.
+3. Every pass query now unions Google News RSS, Bing News RSS and GDELT discovery results.
+4. Per-query discovery depth increased to reduce first-result bias.
+5. All 44 concern checks are freshly re-run using Google + Bing.
+6. Scheduled-report candidate and verification caps are ignored; every discovered candidate is verified.
+7. Google News candidates that remain on an aggregator URL get an exact-title Bing fallback to locate the original publisher URL.
+8. Publisher publication-date extraction now also checks common metadata variants and <time datetime>.
+9. Final eligibility still relies on verified original publisher metadata, never on search/RSS timestamps alone.
+10. Article-level deduplication remains publisher + canonical original URL only, so separate publisher articles about the same event remain separate rows.
+
+Expected behaviour
+------------------
+For an Evening run, the workflow freshly searches the same-day 08:00–20:00 IST window and should report every distinct verified qualifying article found in that window, not just the first or previously seen result. Morning and Weekly behave analogously for their configured windows.

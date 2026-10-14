@@ -79,39 +79,35 @@ revoke all on function public.trigger_smi_github_monitor() from authenticated;
 -- Replace the job if it already exists.
 do $$
 declare
-    existing_job bigint;
+    rec record;
 begin
-    select jobid into existing_job
-      from cron.job
-     where jobname = 'smi-github-monitor-every-30-min'
-     limit 1;
-
-    if existing_job is not null then
-        perform cron.unschedule(existing_job);
-    end if;
+    -- Remove either the legacy half-hour job or a prior hourly job so this
+    -- script is safe to run repeatedly without creating duplicate dispatches.
+    for rec in
+        select jobid
+          from cron.job
+         where jobname in ('smi-github-monitor-every-30-min', 'smi-github-monitor-hourly')
+    loop
+        perform cron.unschedule(rec.jobid);
+    end loop;
 end $$;
 
--- pg_cron uses the database scheduler clock. For a half-hour cadence,
--- minute 07 and 37 remain 30 minutes apart regardless of UTC/IST offset.
+-- pg_cron fallback now dispatches once per hour at minute 07.
 select cron.schedule(
-    'smi-github-monitor-every-30-min',
-    '7,37 * * * *',
+    'smi-github-monitor-hourly',
+    '7 * * * *',
     $$select public.trigger_smi_github_monitor();$$
 );
 
 -- Verification queries:
 select jobid, jobname, schedule, active
 from cron.job
-where jobname = 'smi-github-monitor-every-30-min';
+where jobname in ('smi-github-monitor-every-30-min', 'smi-github-monitor-hourly');
 
 -- Recent scheduler executions:
-select jobid, status, start_time, end_time, return_message
-from cron.job_run_details
-where jobid = (
-    select jobid
-    from cron.job
-    where jobname = 'smi-github-monitor-every-30-min'
-    limit 1
-)
+select d.jobid, d.status, d.start_time, d.end_time, d.return_message
+from cron.job_run_details d
+join cron.job j on j.jobid = d.jobid
+where j.jobname = 'smi-github-monitor-hourly'
 order by start_time desc
 limit 20;

@@ -1,4 +1,4 @@
-"""Browser-independent 30-minute monitor for Build 5.17.
+"""Browser-independent hourly monitor for Build 5.19.5.
 
 Designed for GitHub Actions. It does not require an active Streamlit/Chrome
 session. Each run:
@@ -719,7 +719,7 @@ def _select_diverse_x_frame(
 def main() -> None:
     now_ist = datetime.now(IST)
     slot_start = now_ist.replace(
-        minute=(now_ist.minute // 30) * 30,
+        minute=0,
         second=0,
         microsecond=0,
     )
@@ -931,15 +931,19 @@ def main() -> None:
     ].copy()
 
     # Suppress repeated text copies before author-diverse sampling.
+    # IMPORTANT: use Python's regex engine here, not pandas/pyarrow ``str.replace``.
+    # PyArrow/RE2 rejects ``\u0900`` style escapes ("invalid escape sequence: \u"),
+    # which previously crashed the scheduled background run after news collection.
     if len(stored_x):
-        stored_x["_dedup_sig"] = (
-            stored_x["text"].fillna("").astype(str).str.lower()
-            .str.replace(r"^\s*rt\s+@[a-z0-9_]{1,15}\s*:\s*", "", regex=True)
-            .str.replace(r"https?://\S+", " ", regex=True)
-            .str.replace(r"[^\w#@\u0900-\u097f]+", " ", regex=True)
-            .str.replace(r"\s+", " ", regex=True)
-            .str.strip()
-        )
+        def _dedup_signature(value: object) -> str:
+            text = str(value or "").lower()
+            text = re.sub(r"^\s*rt\s+@[a-z0-9_]{1,15}\s*:\s*", "", text, flags=re.I)
+            text = re.sub(r"https?://\S+", " ", text, flags=re.I)
+            text = re.sub(r"[^\w#@ऀ-ॿ]+", " ", text, flags=re.UNICODE)
+            text = re.sub(r"\s+", " ", text).strip()
+            return text
+
+        stored_x["_dedup_sig"] = stored_x["text"].fillna("").map(_dedup_signature)
         x_before_text_dedup = len(stored_x)
         stored_x = stored_x.drop_duplicates(
             subset=["_dedup_sig"],
@@ -1226,7 +1230,7 @@ def main() -> None:
     ]
     body = "\n".join(status_lines)
 
-    # Routine email: every scheduled slot; only pending recipients are retried.
+    # Routine email: every hourly scheduled slot; only pending recipients are retried.
     routine_pending = [
         addr
         for addr in routine_recipients
@@ -1268,7 +1272,7 @@ def main() -> None:
         # Evidence ZIP archives remain in the GitHub artifact; no second email is sent.\n    elif routine_recipients:
         print("Routine email already completed for this slot; no duplicate send.")
     else:
-        print("No REPORT_RECIPIENTS_30MIN configured; routine email skipped.")
+        print("No routine recipients configured (REPORT_RECIPIENTS_30MIN remains supported as a legacy secret); routine email skipped.")
 
     # Alert-only email: only on an upward threshold crossing.
     alert_failed = {}
@@ -1429,7 +1433,7 @@ def main() -> None:
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
     # Email failures are recorded but are non-fatal by default so the
-    # 30-minute scheduler continues to run, generate PDFs, and preserve data.
+    # Hourly scheduler continues to run, generate PDFs, and preserve data.
     # Set GitHub variable FAIL_ON_EMAIL_ERROR=true if a red workflow is desired.
     if failed_parts:
         message = "Some email deliveries failed: " + " | ".join(failed_parts)

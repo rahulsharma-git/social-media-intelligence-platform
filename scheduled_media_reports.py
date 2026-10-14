@@ -1,4 +1,4 @@
-"""Build 5.19.2 — deterministic scheduled DoS/ISRO media reports.
+"""Build 5.19.4 — fresh-window deterministic scheduled DoS/ISRO media reports.
 
 This worker implements the user-supplied master reporting policy without any
 ChatGPT/LLM dependency.  It creates and emails three independent editions:
@@ -49,7 +49,7 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 UTC = timezone.utc
-BUILD = "5.19.3"
+BUILD = "5.19.4"
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MASTER_QUERY_FILE = Path(os.getenv(
@@ -58,7 +58,7 @@ MASTER_QUERY_FILE = Path(os.getenv(
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "Chrome/140 Safari/537.36 SMI-ScheduledReports/5.19.3"
+    "Chrome/140 Safari/537.36 SMI-ScheduledReports/5.19.4"
 )
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": USER_AGENT, "Accept-Language": "en-IN,en;q=0.9"})
@@ -90,7 +90,7 @@ MISSION_TERMS = [
     "gaganyaan", "chandrayaan", "nisar", "spadex", "pslv", "gslv", "lvm3",
     "sslV", "navic", "nvs-02", "nvs-03", "aditya-l1", "mangalyaan",
     "venus orbiter", "shukrayaan", "bharatiya antariksh station", "bas-01",
-    "lupex", "eos-", "oceansat", "project netra", "poem-", "rlv",
+    "lupex", "eos-", "oceansat", "project netra", "poem-", "rlv", "trishna",
 ]
 
 # 44 mandatory concern prompts. These are discovery prompts only; the relevance
@@ -138,7 +138,10 @@ PASS_QUERIES = {
         'ISRO mission timeline', 'ISRO upcoming missions', 'Gaganyaan Chandrayaan-4 BAS timeline',
         'Gaganyaan G1 Vyommitra launch', 'Bharatiya Antariksh Station BAS-01 roadmap',
         'ISRO 2026 2027 2028 missions', 'Chandrayaan-4 Moon sample return schedule',
-        'Venus Orbiter NISAR NavIC upcoming', 'India space missions explained ISRO',
+        'Venus Orbiter NISAR NavIC TRISHNA upcoming', 'India space missions explained ISRO',
+        'IN-SPACe India latest', 'IN-SPACe indigenous technology semiconductor chips',
+        'NSIL India latest', 'Department of Space India latest',
+        'Indian space sector ISRO IN-SPACe NSIL latest',
     ],
 }
 
@@ -350,10 +353,24 @@ def gdelt_news(query, maxrecords=20, timespan="7d"):
 
 
 def discover_candidates(edition, search_start_ist, report_end_ist):
-    """Five cumulative passes + mandatory 44-concern audit."""
-    max_candidates = env_int("SCHEDULED_REPORT_MAX_CANDIDATES", 0)  # 0 = no retained-candidate cap
+    """Run a fresh, full-window discovery on every invocation.
+
+    No candidate list is reused from a prior report.  All five search passes and
+    all mandatory concern checks are executed again for the requested window.
+    Search/RSS timestamps are discovery hints only; publisher metadata remains
+    the authority for final window eligibility.
+    """
+    # Comprehensive scheduled scans intentionally do not cap retained candidates
+    # or verification count. Legacy environment variables are ignored here so a
+    # stale repository variable cannot silently reduce a report to one/few items.
     candidates = {}
-    diagnostics = {"passes": {}, "concerns_checked": 0, "queries": 0, "errors": []}
+    diagnostics = {
+        "fresh_scan": True,
+        "scan_started_ist": datetime.now(IST).isoformat(),
+        "passes": {}, "concerns_checked": 0, "queries": 0, "errors": [],
+        "discovery_window_start": search_start_ist.isoformat(),
+        "discovery_window_end": report_end_ist.isoformat(),
+    }
 
     # Keep search engines focused on the report dates without treating their
     # timestamps as proof of original publication time.
@@ -366,18 +383,19 @@ def discover_candidates(edition, search_start_ist, report_end_ist):
             diagnostics["queries"] += 1
             full_q = f'{q} after:{date_hint} before:{end_hint}'
             try:
-                # Alternate engines across queries; union, never replacement.
-                sources = google_news_rss(full_q, limit=10)
-                if pass_no >= 2:
-                    sources += bing_news_rss(full_q, limit=7)
-                if pass_no in {1, 4, 5}:
-                    sources += gdelt_news(q, maxrecords=10, timespan="7d")
+                # Fresh union across all available discovery engines for every
+                # query. Higher limits reduce first-result bias and improve
+                # coverage of separately published articles about the same event.
+                window_days = max(2, (report_end_ist.date() - search_start_ist.date()).days + 2)
+                sources = google_news_rss(full_q, limit=30)
+                sources += bing_news_rss(full_q, limit=25)
+                sources += gdelt_news(q, maxrecords=30, timespan=f"{window_days}d")
                 for item in sources:
                     url = canonicalize_url(item.get("url"))
                     if not url:
                         continue
                     key = url
-                    if key not in candidates and (max_candidates <= 0 or len(candidates) < max_candidates):
+                    if key not in candidates:
                         candidates[key] = Candidate(
                             url=url,
                             search_title=item.get("title", ""),
@@ -394,18 +412,20 @@ def discover_candidates(edition, search_start_ist, report_end_ist):
             "cumulative_candidates": len(candidates),
         }
 
-    # 44-concern gap check. Use one lightweight Google News RSS query per concern.
+    # 44-concern gap check. Re-run it fresh on every invocation and use more
+    # than one engine so a single aggregator failure cannot erase coverage.
     # Every concern is checked even if the retained-candidate ceiling is reached.
     for idx, concern in enumerate(CONCERNS, 1):
         diagnostics["concerns_checked"] += 1
         diagnostics["queries"] += 1
         q = f'(ISRO OR "Department of Space" OR "IN-SPACe" OR NSIL) "{concern}"'
         try:
-            for item in google_news_rss(q, limit=5):
+            concern_sources = google_news_rss(q, limit=12) + bing_news_rss(q, limit=10)
+            for item in concern_sources:
                 url = canonicalize_url(item.get("url"))
                 if not url:
                     continue
-                if url not in candidates and (max_candidates <= 0 or len(candidates) < max_candidates):
+                if url not in candidates:
                     candidates[url] = Candidate(
                         url=url,
                         search_title=item.get("title", ""),
@@ -489,6 +509,44 @@ def _parse_published(raw):
     return "", None
 
 
+def _norm_title(value):
+    value = html.unescape(str(value or "")).lower()
+    value = re.sub(r"\s+-\s+[^-]{2,80}$", "", value)
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def resolve_google_candidate(candidate: Candidate):
+    """Resolve a Google News candidate to an original publisher URL.
+
+    First try the ordinary redirect. If Google keeps the aggregator URL, perform
+    a fresh exact-title Bing News lookup and select the closest title match with
+    a non-aggregator URL. This is discovery only; verify_article still fetches
+    and validates the original publisher page.
+    """
+    direct = resolve_google_news_url(candidate.url)
+    if direct:
+        return direct
+    title = re.sub(r"\s+-\s+[^-]{2,80}$", "", candidate.search_title or "").strip()
+    if not title:
+        return ""
+    try:
+        results = bing_news_rss(f'"{title}"', limit=12)
+    except Exception:
+        return ""
+    wanted = set(_norm_title(title).split())
+    best = (0.0, "")
+    for item in results:
+        u = canonicalize_url(item.get("url"))
+        if not u or any(h in urlparse(u).netloc for h in ["news.google.com", "bing.com"]):
+            continue
+        got = set(_norm_title(item.get("title")).split())
+        score = len(wanted & got) / max(1, len(wanted | got))
+        if score > best[0]:
+            best = (score, u)
+    return best[1] if best[0] >= 0.55 else ""
+
+
 def resolve_google_news_url(url):
     # Google News article URLs often don't expose publisher URL via a simple
     # redirect. Fetch once and accept only if final host is no longer Google.
@@ -505,9 +563,9 @@ def resolve_google_news_url(url):
 def verify_article(candidate: Candidate):
     url = candidate.url
     if "news.google.com" in urlparse(url).netloc:
-        url = resolve_google_news_url(url)
+        url = resolve_google_candidate(candidate)
         if not url:
-            return None, "google-news-url-not-resolved"
+            return None, "google-news-url-not-resolved-after-title-fallback"
 
     try:
         r = http_get(url, timeout=28, retries=1)
@@ -547,9 +605,14 @@ def verify_article(candidate: Candidate):
     published_raw = _first_meta(soup, [
         {"property": "article:published_time"}, {"name": "article:published_time"},
         {"name": "datePublished"}, {"itemprop": "datePublished"},
-        {"name": "pubdate"}, {"name": "publish-date"},
-        {"property": "og:published_time"},
+        {"name": "pubdate"}, {"name": "publish-date"}, {"name": "publish_date"},
+        {"name": "date"}, {"name": "parsely-pub-date"}, {"name": "sailthru.date"},
+        {"property": "og:published_time"}, {"property": "datePublished"},
     ])
+    if not published_raw:
+        time_node = soup.find("time", attrs={"datetime": True})
+        if time_node and time_node.get("datetime"):
+            published_raw = str(time_node.get("datetime")).strip()
 
     # JSON-LD is often the most reliable source for publisher first-publication metadata.
     for obj in jsonld_objects:
@@ -1447,8 +1510,9 @@ def run(edition, report_date=None, send_email=True):
     excluded = {}
     evidence_register = []
 
-    max_verify = env_int("SCHEDULED_REPORT_VERIFY_LIMIT", 0)
-    verify_candidates = candidates if max_verify <= 0 else candidates[:max_verify]
+    # Verify every discovered candidate on every run. Comprehensive scheduled
+    # reports must not be truncated by a legacy verification limit.
+    verify_candidates = candidates
     for idx, candidate in enumerate(verify_candidates, 1):
         article, reason = verify_article(candidate)
         if not article:
@@ -1523,7 +1587,9 @@ def run(edition, report_date=None, send_email=True):
         "window_start": start.isoformat(),
         "window_end": end.isoformat(),
         "search_start": search_start.isoformat(),
+        "fresh_scan": True,
         "candidate_count": len(candidates),
+        "verified_candidate_count": len(verify_candidates),
         "verified_included_count": len(articles),
         "excluded_counts": excluded,
         "discovery": discovery_diag,

@@ -57,8 +57,9 @@ jobs:
       REPORT_RECIPIENTS_30MIN: ${{ secrets.REPORT_RECIPIENTS_30MIN }}
       REPORT_RECIPIENTS: ${{ secrets.REPORT_RECIPIENTS }}
 
-      SCHEDULED_REPORT_MAX_CANDIDATES: ${{ vars.SCHEDULED_REPORT_MAX_CANDIDATES }}
-      SCHEDULED_REPORT_VERIFY_LIMIT: ${{ vars.SCHEDULED_REPORT_VERIFY_LIMIT }}
+      # Build 5.19.4: scheduled editions always perform a fresh comprehensive
+      # scan and verify every discovered candidate. Legacy candidate/verify
+      # caps are intentionally not used here.
       FORCE_SCHEDULED_SEND: ${{ github.event_name == 'workflow_dispatch' && inputs.force_send || false }}
 
     steps:

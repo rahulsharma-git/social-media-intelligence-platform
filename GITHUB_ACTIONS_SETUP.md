@@ -53,7 +53,7 @@ The worker file is:
 `background_monitor.py`
 
 The workflow runs at **:07 and :37 every hour in Asia/Kolkata**, exactly a
-30-minute interval. The small offset avoids GitHub's busiest top-of-hour
+hourly interval. The small offset avoids GitHub's busiest top-of-hour
 schedule window.
 
 ## 5. Test once manually
