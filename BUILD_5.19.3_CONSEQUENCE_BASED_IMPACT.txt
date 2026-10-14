@@ -1,0 +1,12 @@
+Build 5.19.3 — Consequence-based ISRO impact classification (no LLM)
+
+Changes:
+- Removed single-keyword High Impact behavior.
+- concern_ids no longer force High Impact by themselves.
+- High now requires direct institutional relevance plus severe/material consequences, or multiple consequence dimensions.
+- Evaluates mission/safety, schedule, resources, strategic/regulatory, institutional and ecosystem consequences separately.
+- Generic mentions of launch, contract, policy, approval, regulation or delay do not automatically become High.
+- Private-sector growth, funding, manufacturing and partnerships normally classify Medium unless paired with a direct severe consequence.
+- Minor delays can remain Low when no wider consequence is evident; major mission-linked delays can be High.
+- Tone remains separate from impact.
+- No LLM or external AI API is used.

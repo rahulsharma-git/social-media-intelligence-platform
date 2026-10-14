@@ -323,7 +323,7 @@ Presentation changes:
 - Impact explanations are one short sentence in simple English after the
   required `High Impact.`, `Medium Impact.` or `Low Impact.` line.
 
-## Build 5.19.2 — ISRO-perspective report tone (no LLM)
+## Build 5.19.3 — ISRO-perspective report tone (no LLM)
 
 Scheduled media reports now classify **Positive / Negative / Neutral** from the
 perspective of **ISRO, Department of Space, IN-SPACe and NSIL** instead of using
