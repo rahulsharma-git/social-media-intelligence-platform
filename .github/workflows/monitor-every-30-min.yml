@@ -1,16 +1,14 @@
-name: SMI Background Monitor - Every 30 Minutes
+name: SMI Background Monitor - Hourly
 
 on:
   schedule:
     - cron: "7 * * * *"
       timezone: "Asia/Kolkata"
-    - cron: "37 * * * *"
-      timezone: "Asia/Kolkata"
 
   workflow_dispatch:
     inputs:
       force_send:
-        description: "Send again even if this half-hour slot was already delivered"
+        description: "Send again even if this hourly slot was already delivered"
         required: false
         default: false
         type: boolean
