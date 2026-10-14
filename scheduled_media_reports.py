@@ -668,22 +668,141 @@ def classify_tone(text):
 
 
 def classify_impact(text, institutions, concern_ids):
-    """Return a short, plain-English institutional impact statement.
+    """Return a short, human-readable impact analysis from ISRO's point of view.
 
-    The first-line impact label is rendered separately in the report.  Keep this
-    explanatory sentence brief so the table remains easy to scan.
+    This runs without an LLM, so the wording is deliberately conservative:
+    explain the likely operational/strategic implication of the *news topic*
+    without inventing facts that are not present in the article.  Keep the
+    output to one or two simple sentences for the report table.
     """
-    lower = text.lower()
-    primary = institutions[0] if institutions else "the institution"
+    lower = re.sub(r"\s+", " ", (text or "").lower()).strip()
+
+    # Impact level remains keyword/evidence based, but the explanation below is
+    # topic-specific instead of a generic "affect work or plans" sentence.
     if concern_ids or any(h in lower for h in HIGH_IMPACT_HINTS):
         level = "High"
-        reason = f"This could directly affect {primary}'s work or plans."
     elif any(h in lower for h in MEDIUM_IMPACT_HINTS):
         level = "Medium"
-        reason = f"This may affect {primary}'s plans or partnerships."
     else:
         level = "Low"
-        reason = f"This is a routine update relevant to {primary}."
+
+    def has(*terms):
+        return any(term in lower for term in terms)
+
+    # Some strategically relevant topics may not contain the generic impact
+    # keywords above. Give them a sensible minimum level without overstating it.
+    if level == "Low" and has("startup", "start-up", "space-tech", "space tech", "private sector",
+                              "private-sector", "private company", "private companies",
+                              "industry participation", "commercial space"):
+        level = "Medium"
+
+    # Private-space/start-up ecosystem: describe the concrete ecosystem effect.
+    if (has("startup", "start-up", "space-tech", "space tech", "private sector", "private-sector",
+            "private company", "private companies", "industry participation", "commercial space")
+            and not has("policy", "regulation", "regulatory", "spectrum", "approval", "privatisation", "privatization")):
+        if has("funding", "investment", "fund raise", "raises", "venture", "capital"):
+            reason = (
+                "More funding for Indian space companies can strengthen ISRO's supplier and innovation ecosystem. "
+                "It may also help private firms take on more technology, manufacturing and service work around ISRO missions."
+            )
+        elif has("manufacturing", "production", "factory", "supply chain", "supplier"):
+            reason = (
+                "Greater private manufacturing capacity can give ISRO a broader domestic supply base. "
+                "That can support faster scaling of launch, satellite and mission hardware while ISRO focuses on higher-end R&D and missions."
+            )
+        else:
+            reason = (
+                "Growth in India's private space sector can strengthen ISRO's wider innovation and supplier ecosystem. "
+                "It could let industry handle more commercial and production work while ISRO concentrates on advanced research and strategic missions."
+            )
+
+    # Technology transfer / licensing / commercialisation.
+    elif has("technology transfer", "tech transfer", "technology licence", "technology license", "licensing"):
+        reason = (
+            "This can move ISRO-developed technology into wider industry use and build domestic capability. "
+            "It may also reduce ISRO's need to handle routine production itself."
+        )
+
+    # Contracts and industrial orders.
+    elif has("contract", "order", "procurement", "tender"):
+        reason = (
+            "This could change how ISRO sources hardware or services and expand industry participation in its programmes. "
+            "The practical impact will depend on the contract's scope, schedule and delivery performance."
+        )
+
+    # Partnerships and international cooperation.
+    elif has("partnership", "cooperation", "collaboration", "agreement", "memorandum of understanding", "mou"):
+        reason = (
+            "The cooperation can give ISRO access to complementary technology, data or mission capability. "
+            "It may reduce development burden and strengthen future joint missions."
+        )
+
+    # Launches, mission milestones, tests and schedules.
+    elif has("failed", "failure", "anomaly", "setback", "crash"):
+        reason = (
+            "A failure or anomaly can force ISRO to review the system before the next mission. "
+            "This may affect schedules, testing requirements and confidence in the affected programme."
+        )
+    elif has("delay", "delayed", "postponed", "slipped", "deferred"):
+        reason = (
+            "The delay may push ISRO's mission timeline and create knock-on effects for testing, launch slots or dependent activities. "
+            "The impact will depend on how quickly the underlying issue is resolved."
+        )
+    elif has("test", "trial", "demonstration"):
+        reason = (
+            "The test result is relevant to ISRO's readiness for the next development or mission milestone. "
+            "A successful result can reduce technical risk; problems could require more testing and schedule changes."
+        )
+    elif has("launch", "mission", "gaganyaan", "chandrayaan", "aditya", "nisar", "navic", "satellite"):
+        reason = (
+            "This development is directly relevant to ISRO's mission execution and near-term programme schedule. "
+            "It may affect readiness, resource planning or the timing of follow-on activities."
+        )
+
+    # Safety and human-spaceflight risk.
+    elif has("crew safety", "human rating", "safety", "accident"):
+        reason = (
+            "This has a direct bearing on ISRO's safety and mission-assurance work. "
+            "It could lead to additional reviews, testing or safeguards before operations proceed."
+        )
+
+    # Policy, regulation, spectrum, approvals, privatisation.
+    elif has("policy", "regulation", "regulatory", "spectrum", "approval", "privatisation", "privatization"):
+        reason = (
+            "The policy or regulatory change could alter the operating environment around ISRO and India's space sector. "
+            "It may affect approvals, commercial participation, partnerships or programme planning."
+        )
+
+    # Budget and public funding.
+    elif has("budget", "funding", "allocation", "expenditure"):
+        reason = (
+            "The funding change can influence how quickly ISRO advances missions, infrastructure and technology programmes. "
+            "Higher support can accelerate priorities, while constraints may require tighter sequencing."
+        )
+
+    # Workforce / institutional capacity.
+    elif has("vacancy", "vacancies", "attrition", "recruitment", "staff", "workforce", "employee"):
+        reason = (
+            "This could affect ISRO's internal capacity to execute programmes on schedule. "
+            "Persistent staffing gaps may increase pressure on specialised teams or slow some activities."
+        )
+
+    # Strategic / security context.
+    elif has("national security", "strategic", "defence", "defense", "military"):
+        reason = (
+            "This may increase the strategic importance of ISRO's space capabilities and supporting infrastructure. "
+            "It could influence priorities for resilience, surveillance, navigation or secure space services."
+        )
+
+    # Conservative fallback: still ISRO-specific, but avoids claiming an effect
+    # the article does not support.
+    elif level == "High":
+        reason = "The development could have a direct bearing on ISRO's current programmes or priorities and may require follow-up action."
+    elif level == "Medium":
+        reason = "The development is relevant to ISRO's programme planning or external partnerships, but its operational effect may be limited for now."
+    else:
+        reason = "The update is relevant to ISRO, but no major immediate operational impact is evident from the report."
+
     return level, reason
 
 
