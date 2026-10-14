@@ -1,0 +1,48 @@
+Build 5.20.0 — Free semantic news analysis with fail-safe local fallback
+
+Purpose
+-------
+Improve scheduled DoS/ISRO report description quality without making the report
+pipeline dependent on a paid LLM.
+
+Provider order
+--------------
+1. Groq: openai/gpt-oss-20b (default)
+2. OpenRouter: openrouter/free (zero-priced route)
+3. Cloudflare Workers AI: @cf/google/gemma-4-26b-a4b-it (default free-plan model)
+4. Existing deterministic local ISRO rules
+
+One successful model call produces together:
+- factual one-sentence crux;
+- Positive / Neutral / Negative tone from the ISRO/DoS/IN-SPACe/NSIL perspective;
+- High / Medium / Low impact level based on consequence;
+- 1-2 short plain-English impact sentences.
+
+Important behaviour
+-------------------
+- Negative is NOT generic bad-news sentiment. It is reserved for derogatory,
+  accusatory, strongly critical, reputation-damaging coverage, or material
+  questioning of the four institutions' competence/integrity/governance/etc.
+- Delay/failure/anomaly does not automatically make tone Negative.
+- High Impact cannot be triggered by a single word such as launch/contract/
+  policy/approval/delay/strategic.
+- Invalid JSON, timeouts, HTTP errors and rate limits automatically move to the
+  next provider.
+- If every remote provider fails, the local rules generate the report normally.
+- API keys are never written into reports or logs by this code.
+
+GitHub Secrets (all optional for semantic analysis)
+----------------------------------------------------
+GROQ_API_KEY
+OPENROUTER_API_KEY
+CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ACCOUNT_ID
+
+GitHub Variables (optional)
+---------------------------
+ENABLE_FREE_LLM_ANALYSIS=1
+GROQ_MODEL=openai/gpt-oss-20b
+OPENROUTER_MODEL=openrouter/free
+CLOUDFLARE_AI_MODEL=@cf/google/gemma-4-26b-a4b-it
+
+Set ENABLE_FREE_LLM_ANALYSIS=0 to force local-only analysis.

@@ -113,3 +113,53 @@ NEGATIVITY_ALERT_THRESHOLD = 35
 ```
 
 Build 5.17 does not require an X bearer token.
+
+## Build 5.20.0 — optional free semantic-analysis setup
+
+The scheduled media report can improve its descriptions with free hosted
+open-weight/open-model inference. Providers are tried in this order:
+
+1. Groq (`openai/gpt-oss-20b` by default)
+2. OpenRouter (`openrouter/free` by default)
+3. Cloudflare Workers AI (`@cf/google/gemma-4-26b-a4b-it` by default)
+4. Existing local rules
+
+### GitHub repository secrets
+
+Go to **Repository -> Settings -> Secrets and variables -> Actions -> Secrets**
+and add whichever providers you want to use:
+
+```text
+GROQ_API_KEY
+OPENROUTER_API_KEY
+CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ACCOUNT_ID
+```
+
+The LLM secrets are optional. Missing providers are skipped automatically.
+
+For Cloudflare, `CLOUDFLARE_ACCOUNT_ID` is the account ID shown in the
+Cloudflare dashboard. Create an API token that is allowed to invoke Workers AI
+for that account and store the token as `CLOUDFLARE_API_TOKEN`.
+
+### Optional GitHub repository variables
+
+Under **Settings -> Secrets and variables -> Actions -> Variables**, you can add:
+
+```text
+ENABLE_FREE_LLM_ANALYSIS=1
+GROQ_MODEL=openai/gpt-oss-20b
+OPENROUTER_MODEL=openrouter/free
+CLOUDFLARE_AI_MODEL=@cf/google/gemma-4-26b-a4b-it
+```
+
+These variables are optional because the code has the values above as defaults.
+Use `ENABLE_FREE_LLM_ANALYSIS=0` if you want to disable all remote model calls.
+
+### Safety / billing design
+
+- `OPENROUTER_MODEL` defaults to `openrouter/free`, not to a paid model ID.
+- Cloudflare is attempted only if both its token and account ID are present.
+- Provider HTTP/rate-limit failures do not stop report generation.
+- If no provider succeeds, the existing local tone/impact/analysis rules are used.
+- Keep provider accounts on their free plans if zero-cost operation is required.

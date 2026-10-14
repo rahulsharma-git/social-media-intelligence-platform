@@ -1,7 +1,6 @@
-"""Build 5.19.4 — fresh-window deterministic scheduled DoS/ISRO media reports.
+"""Build 5.20.0 — semantic-analysis scheduled DoS/ISRO media reports.
 
-This worker implements the user-supplied master reporting policy without any
-ChatGPT/LLM dependency.  It creates and emails three independent editions:
+This worker implements the user-supplied master reporting policy with an optional free hosted open-model analysis chain and a deterministic local fallback.  It creates and emails three independent editions:
 
 * Morning: daily 08:00 IST, normal window previous day 20:00 -> current day
   08:00, plus a prior-day 08:00 -> 20:00 missed-evening omission audit.
@@ -49,7 +48,7 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 UTC = timezone.utc
-BUILD = "5.19.4"
+BUILD = "5.20.0"
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MASTER_QUERY_FILE = Path(os.getenv(
@@ -58,7 +57,7 @@ MASTER_QUERY_FILE = Path(os.getenv(
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "Chrome/140 Safari/537.36 SMI-ScheduledReports/5.19.4"
+    "Chrome/140 Safari/537.36 SMI-ScheduledReports/5.20.0"
 )
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": USER_AGENT, "Accept-Language": "en-IN,en;q=0.9"})
@@ -688,8 +687,20 @@ def verify_article(candidate: Candidate):
         if terms and sum(1 for t in terms if t in lower) >= min(2, len(terms)):
             concern_ids.append(i)
 
+    # Deterministic local assessment is always computed first so the report has a
+    # guaranteed fallback even if every free hosted model is unavailable.
     tone = classify_tone(title, body[:1600], institutions)
     impact_level, impact_text = classify_impact(title + " " + body[:1600], institutions, concern_ids)
+
+    semantic, analysis_source = semantic_article_analysis(
+        title=title, body=body[:5200], publisher=publisher, institutions=institutions
+    )
+    if semantic:
+        tone = semantic["tone"]
+        impact_level = semantic["impact_level"]
+        # Put the factual crux first, then the ISRO-perspective consequence.
+        # This keeps the report short while materially improving description quality.
+        impact_text = f"{semantic['crux']} {semantic['impact_analysis']}".strip()
 
     return Article(
         canonical_url=canonical,
@@ -712,6 +723,189 @@ def verify_article(candidate: Candidate):
         impact_text=impact_text,
     ), "ok"
 
+
+
+def _truthy_env(name, default="1"):
+    return env(name, default).lower() not in {"0", "false", "no", "off", "disabled"}
+
+
+def _extract_json_object(text):
+    """Extract one JSON object from a model response without trusting markdown fences."""
+    text = str(text or "").strip()
+    if not text:
+        return None
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I | re.S).strip()
+    try:
+        obj = json.loads(text)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        pass
+    start, end = text.find("{"), text.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            obj = json.loads(text[start:end + 1])
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            return None
+    return None
+
+
+def _validate_semantic_result(obj):
+    if not isinstance(obj, dict):
+        return None
+    tone = str(obj.get("tone", "")).strip().title()
+    impact = str(obj.get("impact_level", "")).strip().title()
+    crux = re.sub(r"\s+", " ", str(obj.get("crux", "")).strip())
+    analysis = re.sub(r"\s+", " ", str(obj.get("impact_analysis", "")).strip())
+    if tone not in {"Positive", "Neutral", "Negative"}:
+        return None
+    if impact not in {"High", "Medium", "Low"}:
+        return None
+    if not crux or not analysis:
+        return None
+    # Reject suspiciously long/free-form outputs. The report should remain concise.
+    if len(crux) > 420 or len(analysis) > 700:
+        return None
+    return {
+        "tone": tone,
+        "impact_level": impact,
+        "crux": crux,
+        "impact_analysis": analysis,
+    }
+
+
+def _semantic_prompt(title, body, publisher, institutions):
+    inst = ", ".join(institutions or []) or "ISRO / Department of Space / IN-SPACe / NSIL"
+    # Keep enough article context for meaning analysis while controlling free-tier token use.
+    article_text = re.sub(r"\s+", " ", str(body or "")).strip()[:5200]
+    return f"""You are preparing a DoS/ISRO media intelligence report.
+
+Analyse the ARTICLE by meaning and consequence, not by isolated positive or negative words.
+Perspective: ISRO, Department of Space (DoS), IN-SPACe and NSIL. Institutions detected: {inst}.
+
+STRICT RULES
+1. CRUX: one short, plain-English sentence saying what actually happened in the article. Do not invent facts.
+2. TONE is about portrayal of ISRO/DoS/IN-SPACe/NSIL:
+   - Negative only when coverage is derogatory, accusatory, strongly critical, reputation-damaging, or materially questions their competence, integrity, governance, performance or decisions.
+   - Positive when it praises/supports them, reports an achievement/success, or describes a clearly beneficial development for their space ecosystem.
+   - Neutral for factual/balanced reporting without a clear favourable or derogatory stance.
+   A delay, anomaly, accident, failure, risk or investigation is NOT automatically Negative.
+3. IMPACT LEVEL is separate from tone:
+   - High: major direct consequence for an important mission/programme, crew/safety, strategic capability, major resources/budget, or institutional functioning.
+   - Medium: meaningful but indirect/medium-term effect on technology, suppliers, private-space ecosystem, partnership, regulation, commercial activity or planning.
+   - Low: little identifiable consequence for current ISRO/DoS/IN-SPACe/NSIL activities.
+   Do not make High from a single word such as launch, contract, policy, approval, delay or strategic.
+4. IMPACT ANALYSIS: 1-2 short natural sentences explaining specifically why this news matters from the ISRO/DoS perspective. Avoid generic phrases like 'this is relevant to planning'. If little effect is evident, say so plainly.
+5. Use only information supported by the article. Do not speculate beyond a cautious immediate implication.
+
+Return ONLY valid JSON in exactly this shape:
+{{"crux":"...","tone":"Positive|Neutral|Negative","impact_level":"High|Medium|Low","impact_analysis":"..."}}
+
+PUBLISHER: {publisher}
+TITLE: {title}
+ARTICLE: {article_text}
+"""
+
+
+def _openai_compatible_chat(url, api_key, model, prompt, extra_headers=None, timeout=45):
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    headers.update(extra_headers or {})
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "Return concise valid JSON only. Follow the user's classification definitions exactly."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.1,
+        "max_tokens": 420,
+    }
+    r = SESSION.post(url, headers=headers, json=payload, timeout=timeout)
+    r.raise_for_status()
+    data = r.json()
+    content = (((data.get("choices") or [{}])[0].get("message") or {}).get("content"))
+    return _validate_semantic_result(_extract_json_object(content))
+
+
+def _analyse_with_groq(prompt):
+    key = env("GROQ_API_KEY")
+    if not key:
+        return None
+    model = env("GROQ_MODEL", "openai/gpt-oss-20b")
+    return _openai_compatible_chat(
+        "https://api.groq.com/openai/v1/chat/completions", key, model, prompt
+    )
+
+
+def _analyse_with_openrouter(prompt):
+    key = env("OPENROUTER_API_KEY")
+    if not key:
+        return None
+    # openrouter/free guarantees a zero-priced route; no paid model ID is used.
+    model = env("OPENROUTER_MODEL", "openrouter/free")
+    headers = {
+        "HTTP-Referer": env("OPENROUTER_SITE_URL", "https://github.com/"),
+        "X-Title": env("OPENROUTER_APP_NAME", "DoS-ISRO Media Intelligence"),
+    }
+    return _openai_compatible_chat(
+        "https://openrouter.ai/api/v1/chat/completions", key, model, prompt,
+        extra_headers=headers, timeout=60,
+    )
+
+
+def _analyse_with_cloudflare(prompt):
+    token = env("CLOUDFLARE_API_TOKEN")
+    account = env("CLOUDFLARE_ACCOUNT_ID")
+    if not token or not account:
+        return None
+    model = env("CLOUDFLARE_AI_MODEL", "@cf/google/gemma-4-26b-a4b-it")
+    url = f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/{model}"
+    payload = {
+        "messages": [
+            {"role": "system", "content": "Return concise valid JSON only. Follow the classification definitions exactly."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.1,
+        "max_tokens": 420,
+    }
+    r = SESSION.post(
+        url,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=60,
+    )
+    r.raise_for_status()
+    data = r.json()
+    result = data.get("result") or {}
+    content = result.get("response") or result.get("text") or ""
+    if not content and isinstance(result.get("choices"), list):
+        content = (((result.get("choices") or [{}])[0].get("message") or {}).get("content"))
+    return _validate_semantic_result(_extract_json_object(content))
+
+
+def semantic_article_analysis(title, body, publisher, institutions):
+    """Try free hosted open-model providers in order, then return None for local fallback.
+
+    Provider failures are deliberately non-fatal. This function never prevents a report
+    from being generated. Set ENABLE_FREE_LLM_ANALYSIS=0 to disable all remote analysis.
+    """
+    if not _truthy_env("ENABLE_FREE_LLM_ANALYSIS", "1"):
+        return None, "local-rules-disabled-remote"
+    prompt = _semantic_prompt(title, body, publisher, institutions)
+    providers = [
+        ("groq-free", _analyse_with_groq),
+        ("openrouter-free", _analyse_with_openrouter),
+        ("cloudflare-workers-ai-free", _analyse_with_cloudflare),
+    ]
+    for name, fn in providers:
+        try:
+            result = fn(prompt)
+            if result:
+                print(f"[semantic-analysis] provider={name} title={title[:90]!r}")
+                return result, name
+        except Exception as exc:
+            # Never expose API keys; exception strings contain status/reason only.
+            print(f"[semantic-analysis] {name} unavailable: {type(exc).__name__}: {str(exc)[:220]}")
+    return None, "local-rules"
 
 def classify_tone(title, body="", institutions=None):
     """Classify media tone from the perspective of ISRO/DoS/IN-SPACe/NSIL.

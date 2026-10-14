@@ -349,3 +349,42 @@ LLM or require an OpenAI/API key.
 ## Build 5.19.4 — fresh comprehensive scan per report window
 
 Each Morning, Evening and Weekly run now starts discovery from scratch for its configured reporting window. Candidate sets from previous runs are not reused. All five search passes and all 44 concern checks are re-run, Google News/Bing News/GDELT coverage is unioned more deeply, every discovered candidate is verified, and legacy candidate/verification caps are ignored for scheduled reports. Google News items that do not directly redirect to the publisher receive an exact-title publisher lookup fallback. Publisher article metadata remains authoritative for final publication-window inclusion. Article-level deduplication still removes only duplicate captures of the same original publisher article.
+
+## Build 5.20.0 — free semantic analysis for scheduled media reports
+
+Scheduled DoS/ISRO reports can now use a free hosted open-model chain to improve
+short descriptions and impact analysis. The chain is deliberately optional and
+fail-safe:
+
+`Groq -> OpenRouter Free -> Cloudflare Workers AI Free -> local ISRO rules`
+
+Each article is analysed once by the first available provider. The same response
+produces the factual crux, ISRO-perspective tone, consequence-based impact level,
+and a short impact explanation, which avoids contradictions between separate
+classifiers.
+
+Add any or all of these GitHub Actions repository secrets:
+
+```text
+GROQ_API_KEY
+OPENROUTER_API_KEY
+CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ACCOUNT_ID
+```
+
+Recommended optional GitHub Actions variables:
+
+```text
+ENABLE_FREE_LLM_ANALYSIS=1
+GROQ_MODEL=openai/gpt-oss-20b
+OPENROUTER_MODEL=openrouter/free
+CLOUDFLARE_AI_MODEL=@cf/google/gemma-4-26b-a4b-it
+```
+
+You do not need all providers. For example, with only `GROQ_API_KEY`, Groq is
+used first and the local rules remain the automatic fallback. Set
+`ENABLE_FREE_LLM_ANALYSIS=0` to run fully locally.
+
+The scheduled report remains operational when a provider times out, returns
+invalid JSON, is rate-limited, or has exhausted its free quota. No online LLM is
+a hard dependency.
