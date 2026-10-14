@@ -936,7 +936,7 @@ def main() -> None:
             stored_x["text"].fillna("").astype(str).str.lower()
             .str.replace(r"^\s*rt\s+@[a-z0-9_]{1,15}\s*:\s*", "", regex=True)
             .str.replace(r"https?://\S+", " ", regex=True)
-            .str.replace(r"[^\w#@\x{0900}-\x{097F}]+", " ", regex=True)
+            .str.replace(r"[^\w#@\u0900-\u097f]+", " ", regex=True)
             .str.replace(r"\s+", " ", regex=True)
             .str.strip()
         )

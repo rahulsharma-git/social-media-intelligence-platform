@@ -289,3 +289,22 @@ Current X and News intelligence is now strictly time-bounded. Older records stay
 in Supabase for history but do not backfill current analysis. X repeated text is
 suppressed, News story-family dedup remains active, and old News stories
 re-surfaced by search/RSS are checked against recent history and removed.
+
+## Build 5.19.0 — scheduled Morning / Evening / Weekly media reports
+
+Build 5.19.0 adds a standalone, non-LLM scheduled media-report worker while
+leaving the existing 30-minute intelligence monitor unchanged.
+
+- Daily Morning: 08:00 IST
+- Daily Evening: 20:00 IST
+- Friday Weekly: 20:00 IST, in addition to Friday Evening
+- Each edition is emailed separately with exactly its matching DOCX + PDF.
+- Recipients default to the same configured email list used by the 30-minute
+  reports (`REPORT_RECIPIENTS_30MIN`, falling back to `REPORT_RECIPIENTS`).
+- The algorithm is derived from
+  `DoS_ISRO_Master_Query_Three_Reports_8AM_8PM_Friday8PM.txt` and does not call
+  ChatGPT or an OpenAI API.
+
+Before enabling the new GitHub workflow, execute
+`supabase_scheduled_reports_build5.19.sql` once in Supabase SQL Editor.
+The workflow is `.github/workflows/scheduled-media-reports.yml`.

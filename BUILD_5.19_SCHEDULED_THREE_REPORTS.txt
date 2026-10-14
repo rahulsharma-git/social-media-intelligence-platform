@@ -1,0 +1,75 @@
+BUILD 5.19.0 — 08:00 MORNING + 20:00 EVENING + FRIDAY 20:00 WEEKLY
+==================================================================
+
+Base
+----
+Build 5.18.2 Freshness + Cross-Cycle Dedup, including the existing 5.18.1 X
+Discovery Recovery and email-delivery hotfix history. The existing 30-minute
+background monitor remains unchanged.
+
+New feature
+-----------
+A standalone deterministic GitHub worker implements the supplied canonical file:
+DoS_ISRO_Master_Query_Three_Reports_8AM_8PM_Friday8PM.txt
+
+No ChatGPT/OpenAI/LLM API is used by the scheduled report algorithm.
+
+Schedules (IST)
+---------------
+1. Morning — every day 08:00
+   Normal window: previous day 20:00 -> current day 08:00.
+   Also audits previous day 08:00 -> 20:00 for missed Evening articles.
+
+2. Evening — every day 20:00, including Friday
+   Window: same day 08:00 -> 20:00.
+
+3. Weekly — Friday 20:00, additional to Friday Evening
+   Window: previous Friday 20:00 -> current Friday 20:00.
+
+Email behavior
+--------------
+Each edition is a separate email.
+- Morning email: Morning DOCX + Morning PDF only.
+- Evening email: Evening DOCX + Evening PDF only.
+- Friday Weekly email: Weekly DOCX + Weekly PDF only.
+
+Friday 20:00 sends TWO independent messages: Evening first, Weekly second.
+Recipients default to the email IDs already configured for the 30-minute report:
+REPORT_RECIPIENTS_30MIN, then REPORT_RECIPIENTS. An optional
+REPORT_RECIPIENTS_SCHEDULED secret can override this if ever needed.
+
+Report output
+-------------
+A4 landscape, Arial 12 pt, six columns, printed continuous table borders,
+clickable Article links, original publication date on every row, exact time when
+verified or "Time: Not stated", and actual generation time in the footer.
+The PDF is converted from the generated DOCX with LibreOffice.
+
+Algorithm
+---------
+- Five progressively broader search passes with required query counts.
+- Mandatory mission-timeline/explainer discovery queries.
+- 44-concern audit as discovery prompts.
+- Strict four-institution gate: DoS / ISRO / IN-SPACe / NSIL.
+- Article-level dedup only: same publisher + canonical original article identity.
+  Different publisher articles about the same event are retained separately.
+- Exact-time and date-only inclusion rules.
+- Morning missed-Evening catch-up using the Supabase article ledger.
+- Deterministic VADER-based media tone and rule-based institutional impact.
+- No numerical cap on final eligible news rows.
+- No AI/LLM dependence.
+
+New files
+---------
+scheduled_media_reports.py
+.github/workflows/scheduled-media-reports.yml
+scheduled-media-reports.yml
+supabase_scheduled_reports_build5.19.sql
+DoS_ISRO_Master_Query_Three_Reports_8AM_8PM_Friday8PM.txt
+BUILD_5.19_SCHEDULED_THREE_REPORTS.txt
+
+One-time deployment step
+------------------------
+Run supabase_scheduled_reports_build5.19.sql in Supabase SQL Editor before the
+first scheduled Morning run. This enables cross-edition catch-up comparison and
+prevents duplicate email delivery on workflow retries.

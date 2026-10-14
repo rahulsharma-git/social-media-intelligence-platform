@@ -1,0 +1,21 @@
+BUILD 5.19.0 DEPLOYMENT CHECKLIST
+=================================
+
+1. Replace repository contents with this build (or add the new/modified files).
+2. Run supabase_scheduled_reports_build5.19.sql once in Supabase SQL Editor.
+3. Confirm existing secrets remain present:
+   - SUPABASE_URL
+   - SUPABASE_SECRET_KEY or SUPABASE_SERVICE_KEY
+   - SMTP_EMAIL
+   - SMTP_APP_PASSWORD
+   - REPORT_RECIPIENTS_30MIN (preferred existing recipient list) or REPORT_RECIPIENTS
+4. Optional: add REPORT_RECIPIENTS_SCHEDULED only if scheduled editions should
+   go to a different list. If absent, the existing 30-minute recipient list is used.
+5. Commit .github/workflows/scheduled-media-reports.yml.
+6. Leave .github/workflows/monitor-every-30-min.yml enabled; it is independent.
+7. Manually run the new workflow once per edition with workflow_dispatch to test.
+8. Confirm Morning email contains only AM DOCX+PDF.
+9. Confirm Evening email contains only PM DOCX+PDF.
+10. On Friday confirm Weekly email is separate and contains only WEEKLY DOCX+PDF.
+
+No OpenAI/ChatGPT API key is required for the scheduled report worker.

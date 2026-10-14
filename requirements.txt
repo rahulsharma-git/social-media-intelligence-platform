@@ -10,3 +10,4 @@ matplotlib
 streamlit-autorefresh
 beautifulsoup4
 pypdf
+python-docx

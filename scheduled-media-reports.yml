@@ -1,0 +1,168 @@
+name: DoS-ISRO Scheduled Media Reports - 8AM 8PM Weekly
+
+on:
+  schedule:
+    # GitHub cron is UTC. 02:30 UTC = 08:00 IST; 14:30 UTC = 20:00 IST.
+    - cron: "30 2 * * *"
+    - cron: "30 14 * * *"
+
+  workflow_dispatch:
+    inputs:
+      edition:
+        description: "Edition to generate"
+        required: true
+        default: "morning"
+        type: choice
+        options:
+          - morning
+          - evening
+          - weekly
+      report_date:
+        description: "Optional IST report date YYYY-MM-DD (blank = today IST)"
+        required: false
+        default: ""
+        type: string
+      force_send:
+        description: "Resend even if this edition was already emailed"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: dos-isro-scheduled-media-reports
+  cancel-in-progress: false
+
+jobs:
+  scheduled-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: read
+
+    env:
+      TZ: Asia/Kolkata
+      OUTPUT_DIR: output
+      MASTER_QUERY_FILE: DoS_ISRO_Master_Query_Three_Reports_8AM_8PM_Friday8PM.txt
+
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+
+      SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
+      SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
+
+      # Uses the same email IDs as the 30-minute reports by default.
+      # REPORT_RECIPIENTS_SCHEDULED is optional and overrides the fallback.
+      REPORT_RECIPIENTS_SCHEDULED: ${{ secrets.REPORT_RECIPIENTS_SCHEDULED }}
+      REPORT_RECIPIENTS_30MIN: ${{ secrets.REPORT_RECIPIENTS_30MIN }}
+      REPORT_RECIPIENTS: ${{ secrets.REPORT_RECIPIENTS }}
+
+      SCHEDULED_REPORT_MAX_CANDIDATES: ${{ vars.SCHEDULED_REPORT_MAX_CANDIDATES }}
+      SCHEDULED_REPORT_VERIFY_LIMIT: ${{ vars.SCHEDULED_REPORT_VERIFY_LIMIT }}
+      FORCE_SCHEDULED_SEND: ${{ github.event_name == 'workflow_dispatch' && inputs.force_send || false }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Install LibreOffice for DOCX to PDF conversion
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libreoffice-writer fonts-liberation poppler-utils
+          libreoffice --version
+
+      - name: Validate scheduled-report configuration
+        shell: bash
+        run: |
+          set -u
+          missing=0
+          for f in scheduled_media_reports.py DoS_ISRO_Master_Query_Three_Reports_8AM_8PM_Friday8PM.txt; do
+            if [ ! -f "$f" ]; then
+              echo "::error::Missing required file: $f"
+              missing=1
+            fi
+          done
+          if [ -z "${SMTP_EMAIL:-}" ] || [ -z "${SMTP_APP_PASSWORD:-}" ]; then
+            echo "::error::SMTP_EMAIL / SMTP_APP_PASSWORD are required."
+            missing=1
+          fi
+          RECIPIENTS="${REPORT_RECIPIENTS_SCHEDULED:-}${REPORT_RECIPIENTS_30MIN:-}${REPORT_RECIPIENTS:-}"
+          if [ -z "$RECIPIENTS" ]; then
+            echo "::error::No report recipient secret is configured."
+            missing=1
+          fi
+          if [ -z "${SUPABASE_URL:-}" ]; then
+            echo "::warning::SUPABASE_URL is not configured. Reports can run, but cross-edition catch-up ledger/delivery dedup will be unavailable."
+          fi
+          if [ "$missing" -ne 0 ]; then exit 1; fi
+
+      - name: Determine scheduled edition
+        id: edition
+        shell: bash
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "edition=${{ inputs.edition }}" >> "$GITHUB_OUTPUT"
+            echo "report_date=${{ inputs.report_date }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Scheduled runs: distinguish by UTC cron expression.
+          if [ "${{ github.event.schedule }}" = "30 2 * * *" ]; then
+            echo "edition=morning" >> "$GITHUB_OUTPUT"
+          else
+            echo "edition=evening" >> "$GITHUB_OUTPUT"
+          fi
+          echo "report_date=" >> "$GITHUB_OUTPUT"
+
+      - name: Generate and email Morning or Evening edition
+        shell: bash
+        run: |
+          args=(--edition "${{ steps.edition.outputs.edition }}")
+          if [ -n "${{ steps.edition.outputs.report_date }}" ]; then
+            args+=(--report-date "${{ steps.edition.outputs.report_date }}")
+          fi
+          python scheduled_media_reports.py "${args[@]}"
+
+      - name: Generate and email Friday Weekly edition separately
+        if: >-
+          github.event_name == 'schedule' &&
+          github.event.schedule == '30 14 * * *'
+        shell: bash
+        run: |
+          # At 20:00 IST on Friday, send a second independent email containing
+          # ONLY the Weekly DOCX + Weekly PDF.
+          if [ "$(TZ=Asia/Kolkata date +%u)" = "5" ]; then
+            python scheduled_media_reports.py --edition weekly
+          else
+            echo "Not Friday in IST; weekly report not due."
+          fi
+
+      - name: Publish report summary
+        if: always()
+        shell: bash
+        run: |
+          echo "## Scheduled DoS / ISRO Media Reports" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Completed (IST): $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M:%S %Z')" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Each edition is emailed independently with its matching DOCX + PDF." >> "$GITHUB_STEP_SUMMARY"
+          echo "- Friday 20:00 IST sends Evening and Weekly as two separate emails." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          find output -maxdepth 1 -type f -printf '%f\n' | sort | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Preserve generated scheduled reports and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dos-isro-scheduled-reports-${{ github.run_id }}
+          path: output/
+          if-no-files-found: warn
+          retention-days: 14

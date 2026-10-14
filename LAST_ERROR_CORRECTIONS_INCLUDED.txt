@@ -1,0 +1,16 @@
+LAST ERROR CORRECTIONS PRESERVED IN BUILD 5.19.0
+================================================
+
+This package is based on Build 5.18.2 and retains the repair history included
+in that build, including:
+
+- Build 5.18.1 — X Discovery Recovery
+- Build 5.17.5 — Evidence Email Hotfix
+- Build 5.17.4 — Evidence ZIP Restored
+- Build 5.17.3 — Dedup Column Hotfix
+- Build 5.17.1 — Email Delivery Hotfix
+- Build 5.16.1 / 5.16 — X fusion repairs
+- Build 5.14.x freshness/reporting corrections
+
+The existing 30-minute workflow, background monitor and X collector are not
+replaced by the new scheduled-report worker.
