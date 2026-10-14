@@ -1,10 +1,10 @@
-"""Build 5.19.0 — deterministic scheduled DoS/ISRO media reports.
+"""Build 5.19.1 — deterministic scheduled DoS/ISRO media reports.
 
 This worker implements the user-supplied master reporting policy without any
 ChatGPT/LLM dependency.  It creates and emails three independent editions:
 
 * Morning: daily 08:00 IST, normal window previous day 20:00 -> current day
-  08:00, plus a prior-day 08:00 -> 20:00 missed-evening catch-up audit.
+  08:00, plus a prior-day 08:00 -> 20:00 missed-evening omission audit.
 * Evening: daily 20:00 IST, same-day 08:00 -> 20:00.
 * Weekly: Friday 20:00 IST, previous Friday 20:00 -> current Friday 20:00.
 
@@ -49,7 +49,7 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 UTC = timezone.utc
-BUILD = "5.19.0"
+BUILD = "5.19.1"
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MASTER_QUERY_FILE = Path(os.getenv(
@@ -58,7 +58,7 @@ MASTER_QUERY_FILE = Path(os.getenv(
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "Chrome/140 Safari/537.36 SMI-ScheduledReports/5.19.0"
+    "Chrome/140 Safari/537.36 SMI-ScheduledReports/5.19.1"
 )
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": USER_AGENT, "Accept-Language": "en-IN,en;q=0.9"})
@@ -668,17 +668,22 @@ def classify_tone(text):
 
 
 def classify_impact(text, institutions, concern_ids):
+    """Return a short, plain-English institutional impact statement.
+
+    The first-line impact label is rendered separately in the report.  Keep this
+    explanatory sentence brief so the table remains easy to scan.
+    """
     lower = text.lower()
-    inst = ", ".join(institutions) if institutions else "the scoped institutions"
+    primary = institutions[0] if institutions else "the institution"
     if concern_ids or any(h in lower for h in HIGH_IMPACT_HINTS):
         level = "High"
-        reason = f"This development can materially affect {inst}'s programme delivery, policy, safety, schedule or strategic responsibilities."
+        reason = f"This could directly affect {primary}'s work or plans."
     elif any(h in lower for h in MEDIUM_IMPACT_HINTS):
         level = "Medium"
-        reason = f"This development has a direct operational, mission, partnership or capability implication for {inst}."
+        reason = f"This may affect {primary}'s plans or partnerships."
     else:
         level = "Low"
-        reason = f"This item provides routine or contextual information relevant to {inst} without a clearly material operational change."
+        reason = f"This is a routine update relevant to {primary}."
     return level, reason
 
 
@@ -714,7 +719,7 @@ def article_in_window(article: Article, edition, start, end, search_start, previ
             return True, False, "exact-in-window"
         if edition == "morning" and search_start <= dt < start and article.article_key not in prev_keys:
             catch_up = True
-            return True, True, "previous-evening-catch-up"
+            return True, True, "previous-evening-recovery"
         return False, False, "exact-outside-window"
 
     # Date-only eligibility from master policy.
@@ -1000,9 +1005,10 @@ def build_docx(edition, report_date, start, end, articles, output_path):
 
             _set_run_font(r.cells[0].paragraphs[0].add_run(str(idx)), size=12)
 
+            # Always show only the original article title. Prior-evening omission
+            # recovery is an internal selection rule and must not add any visible
+            # label or recovery-style wording to the report.
             title = a.title
-            if a.catch_up:
-                title += "\nCatch-up from previous evening"
             for j, line in enumerate(title.split("\n")):
                 para = r.cells[1].paragraphs[0] if j == 0 else r.cells[1].add_paragraph()
                 _set_run_font(para.add_run(line), bold=(j == 0), size=12)
@@ -1144,7 +1150,7 @@ def send_edition_email(edition, report_date, docx_path, pdf_path):
 
 def report_filenames(edition, report_date):
     ymd = report_date.strftime("%Y%m%d")
-    suffix = {"morning": "AM", "evening": "PM", "weekly": "WEEKLY"}[edition]
+    suffix = {"morning": "Morning", "evening": "Evening", "weekly": "WEEKLY"}[edition]
     base = f"{ymd}_{suffix}_DoS_ISRO_Media_Report"
     return OUTPUT_DIR / f"{base}.docx", OUTPUT_DIR / f"{base}.pdf"
 

@@ -1,0 +1,37 @@
+BUILD 5.19.1 — REPORT PRESENTATION REFINEMENT
+==============================================
+
+Base
+----
+Build 5.19.0 Scheduled Three Reports, on top of Build 5.18.2.
+
+Changes requested after reviewing the generated Morning report
+---------------------------------------------------------------
+1. No visible previous-evening recovery label is printed below a headline.
+   The Morning omission audit still runs internally and recovered articles are
+   still eligible under the configured policy, but the published report shows
+   only the original article title.
+
+2. Impact analysis is shorter and simpler.
+   The first line remains exactly one of:
+   - High Impact.
+   - Medium Impact.
+   - Low Impact.
+   The second line is one short plain-English sentence only.
+
+3. Report filenames use words instead of AM/PM:
+   - YYYYMMDD_Morning_DoS_ISRO_Media_Report.docx / .pdf
+   - YYYYMMDD_Evening_DoS_ISRO_Media_Report.docx / .pdf
+   - YYYYMMDD_WEEKLY_DoS_ISRO_Media_Report.docx / .pdf (unchanged)
+
+Unchanged
+---------
+- Morning 08:00 IST schedule and search windows.
+- Evening 20:00 IST schedule.
+- Friday Weekly 20:00 IST schedule, additional to Friday Evening.
+- Separate email for each edition with its matching DOCX + PDF.
+- Existing recipient configuration.
+- Five-pass discovery, four-institution relevance gate, 44-concern audit,
+  article-level deduplication, date/time rules and Supabase delivery ledger.
+- Existing 30-minute intelligence workflow.
+- No ChatGPT/OpenAI/LLM API dependency.

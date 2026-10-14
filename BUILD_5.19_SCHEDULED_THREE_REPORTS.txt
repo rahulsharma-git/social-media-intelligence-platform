@@ -54,7 +54,7 @@ Algorithm
 - Article-level dedup only: same publisher + canonical original article identity.
   Different publisher articles about the same event are retained separately.
 - Exact-time and date-only inclusion rules.
-- Morning missed-Evening catch-up using the Supabase article ledger.
+- Morning previous-evening omission audit using the Supabase article ledger.
 - Deterministic VADER-based media tone and rule-based institutional impact.
 - No numerical cap on final eligible news rows.
 - No AI/LLM dependence.
@@ -71,5 +71,5 @@ BUILD_5.19_SCHEDULED_THREE_REPORTS.txt
 One-time deployment step
 ------------------------
 Run supabase_scheduled_reports_build5.19.sql in Supabase SQL Editor before the
-first scheduled Morning run. This enables cross-edition catch-up comparison and
+first scheduled Morning run. This enables cross-edition previous-evening comparison and
 prevents duplicate email delivery on workflow retries.

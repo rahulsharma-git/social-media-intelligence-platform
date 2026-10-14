@@ -102,7 +102,7 @@ jobs:
             missing=1
           fi
           if [ -z "${SUPABASE_URL:-}" ]; then
-            echo "::warning::SUPABASE_URL is not configured. Reports can run, but cross-edition catch-up ledger/delivery dedup will be unavailable."
+            echo "::warning::SUPABASE_URL is not configured. Reports can run, but cross-edition previous-evening ledger/delivery dedup will be unavailable."
           fi
           if [ "$missing" -ne 0 ]; then exit 1; fi
 

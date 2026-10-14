@@ -1,4 +1,4 @@
--- Build 5.19.0 — scheduled Morning / Evening / Friday Weekly report ledger.
+-- Build 5.19.x — scheduled Morning / Evening / Friday Weekly report ledger.
 -- Safe to run independently of the existing 30-minute monitoring tables.
 
 create table if not exists public.scheduled_media_report_runs (

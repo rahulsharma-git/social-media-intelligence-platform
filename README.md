@@ -308,3 +308,17 @@ leaving the existing 30-minute intelligence monitor unchanged.
 Before enabling the new GitHub workflow, execute
 `supabase_scheduled_reports_build5.19.sql` once in Supabase SQL Editor.
 The workflow is `.github/workflows/scheduled-media-reports.yml`.
+
+## Build 5.19.1 — report wording and filename refinement
+
+This revision keeps the Build 5.19.0 scheduling, discovery, verification,
+DOCX/PDF generation, Supabase ledger and separate-email behavior unchanged.
+
+Presentation changes:
+- Morning files use `YYYYMMDD_Morning_DoS_ISRO_Media_Report`.
+- Evening files use `YYYYMMDD_Evening_DoS_ISRO_Media_Report`.
+- Weekly files remain `YYYYMMDD_WEEKLY_DoS_ISRO_Media_Report`.
+- Previous-evening omission recovery remains an internal Morning selection rule;
+  no recovery label is printed in the report table.
+- Impact explanations are one short sentence in simple English after the
+  required `High Impact.`, `Medium Impact.` or `Low Impact.` line.
