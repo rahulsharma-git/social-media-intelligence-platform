@@ -2,8 +2,8 @@ name: SMI Background Monitor - Hourly
 
 on:
   schedule:
-    - cron: "7 * * * *"
-      timezone: "Asia/Kolkata"
+    - 'cron: "7 * * * *"
+      'timezone: "Asia/Kolkata"
 
   workflow_dispatch:
     inputs:
