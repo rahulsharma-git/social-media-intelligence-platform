@@ -3,8 +3,8 @@ name: DoS-ISRO Scheduled Media Reports - 8AM 8PM Weekly
 on:
   schedule:
     # GitHub cron is UTC. 02:30 UTC = 08:00 IST; 14:30 UTC = 20:00 IST.
-    - cron: "30 2 * * *"
-    - cron: "30 14 * * *"
+    - cron: "00 08 * * *"
+    - cron: "00 20 * * *"
 
   workflow_dispatch:
     inputs:
