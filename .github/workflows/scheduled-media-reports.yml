@@ -1,4 +1,4 @@
-name: DoS-ISRO Build 6.0 V8 Media Reports - 8AM 8PM
+name: DoS-ISRO Build 6.0.2 V8 Media Reports - 8AM 8PM
 
 on:
   schedule:
@@ -18,7 +18,7 @@ on:
           - evening
           - weekly
       report_date:
-        description: "Optional IST report date YYYY-MM-DD (blank = today IST)"
+        description: "Optional IST report date YYYY-MM-DD (blank/interim = today IST)"
         required: false
         default: ""
         type: string
@@ -163,8 +163,9 @@ jobs:
         shell: bash
         run: |
           args=(--edition "${{ steps.edition.outputs.edition }}")
-          if [ -n "${{ steps.edition.outputs.report_date }}" ]; then
-            args+=(--report-date "${{ steps.edition.outputs.report_date }}")
+          report_date="${{ steps.edition.outputs.report_date }}"
+          if [ -n "$report_date" ]; then
+            args+=(--report-date "$report_date")
           fi
           python scheduled_media_reports.py "${args[@]}"
 
