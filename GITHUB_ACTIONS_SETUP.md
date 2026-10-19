@@ -1,6 +1,6 @@
-# Build 5.13 — 30-minute background scheduler setup
+# GitHub Actions Setup — Build 6.0.0 (hourly monitor + V8 AM/PM reports)
 
-This build moves the important 30-minute work out of the Chrome/Streamlit
+The browser-independent monitor runs hourly outside the Chrome/Streamlit
 session and into **GitHub Actions**. Chrome may be minimized, closed, or the
 phone may be locked; the scheduled GitHub job is independent of the browser.
 
@@ -52,13 +52,12 @@ The worker file is:
 
 `background_monitor.py`
 
-The workflow runs at **:07 and :37 every hour in Asia/Kolkata**, exactly a
-hourly interval. The small offset avoids GitHub's busiest top-of-hour
+The workflow runs once per hour at **:07 in Asia/Kolkata**. The small offset avoids GitHub's busiest top-of-hour
 schedule window.
 
 ## 5. Test once manually
 
-GitHub -> Actions -> `SMI Background Monitor - Every 30 Minutes` -> Run workflow.
+GitHub -> Actions -> `SMI Background Monitor - Hourly` -> Run workflow.
 Leave `force_send = true` for the test.
 
 A successful run should:
@@ -83,7 +82,7 @@ Fresh Web News is fetched automatically every run.
 Build 5.13 turns the in-app Streamlit scheduler/email controls into optional
 fallback controls and disables them by default. Keep them off when GitHub
 Actions is enabled. `monitoring_runs` also remembers which recipients already
-received a given half-hour slot, so retries do not resend successful recipients.
+received a given hourly slot, so retries do not resend successful recipients.
 
 ## Build 5.17 additional recommended variables
 
@@ -163,3 +162,38 @@ Use `ENABLE_FREE_LLM_ANALYSIS=0` if you want to disable all remote model calls.
 - Provider HTTP/rate-limit failures do not stop report generation.
 - If no provider succeeds, the existing local tone/impact/analysis rules are used.
 - Keep provider accounts on their free plans if zero-cost operation is required.
+
+## Build 6.0.0 — V8 scheduled-report setup
+
+The active scheduled report workflow is `.github/workflows/scheduled-media-reports.yml` and the active policy file is `DoS_ISRO_Master_Query_Version_8_0.txt`.
+
+Automatic schedule:
+- Morning 08:00 IST (`30 2 * * *` UTC)
+- Evening 20:00 IST (`30 14 * * *` UTC)
+- Weekly automatic delivery is paused. `weekly` remains available only through explicit manual workflow dispatch.
+
+Existing optional free-model secrets remain unchanged:
+
+```text
+GROQ_API_KEY
+OPENROUTER_API_KEY
+CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ACCOUNT_ID
+```
+
+Recommended/optional Build 6 variables:
+
+```text
+ENABLE_FREE_LLM_ANALYSIS=1
+GROQ_MODEL=openai/gpt-oss-20b
+OPENROUTER_MODEL=openrouter/free
+CLOUDFLARE_AI_MODEL=@cf/google/gemma-4-26b-a4b-it
+MIN_RESEARCH_DWELL_SECONDS=1200
+CONSOLIDATED_ARCHIVE_FILE=<latest archive filename committed to the repository>
+V8_TEMPLATE_FILE=DoS_ISRO_Media_Report_V7_0_Template.docx
+PUBLISHER_RSS_URLS=<optional comma/newline-separated extra publisher RSS/Atom URLs>
+```
+
+`CONSOLIDATED_ARCHIVE_FILE` is strongly recommended. V8 permits only the latest consolidated archive to act as the historical article registry; the worker never modifies it automatically. If it is unavailable, the document can still be generated but delivery is identified as PROVISIONAL outside the DOCX/PDF because historical article deduplication cannot be confirmed.
+
+If the original V7 template DOCX is not present in the GitHub repository, Build 6 programmatically reproduces the specified seven-column A4-landscape design and records the template limitation outside the publication. Add the exact template as `DoS_ISRO_Media_Report_V7_0_Template.docx` (or set `V8_TEMPLATE_FILE`) when available.

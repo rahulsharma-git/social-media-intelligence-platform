@@ -1,4 +1,4 @@
-name: DoS-ISRO Scheduled Media Reports - 8AM 8PM Weekly
+name: DoS-ISRO Build 6.0 V8 Media Reports - 8AM 8PM
 
 on:
   schedule:
@@ -35,14 +35,14 @@ concurrency:
 jobs:
   scheduled-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 90
     permissions:
       contents: read
 
     env:
       TZ: Asia/Kolkata
       OUTPUT_DIR: output
-      MASTER_QUERY_FILE: DoS_ISRO_Master_Query_Three_Reports_8AM_8PM_Friday8PM.txt
+      MASTER_QUERY_FILE: DoS_ISRO_Master_Query_Version_8_0.txt
 
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
@@ -51,7 +51,7 @@ jobs:
       SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
       SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
 
-      # Uses the same email IDs as the 30-minute reports by default.
+      # Uses the same email IDs as the hourly monitor by default.
       # REPORT_RECIPIENTS_SCHEDULED is optional and overrides the fallback.
       REPORT_RECIPIENTS_SCHEDULED: ${{ secrets.REPORT_RECIPIENTS_SCHEDULED }}
       REPORT_RECIPIENTS_30MIN: ${{ secrets.REPORT_RECIPIENTS_30MIN }}
@@ -61,6 +61,12 @@ jobs:
       # scan and verify every discovered candidate. Legacy candidate/verify
       # caps are intentionally not used here.
       FORCE_SCHEDULED_SEND: ${{ github.event_name == 'workflow_dispatch' && inputs.force_send || false }}
+
+      # V8.0 research / archive / template controls.
+      MIN_RESEARCH_DWELL_SECONDS: ${{ vars.MIN_RESEARCH_DWELL_SECONDS || '1200' }}
+      CONSOLIDATED_ARCHIVE_FILE: ${{ vars.CONSOLIDATED_ARCHIVE_FILE }}
+      V8_TEMPLATE_FILE: ${{ vars.V8_TEMPLATE_FILE || 'DoS_ISRO_Media_Report_V7_0_Template.docx' }}
+      PUBLISHER_RSS_URLS: ${{ vars.PUBLISHER_RSS_URLS }}
 
       # Optional free hosted open-model analysis. Missing/failed providers are skipped.
       ENABLE_FREE_LLM_ANALYSIS: ${{ vars.ENABLE_FREE_LLM_ANALYSIS || '1' }}
@@ -97,12 +103,16 @@ jobs:
         run: |
           set -u
           missing=0
-          for f in scheduled_media_reports.py DoS_ISRO_Master_Query_Three_Reports_8AM_8PM_Friday8PM.txt; do
+          for f in scheduled_media_reports.py DoS_ISRO_Master_Query_Version_8_0.txt test_build6_v8.py; do
             if [ ! -f "$f" ]; then
               echo "::error::Missing required file: $f"
               missing=1
             fi
           done
+          if ! grep -q "VERSION 8.0" DoS_ISRO_Master_Query_Version_8_0.txt; then
+            echo "::error::Master Query file is not Version 8.0."
+            missing=1
+          fi
           if [ -z "${SMTP_EMAIL:-}" ] || [ -z "${SMTP_APP_PASSWORD:-}" ]; then
             echo "::error::SMTP_EMAIL / SMTP_APP_PASSWORD are required."
             missing=1
@@ -113,7 +123,15 @@ jobs:
             missing=1
           fi
           if [ -z "${SUPABASE_URL:-}" ]; then
-            echo "::warning::SUPABASE_URL is not configured. Reports can run, but cross-edition previous-evening ledger/delivery dedup will be unavailable."
+            echo "::warning::SUPABASE_URL is not configured. Reports can run, but delivery dedup/persistence will be unavailable."
+          fi
+          if [ -z "${CONSOLIDATED_ARCHIVE_FILE:-}" ]; then
+            echo "::warning::CONSOLIDATED_ARCHIVE_FILE is not configured. V8 historical article dedup cannot be confirmed; delivery may be PROVISIONAL."
+          elif [ ! -f "${CONSOLIDATED_ARCHIVE_FILE}" ]; then
+            echo "::warning::Configured consolidated archive is not present in the repository: ${CONSOLIDATED_ARCHIVE_FILE}"
+          fi
+          if [ ! -f "${V8_TEMPLATE_FILE:-DoS_ISRO_Media_Report_V7_0_Template.docx}" ]; then
+            echo "::warning::Original V7 template is unavailable. Build 6.0 will reproduce the specified seven-column V8 style programmatically."
           fi
           if [ -z "${GROQ_API_KEY:-}" ] && [ -z "${OPENROUTER_API_KEY:-}" ] && { [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; }; then
             echo "::warning::No free LLM provider configured. Scheduled reports will use local ISRO rules only."
@@ -121,6 +139,10 @@ jobs:
             echo "Free semantic-analysis chain is configured; unavailable providers will be skipped automatically."
           fi
           if [ "$missing" -ne 0 ]; then exit 1; fi
+
+      - name: Run Build 6.0 V8 offline smoke checks
+        shell: bash
+        run: python test_build6_v8.py
 
       - name: Determine scheduled edition
         id: edition
@@ -149,20 +171,6 @@ jobs:
           fi
           python scheduled_media_reports.py "${args[@]}"
 
-      - name: Generate and email Friday Weekly edition separately
-        if: >-
-          github.event_name == 'schedule' &&
-          github.event.schedule == '30 14 * * *'
-        shell: bash
-        run: |
-          # At 20:00 IST on Friday, send a second independent email containing
-          # ONLY the Weekly DOCX + Weekly PDF.
-          if [ "$(TZ=Asia/Kolkata date +%u)" = "5" ]; then
-            python scheduled_media_reports.py --edition weekly
-          else
-            echo "Not Friday in IST; weekly report not due."
-          fi
-
       - name: Publish report summary
         if: always()
         shell: bash
@@ -170,7 +178,7 @@ jobs:
           echo "## Scheduled DoS / ISRO Media Reports" >> "$GITHUB_STEP_SUMMARY"
           echo "- Completed (IST): $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M:%S %Z')" >> "$GITHUB_STEP_SUMMARY"
           echo "- Each edition is emailed independently with its matching DOCX + PDF." >> "$GITHUB_STEP_SUMMARY"
-          echo "- Friday 20:00 IST sends Evening and Weekly as two separate emails." >> "$GITHUB_STEP_SUMMARY"
+          echo "- Weekly automatic delivery is paused under Master Query V8.0; weekly remains available only by explicit manual dispatch." >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           find output -maxdepth 1 -type f -printf '%f\n' | sort | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY" || true
 

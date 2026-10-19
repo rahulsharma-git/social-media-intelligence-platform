@@ -1,19 +1,17 @@
-"""Build 5.20.0 — semantic-analysis scheduled DoS/ISRO media reports.
+"""Build 6.0.0 — V8-governed DoS/ISRO media reports with semantic-analysis fallback.
 
-This worker implements the user-supplied master reporting policy with an optional free hosted open-model analysis chain and a deterministic local fallback.  It creates and emails three independent editions:
+This worker implements the user-supplied Master Query V8.0 with an optional free hosted open-model analysis chain and a deterministic local fallback.
 
-* Morning: daily 08:00 IST, normal window previous day 20:00 -> current day
-  08:00, plus a prior-day 08:00 -> 20:00 missed-evening omission audit.
-* Evening: daily 20:00 IST, same-day 08:00 -> 20:00.
-* Weekly: Friday 20:00 IST, previous Friday 20:00 -> current Friday 20:00.
+* Morning: daily 08:00 IST; original first-publication window previous day 20:00 inclusive -> report day 08:00 exclusive.
+* Evening: daily 20:00 IST; original first-publication window report day 08:00 inclusive -> 20:00 exclusive.
+* Weekly: legacy/manual feature retained, but automatic weekly scheduling is paused under V8.0.
 
-Each edition produces one editable DOCX and one PDF generated from that DOCX,
-and sends a separate email to the configured report recipients.  The existing
-30-minute background monitor is intentionally untouched.
+Each generated edition produces an editable DOCX and matching PDF. The existing hourly background monitor and all Build 5.19 monitoring/X features are preserved.
 """
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import html
 import json
@@ -48,16 +46,16 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 UTC = timezone.utc
-BUILD = "5.20.0"
+BUILD = "6.0.0"
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MASTER_QUERY_FILE = Path(os.getenv(
-    "MASTER_QUERY_FILE", "DoS_ISRO_Master_Query_Three_Reports_8AM_8PM_Friday8PM.txt"
+    "MASTER_QUERY_FILE", "DoS_ISRO_Master_Query_Version_8_0.txt"
 ))
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "Chrome/140 Safari/537.36 SMI-ScheduledReports/5.20.0"
+    "Chrome/140 Safari/537.36 SMI-ScheduledReports/6.0.0"
 )
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": USER_AGENT, "Accept-Language": "en-IN,en;q=0.9"})
@@ -92,57 +90,90 @@ MISSION_TERMS = [
     "lupex", "eos-", "oceansat", "project netra", "poem-", "rlv", "trishna",
 ]
 
-# 44 mandatory concern prompts. These are discovery prompts only; the relevance
-# gate below still decides eligibility.
-CONCERNS = [
-    "PSLV failures", "downstream launch delays PSLV failure", "NVS-02 orbit raising problem",
-    "NavIC continuity reliability", "Gaganyaan programme schedule", "Gaganyaan crew safety human rating",
-    "NISAR technical issues postponement", "SpaDeX docking tests", "launch frequency cadence",
-    "transparency failure investigation", "sabotage allegation space programme", "scientist resignation attrition",
-    "staff vacancies recruitment", "salary competitiveness talent retention", "promotions career progression",
-    "employee representation consultation", "contract staffing employment security", "scientific work culture",
-    "privatisation concern institutional response", "PSLV SSLV manufacturing transfer industry",
-    "control launch infrastructure", "strategic technology IP safeguards", "future manufacturing role",
-    "public sector technical expertise retention", "budget allocation shortfall", "budget underutilisation",
-    "Chandrayaan Venus mission progress spending", "Gaganyaan programme cost scope",
-    "space grade component electronics supply", "spaceport launch pad development", "startup funding FDI",
-    "IN-SPACe approvals regulatory clarity", "space legislation policy", "private operator liability insurance",
-    "global launch competitiveness", "satellite broadband approvals delays", "satcom spectrum allocation pricing",
-    "satellite communication security data routing", "unequal satcom operator treatment",
-    "overseas heavy lift launcher dependence", "orbital conjunction collision risk", "space debris production",
-    "controlled disposal re-entry", "space traffic management international coordination",
+# V8.0 44-theme coverage matrix. Themes are coverage checks, never quotas.
+THEMES = [
+    "DoS governance", "ISRO leadership", "IN-SPACe authorizations", "NSIL commerce",
+    "policy regulation", "parliamentary oversight", "budgets", "bilateral multilateral cooperation",
+    "export trade", "launch vehicles", "PSLV", "GSLV", "LVM3", "SSLV",
+    "launch infrastructure", "reusable vehicles", "propulsion", "spacecraft manufacturing",
+    "Earth observation", "climate", "NavIC", "satcom", "spectrum", "astronomy",
+    "lunar", "planetary solar", "Gaganyaan", "crew safety", "space stations",
+    "in-orbit milestones", "anomalies delays", "reliability", "debris", "security",
+    "disaster geospatial", "academia", "technology transfer", "supply chain",
+    "launch startups", "satellite startups", "downstream startups", "private investment mergers",
+    "criticism accountability", "emerging issues",
 ]
 
+# Five substantially distinct V8 discovery passes. This deliberately exceeds the
+# minimum 39-query execution gate (5 + 7 + 8 + 9 + 10). Startups are represented
+# in every pass, and regional/local-language spellings are searched explicitly.
 PASS_QUERIES = {
     1: [
-        'ISRO official update', 'Department of Space India ISRO', 'IN-SPACe official',
-        'NSIL official space India', 'ISRO PIB parliamentary reply',
+        'ISRO Department of Space mission update private space startup',
+        'site:isro.gov.in ISRO mission programme startup industry',
+        'site:pib.gov.in ISRO Department of Space space',
+        'IN-SPACe authorization startup India space',
+        'NSIL commercial launch satellite India',
     ],
     2: [
-        'ISRO India news', 'ISRO Indian Express', 'ISRO The Hindu', 'ISRO Economic Times',
-        'ISRO Hindustan Times', 'ISRO Reuters India', 'ISRO PTI ANI',
+        'ISRO India latest space startup', 'Department of Space India latest',
+        'IN-SPACe NSIL India news', 'ISRO business space economy startup',
+        'ISRO Reuters PTI ANI space India', 'ISRO mission technology industry India',
+        'Indian private space startup ISRO ecosystem',
     ],
     3: [
-        'ISRO regional news', 'ISRO employee grievance', 'ISRO vacancies attrition',
-        'ISRO privatisation outsourcing', 'ISRO technology transfer', 'ISRO safety investigation',
-        'ISRO governance criticism', 'ISRO regional language news',
+        'ISRO regional India space startup', 'ISRO Karnataka Kerala Tamil Nadu Telangana news',
+        'ISRO Hindi अंतरिक्ष इसरो निजी अंतरिक्ष स्टार्टअप',
+        'ISRO Malayalam ഐഎസ്ആർഒ ബഹിരാകാശ സ്റ്റാർട്ടപ്പ്',
+        'ISRO Tamil இஸ்ரோ விண்வெளி ஸ்டார்ட்அப்',
+        'ISRO Telugu ఇస్రో అంతరిక్ష స్టార్టప్',
+        'ISRO Gujarati ઇસરો અવકાશ સ્ટાર્ટઅપ',
+        'ISRO Marathi इस्रो अवकाश स्टार्टअप',
     ],
     4: [
-        'ISRO SpaceNews', 'ISRO international cooperation', 'ISRO scientific journal',
-        'ISRO startup contract', 'IN-SPACe startup contract', 'NSIL launch contract',
-        'ISRO launch technology', 'ISRO satellite communications', 'ISRO regulatory development',
+        'ISRO space science specialist startup', 'ISRO international cooperation commercial space',
+        'ISRO scientific mission analysis', 'Indian space startup launch technology',
+        'Indian satellite startup Earth observation', 'Indian downstream space startup geospatial',
+        'IN-SPACe regulation authorization private space', 'NSIL commercial contract launch satellite',
+        'India space investment merger funding startup',
     ],
     5: [
-        'ISRO latest today', 'Indian Space Research Organisation latest', 'ISRO centre latest',
-        'ISRO mission timeline', 'ISRO upcoming missions', 'Gaganyaan Chandrayaan-4 BAS timeline',
-        'Gaganyaan G1 Vyommitra launch', 'Bharatiya Antariksh Station BAS-01 roadmap',
-        'ISRO 2026 2027 2028 missions', 'Chandrayaan-4 Moon sample return schedule',
-        'Venus Orbiter NISAR NavIC TRISHNA upcoming', 'India space missions explained ISRO',
-        'IN-SPACe India latest', 'IN-SPACe indigenous technology semiconductor chips',
-        'NSIL India latest', 'Department of Space India latest',
-        'Indian space sector ISRO IN-SPACe NSIL latest',
+        'ISRO latest today mission roadmap', 'Indian Space Research Organisation latest today',
+        'Department of Space IN-SPACe NSIL latest', 'Gaganyaan latest roadmap crew safety',
+        'PSLV GSLV LVM3 SSLV latest India', 'NavIC satcom spectrum India latest',
+        'ISRO propulsion reusable launch vehicle latest', 'India Earth observation climate satellite latest',
+        'Indian private space startup latest funding contract', 'ISRO criticism accountability delay anomaly latest',
+        'ISRO outreach exhibition student education latest', 'India space technology transfer supply chain latest',
     ],
 }
+
+OFFICIAL_DOMAINS = (
+    "isro.gov.in", "dos.gov.in", "pib.gov.in", "inspace.gov.in", "inspace.gov.in",
+    "nsilindia.co.in", "nsilindia.com",
+)
+
+PRIVATE_SPACE_TERMS = [
+    "space startup", "space start-up", "space-tech", "space tech", "private space",
+    "private-sector space", "private sector space", "commercial space company",
+    "skyroot", "agnikul", "pixxel", "bellatrix", "dhruva space", "digantara",
+    "galaxeye", "satsure", "pier sight", "piersight", "manastu", "etherealx",
+    "orbitaid", "take me 2 space", "takeme2space", "xovian", "astrogate",
+]
+
+SPACE_RELEVANCE_TERMS = [
+    "space mission", "satellite", "launch vehicle", "rocket", "spacecraft", "earth observation",
+    "remote sensing", "navigation satellite", "satcom", "space station", "lunar", "moon mission",
+    "planetary mission", "solar mission", "space debris", "space traffic", "space policy",
+    "space economy", "space technology", "space science", "astronomy", "orbital",
+]
+
+# Native feeds are an independent discovery channel. More feeds can be supplied
+# through PUBLISHER_RSS_URLS (comma/newline-separated) without code changes.
+DEFAULT_PUBLISHER_RSS = [
+    "https://www.thehindu.com/sci-tech/science/feeder/default.rss",
+    "https://www.thehindu.com/business/Industry/feeder/default.rss",
+    "https://www.thehindu.com/news/national/feeder/default.rss",
+]
 
 NEGATIVE_HINTS = {
     "failure", "failed", "delay", "delayed", "problem", "issue", "concern", "risk",
@@ -190,6 +221,15 @@ class Article:
     tone: str
     impact_level: str
     impact_text: str
+    section: str = "main"
+    remarks_action: str = "Nil action."
+    official_url: str = ""
+    official_title: str = ""
+    official_excerpt: str = ""
+    official_match: bool = False
+    official_possible_difference: bool = False
+    crux: str = ""
+    analysis_source: str = "local-rules"
     catch_up: bool = False
 
     @property
@@ -351,92 +391,248 @@ def gdelt_news(query, maxrecords=20, timespan="7d"):
     } for a in payload.get("articles", []) or []]
 
 
-def discover_candidates(edition, search_start_ist, report_end_ist):
-    """Run a fresh, full-window discovery on every invocation.
+def bing_web_rss(query, limit=20):
+    """Bing web-search RSS; independent of Bing News RSS."""
+    r = http_get(
+        "https://www.bing.com/search",
+        params={"q": query, "format": "rss"},
+        timeout=25,
+        retries=1,
+    )
+    if r.status_code != 200:
+        return []
+    try:
+        root = ET.fromstring(r.content)
+    except Exception:
+        return []
+    out = []
+    for item in root.findall(".//item")[:limit]:
+        out.append({
+            "title": (item.findtext("title") or "").strip(),
+            "url": canonicalize_url(item.findtext("link") or ""),
+            "source": "Bing Web RSS",
+            "published": (item.findtext("pubDate") or "").strip(),
+        })
+    return out
 
-    No candidate list is reused from a prior report.  All five search passes and
-    all mandatory concern checks are executed again for the requested window.
-    Search/RSS timestamps are discovery hints only; publisher metadata remains
-    the authority for final window eligibility.
+
+def publisher_native_rss(url, limit=80):
+    """Fetch a publisher-native RSS/Atom feed as a discovery channel."""
+    r = http_get(url, timeout=25, retries=1)
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}")
+    try:
+        root = ET.fromstring(r.content)
+    except Exception as exc:
+        raise RuntimeError(f"invalid XML: {exc}") from exc
+    out = []
+    # RSS 2.0
+    for item in root.findall(".//item")[:limit]:
+        link = (item.findtext("link") or "").strip()
+        out.append({
+            "title": (item.findtext("title") or "").strip(),
+            "url": canonicalize_url(link),
+            "source": urlparse(url).netloc,
+            "published": (item.findtext("pubDate") or "").strip(),
+        })
+    if out:
+        return out
+    # Atom
+    ns = {"a": "http://www.w3.org/2005/Atom"}
+    for entry in root.findall(".//a:entry", ns)[:limit]:
+        link = ""
+        for node in entry.findall("a:link", ns):
+            href = node.get("href") or ""
+            if href and (node.get("rel") in {None, "alternate"}):
+                link = href
+                break
+        out.append({
+            "title": (entry.findtext("a:title", default="", namespaces=ns) or "").strip(),
+            "url": canonicalize_url(link),
+            "source": urlparse(url).netloc,
+            "published": (entry.findtext("a:published", default="", namespaces=ns) or entry.findtext("a:updated", default="", namespaces=ns) or "").strip(),
+        })
+    return out
+
+
+def _configured_publisher_feeds():
+    raw = env("PUBLISHER_RSS_URLS")
+    extra = [x.strip() for x in re.split(r"[,;\n]+", raw) if x.strip()]
+    return list(dict.fromkeys(DEFAULT_PUBLISHER_RSS + extra))
+
+
+def _candidate_relevance_hint(item):
+    text = f"{item.get('title','')} {item.get('source','')}".lower()
+    inst = any(re.search(p, text, flags=re.I) for pats in INSTITUTION_PATTERNS.values() for p in pats)
+    private = any(t in text for t in PRIVATE_SPACE_TERMS)
+    mission = any(t.lower() in text for t in MISSION_TERMS)
+    space = any(t in text for t in SPACE_RELEVANCE_TERMS)
+    return inst or private or mission or space
+
+
+def discover_candidates(edition, search_start_ist, report_end_ist):
+    """V8 sweep 1: fresh broad discovery for the requested edition.
+
+    Search first, filter second. Every invocation re-runs all five passes and all
+    44 theme checks. Search/feed timestamps are only discovery hints; original
+    publisher metadata controls final eligibility.
     """
-    # Comprehensive scheduled scans intentionally do not cap retained candidates
-    # or verification count. Legacy environment variables are ignored here so a
-    # stale repository variable cannot silently reduce a report to one/few items.
     candidates = {}
     diagnostics = {
         "fresh_scan": True,
+        "sweep": 1,
         "scan_started_ist": datetime.now(IST).isoformat(),
-        "passes": {}, "concerns_checked": 0, "queries": 0, "errors": [],
+        "passes": {},
+        "theme_checks": 0,
+        "queries": 0,
+        "errors": [],
+        "channels": {},
         "discovery_window_start": search_start_ist.isoformat(),
         "discovery_window_end": report_end_ist.isoformat(),
     }
 
-    # Keep search engines focused on the report dates without treating their
-    # timestamps as proof of original publication time.
+    def channel_record(name, ok, hits=0, detail=""):
+        rec = diagnostics["channels"].setdefault(name, {"attempts": 0, "successes": 0, "hits": 0, "errors": []})
+        rec["attempts"] += 1
+        if ok:
+            rec["successes"] += 1
+            rec["hits"] += int(hits or 0)
+        elif detail:
+            rec["errors"].append(str(detail)[:280])
+
+    def add_items(items, pass_no, query, channel):
+        before = len(candidates)
+        for item in items or []:
+            url = canonicalize_url(item.get("url"))
+            if not url:
+                continue
+            if url not in candidates:
+                candidates[url] = Candidate(
+                    url=url,
+                    search_title=item.get("title", ""),
+                    search_source=item.get("source", channel),
+                    search_published=item.get("published", ""),
+                    pass_no=pass_no,
+                    query=query,
+                )
+        return len(candidates) - before
+
     date_hint = search_start_ist.strftime("%Y-%m-%d")
     end_hint = (report_end_ist.date() + timedelta(days=1)).isoformat()
+    window_days = max(2, (report_end_ist.date() - search_start_ist.date()).days + 2)
 
+    # Five distinct passes.
     for pass_no in range(1, 6):
         added_before = len(candidates)
+        submitted = 0
         for q in PASS_QUERIES[pass_no]:
+            submitted += 1
             diagnostics["queries"] += 1
-            full_q = f'{q} after:{date_hint} before:{end_hint}'
-            try:
-                # Fresh union across all available discovery engines for every
-                # query. Higher limits reduce first-result bias and improve
-                # coverage of separately published articles about the same event.
-                window_days = max(2, (report_end_ist.date() - search_start_ist.date()).days + 2)
-                sources = google_news_rss(full_q, limit=30)
-                sources += bing_news_rss(full_q, limit=25)
-                sources += gdelt_news(q, maxrecords=30, timespan=f"{window_days}d")
-                for item in sources:
-                    url = canonicalize_url(item.get("url"))
-                    if not url:
-                        continue
-                    key = url
-                    if key not in candidates:
-                        candidates[key] = Candidate(
-                            url=url,
-                            search_title=item.get("title", ""),
-                            search_source=item.get("source", ""),
-                            search_published=item.get("published", ""),
-                            pass_no=pass_no,
-                            query=q,
-                        )
-            except Exception as exc:
-                diagnostics["errors"].append(f"pass {pass_no} query {q}: {type(exc).__name__}: {exc}")
+            full_q = f"{q} after:{date_hint} before:{end_hint}"
+            source_calls = [
+                ("Google News RSS", lambda q=full_q: google_news_rss(q, limit=35)),
+                ("Bing News RSS", lambda q=full_q: bing_news_rss(q, limit=30)),
+                ("Bing Web RSS", lambda q=full_q: bing_web_rss(q, limit=25)),
+                ("GDELT", lambda q=q: gdelt_news(q, maxrecords=35, timespan=f"{window_days}d")),
+            ]
+            for channel, fn in source_calls:
+                try:
+                    items = fn()
+                    channel_record(channel, True, len(items))
+                    add_items(items, pass_no, q, channel)
+                except Exception as exc:
+                    msg = f"pass {pass_no} {channel} query {q}: {type(exc).__name__}: {exc}"
+                    diagnostics["errors"].append(msg)
+                    channel_record(channel, False, detail=msg)
         diagnostics["passes"][str(pass_no)] = {
             "queries_required": len(PASS_QUERIES[pass_no]),
+            "queries_submitted": submitted,
             "candidates_added": len(candidates) - added_before,
             "cumulative_candidates": len(candidates),
         }
 
-    # 44-concern gap check. Re-run it fresh on every invocation and use more
-    # than one engine so a single aggregator failure cannot erase coverage.
-    # Every concern is checked even if the retained-candidate ceiling is reached.
-    for idx, concern in enumerate(CONCERNS, 1):
-        diagnostics["concerns_checked"] += 1
+    # 44-theme coverage matrix checks. These are discovery prompts only and do
+    # not require every theme to produce a report row.
+    for idx, theme in enumerate(THEMES, 1):
+        diagnostics["theme_checks"] += 1
         diagnostics["queries"] += 1
-        q = f'(ISRO OR "Department of Space" OR "IN-SPACe" OR NSIL) "{concern}"'
-        try:
-            concern_sources = google_news_rss(q, limit=12) + bing_news_rss(q, limit=10)
-            for item in concern_sources:
-                url = canonicalize_url(item.get("url"))
-                if not url:
-                    continue
-                if url not in candidates:
-                    candidates[url] = Candidate(
-                        url=url,
-                        search_title=item.get("title", ""),
-                        search_source=item.get("source", ""),
-                        search_published=item.get("published", ""),
-                        pass_no=5,
-                        query=f"Concern {idx}: {concern}",
-                    )
-        except Exception as exc:
-            diagnostics["errors"].append(f"concern {idx}: {type(exc).__name__}: {exc}")
+        q = f'(ISRO OR "Department of Space" OR "IN-SPACe" OR NSIL OR "Indian space startup") "{theme}"'
+        for channel, fn in [
+            ("Google News RSS", lambda q=q: google_news_rss(q, limit=12)),
+            ("Bing News RSS", lambda q=q: bing_news_rss(q, limit=10)),
+        ]:
+            try:
+                items = fn()
+                channel_record(channel, True, len(items))
+                add_items(items, 5, f"Theme {idx}: {theme}", channel)
+            except Exception as exc:
+                msg = f"theme {idx} {channel}: {type(exc).__name__}: {exc}"
+                diagnostics["errors"].append(msg)
+                channel_record(channel, False, detail=msg)
 
+    # Publisher-native RSS/Atom is attempted independently, not inferred from
+    # aggregator results. Filter only by a broad discovery hint here; substantive
+    # screening happens after fetching the publisher article.
+    for feed in _configured_publisher_feeds():
+        try:
+            items = publisher_native_rss(feed, limit=100)
+            channel_record("Publisher-native RSS/Atom", True, len(items))
+            add_items([i for i in items if _candidate_relevance_hint(i)], 4, f"Publisher RSS: {feed}", "Publisher-native RSS/Atom")
+        except Exception as exc:
+            msg = f"publisher RSS {feed}: {type(exc).__name__}: {exc}"
+            diagnostics["errors"].append(msg)
+            channel_record("Publisher-native RSS/Atom", False, detail=msg)
+
+    diagnostics["candidate_count"] = len(candidates)
+    diagnostics["scan_finished_ist"] = datetime.now(IST).isoformat()
     return list(candidates.values()), diagnostics
+
+
+def gap_reconciliation_candidates(articles, search_start_ist, report_end_ist, max_events=30):
+    """V8 sweep 2: re-search discovered substantive events for missed publishers."""
+    candidates = {}
+    diag = {"sweep": 2, "queries": 0, "events_researched": 0, "errors": [], "channels": {}}
+
+    def add(items, query):
+        for item in items or []:
+            url = canonicalize_url(item.get("url"))
+            if url and url not in candidates:
+                candidates[url] = Candidate(
+                    url=url,
+                    search_title=item.get("title", ""), search_source=item.get("source", ""),
+                    search_published=item.get("published", ""), pass_no=5, query=f"Gap reconciliation: {query}",
+                )
+
+    # Use distinct title/event probes. Strip publisher suffix and keep the first
+    # informative words; add institution/startup context to encourage multi-publisher results.
+    seen = set()
+    for a in articles[:max_events]:
+        base = re.sub(r"\s+-\s+[^-]{2,80}$", "", a.title).strip()
+        words = [w for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9-]+", base) if len(w) > 2][:12]
+        if not words:
+            continue
+        probe = " ".join(words)
+        key = probe.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        diag["events_researched"] += 1
+        for q in [f'"{probe}"', f'{probe} ISRO India space']:
+            diag["queries"] += 1
+            for channel, fn in [
+                ("Google News RSS", lambda q=q: google_news_rss(q, limit=20)),
+                ("Bing News RSS", lambda q=q: bing_news_rss(q, limit=20)),
+                ("Bing Web RSS", lambda q=q: bing_web_rss(q, limit=15)),
+            ]:
+                rec = diag["channels"].setdefault(channel, {"attempts": 0, "successes": 0, "hits": 0})
+                rec["attempts"] += 1
+                try:
+                    items = fn(); rec["successes"] += 1; rec["hits"] += len(items)
+                    add(items, q)
+                except Exception as exc:
+                    diag["errors"].append(f"{channel} {q}: {type(exc).__name__}: {exc}")
+    diag["candidate_count"] = len(candidates)
+    return list(candidates.values()), diag
 
 
 def _first_meta(soup, specs):
@@ -559,6 +755,38 @@ def resolve_google_news_url(url):
     return ""
 
 
+def _host_is_official(url):
+    host = urlparse(url).netloc.lower().replace("www.", "")
+    return any(host == d or host.endswith("." + d) for d in OFFICIAL_DOMAINS)
+
+
+def _is_private_space_story(title, body):
+    text = f"{title} {body[:2600]}".lower()
+    private = any(term in text for term in PRIVATE_SPACE_TERMS)
+    india = any(x in text for x in ["india", "indian", "bengaluru", "hyderabad", "chennai", "ahmedabad", "sriharikota"])
+    commercial = any(x in text for x in ["startup", "start-up", "company", "funding", "investment", "contract", "manufacturing", "commercial", "private"])
+    return private and (india or commercial)
+
+
+def _is_private_space_headline(title):
+    text = str(title or "").lower()
+    return any(term in text for term in PRIVATE_SPACE_TERMS) or ("startup" in text and "space" in text) or ("start-up" in text and "space" in text)
+
+
+def _is_broader_space_story(title, body):
+    text = f"{title} {body[:2200]}".lower()
+    return any(term in text for term in SPACE_RELEVANCE_TERMS)
+
+
+def _is_recruitment_or_tender_only(title, body):
+    t = title.lower()
+    b = body[:1600].lower()
+    recruitment = any(x in t for x in ["recruitment", "vacancy", "apply online", "jobs", "admit card", "results 2026"])
+    tender = any(x in t for x in ["tender", "e-procurement", "request for proposal", "rfp"])
+    substantive = any(x in b for x in ["mission", "technology", "programme", "program", "policy", "launch", "satellite", "research", "space sector"])
+    return (recruitment or tender) and not substantive
+
+
 def verify_article(candidate: Candidate):
     url = candidate.url
     if "news.google.com" in urlparse(url).netloc:
@@ -577,12 +805,18 @@ def verify_article(candidate: Candidate):
     if not final_url or any(h in urlparse(final_url).netloc for h in ["news.google.com", "bing.com"]):
         return None, "non-publisher-final-url"
 
+    # Official sources are corroboration/discovery evidence, never independent
+    # media rows under V8.
+    if _host_is_official(final_url):
+        return None, "official-primary-source-excluded"
+
     soup = BeautifulSoup(r.text, "html.parser")
     jsonld_objects = _jsonld_objects(soup)
 
-    # Canonical publisher identity.
     canonical_node = soup.find("link", rel=lambda x: x and "canonical" in str(x).lower())
     canonical = canonicalize_url(urljoin(final_url, canonical_node.get("href"))) if canonical_node and canonical_node.get("href") else final_url
+    if _host_is_official(canonical):
+        return None, "official-primary-source-excluded"
 
     title = _first_meta(soup, [
         {"property": "og:title"}, {"name": "twitter:title"}, {"name": "title"}
@@ -613,7 +847,6 @@ def verify_article(candidate: Candidate):
         if time_node and time_node.get("datetime"):
             published_raw = str(time_node.get("datetime")).strip()
 
-    # JSON-LD is often the most reliable source for publisher first-publication metadata.
     for obj in jsonld_objects:
         typ = str(obj.get("@type") or "").lower()
         if typ in {"newsarticle", "article", "reportagenewsarticle", "analysisnewsarticle"} or "article" in typ:
@@ -624,83 +857,107 @@ def verify_article(candidate: Candidate):
                 if isinstance(a, dict):
                     author = str(a.get("name") or "").strip()
                 elif isinstance(a, list):
-                    names = []
-                    for item in a:
-                        if isinstance(item, dict) and item.get("name"):
-                            names.append(str(item["name"]).strip())
-                    author = ", ".join(names)
+                    names = [str(item.get("name") or "").strip() for item in a if isinstance(item, dict) and item.get("name")]
+                    author = ", ".join(x for x in names if x)
             if publisher == urlparse(canonical).netloc.lower().replace("www.", ""):
-                p = obj.get("publisher")
-                if isinstance(p, dict) and p.get("name"):
-                    publisher = str(p.get("name")).strip()
+                pobj = obj.get("publisher")
+                if isinstance(pobj, dict) and pobj.get("name"):
+                    publisher = str(pobj.get("name")).strip()
             break
 
     pub_date, pub_dt = _parse_published(published_raw)
     if not pub_date:
-        # Do not use search/RSS timestamps as proof of original publication.
-        return None, "original-publication-date-unverified"
+        return None, "original-first-publication-unverified"
 
     for bad in soup(["script", "style", "nav", "footer", "aside", "form", "noscript"]):
         bad.decompose()
 
     paragraphs = []
-    for p in soup.find_all("p"):
-        txt = re.sub(r"\s+", " ", p.get_text(" ", strip=True)).strip()
+    for node in soup.find_all("p"):
+        txt = re.sub(r"\s+", " ", node.get_text(" ", strip=True)).strip()
         if len(txt) >= 35:
             paragraphs.append(txt)
-        if sum(len(x) for x in paragraphs) > 14000:
+        if sum(len(x) for x in paragraphs) > 15000:
             break
     body = " ".join(paragraphs)
-    evidence_text = f"{title} {body}".strip()
     if len(body) < 80:
         return None, "insufficient-article-body"
+    if _is_recruitment_or_tender_only(title, body):
+        return None, "recruitment-or-tender-only"
+
+    evidence_text = f"{title} {body}".strip()
+    lower = evidence_text.lower()
 
     institutions = []
-    matched_route = ""
-    lower = evidence_text.lower()
     for inst, pats in INSTITUTION_PATTERNS.items():
         if any(re.search(p, lower, flags=re.I) for p in pats):
             institutions.append(inst)
+
+    matched_route = ""
     if institutions:
-        matched_route = "R1/R2"
+        matched_route = "INSTITUTION"
     else:
-        # R3 route: mission/programme must be tied to institutional ownership in article context.
         mission_matches = [m for m in MISSION_TERMS if m.lower() in lower]
         if mission_matches and any(k in lower for k in ["india's space agency", "indian space agency", "space department"]):
             institutions.append("ISRO")
-            matched_route = "R3"
-    if not institutions:
-        return None, "four-institution-gate-fail"
+            matched_route = "MISSION_OWNERSHIP"
+        elif _is_private_space_story(title, body):
+            matched_route = "PRIVATE_SPACE"
+        elif _is_broader_space_story(title, body):
+            # Retained only as a potential V8 Relevant Space News item; it is not
+            # eligible for the strict main in-window table unless institution/private criteria apply.
+            matched_route = "BROADER_SPACE"
+        else:
+            return None, "content-relevance-gate-fail"
 
-    # Find a short supporting sentence containing an institution term.
+    # Guard against a single incidental institution mention when the article is
+    # otherwise unrelated. Headline relevance, repeated institutional mentions,
+    # mission ownership or a private-space route is sufficient.
+    if matched_route == "INSTITUTION":
+        headline_has_inst = any(any(re.search(p, title.lower(), flags=re.I) for p in pats) for pats in INSTITUTION_PATTERNS.values())
+        total_mentions = sum(len(re.findall(p, lower, flags=re.I)) for pats in INSTITUTION_PATTERNS.values() for p in pats)
+        mission_present = any(m.lower() in lower for m in MISSION_TERMS)
+        if not headline_has_inst and total_mentions < 2 and not mission_present:
+            return None, "incidental-institution-mention"
+
     support = ""
     for sentence in re.split(r"(?<=[.!?])\s+", evidence_text):
         sl = sentence.lower()
-        if any(any(re.search(p, sl, flags=re.I) for p in pats) for pats in INSTITUTION_PATTERNS.values()):
-            support = sentence[:360].strip(); break
+        if any(any(re.search(p, sl, flags=re.I) for p in pats) for pats in INSTITUTION_PATTERNS.values()) or any(t in sl for t in PRIVATE_SPACE_TERMS):
+            support = sentence[:420].strip()
+            break
     if not support:
-        support = title[:360]
+        support = title[:420]
 
-    concern_ids = []
-    for i, concern in enumerate(CONCERNS, 1):
-        terms = [x for x in re.findall(r"[a-z0-9-]{4,}", concern.lower()) if x not in {"space", "india", "isro"}]
+    theme_ids = []
+    for i, theme in enumerate(THEMES, 1):
+        terms = [x for x in re.findall(r"[a-z0-9-]{4,}", theme.lower()) if x not in {"space", "india", "isro"}]
         if terms and sum(1 for t in terms if t in lower) >= min(2, len(terms)):
-            concern_ids.append(i)
+            theme_ids.append(i)
 
-    # Deterministic local assessment is always computed first so the report has a
-    # guaranteed fallback even if every free hosted model is unavailable.
-    tone = classify_tone(title, body[:1600], institutions)
-    impact_level, impact_text = classify_impact(title + " " + body[:1600], institutions, concern_ids)
-
+    # Deterministic fallback first; optional Groq/OpenRouter/Cloudflare semantic
+    # analysis can improve meaning-based tone/impact without becoming a dependency.
+    tone = classify_tone(title, body[:1800], institutions)
+    impact_level, impact_text = classify_impact(title + " " + body[:2000], institutions, theme_ids)
     semantic, analysis_source = semantic_article_analysis(
-        title=title, body=body[:5200], publisher=publisher, institutions=institutions
+        title=title, body=body[:5600], publisher=publisher, institutions=institutions
     )
+    crux = ""
     if semantic:
         tone = semantic["tone"]
         impact_level = semantic["impact_level"]
-        # Put the factual crux first, then the ISRO-perspective consequence.
-        # This keeps the report short while materially improving description quality.
-        impact_text = f"{semantic['crux']} {semantic['impact_analysis']}".strip()
+        impact_text = semantic["impact_analysis"]
+        crux = semantic.get("crux", "")
+
+    headline_institution = any(any(re.search(p, title.lower(), flags=re.I) for p in pats) for pats in INSTITUTION_PATTERNS.values())
+    if matched_route == "PRIVATE_SPACE":
+        section = "startup"
+    elif headline_institution:
+        section = "main"
+    elif _is_private_space_headline(title):
+        section = "startup"
+    else:
+        section = "main"
 
     return Article(
         canonical_url=canonical,
@@ -711,18 +968,20 @@ def verify_article(candidate: Candidate):
         published_time_ist=(pub_dt.strftime("%H:%M:%S") if pub_dt else ""),
         published_iso_ist=(pub_dt.isoformat() if pub_dt else ""),
         time_known=bool(pub_dt),
-        body_excerpt=body[:2200],
+        body_excerpt=body[:2600],
         institutions=sorted(set(institutions)),
-        gate_route=matched_route or "R4",
+        gate_route=matched_route,
         support_excerpt=support,
         source_pass=candidate.pass_no,
         discovery_query=candidate.query,
-        concern_ids=concern_ids,
+        concern_ids=theme_ids,
         tone=tone,
         impact_level=impact_level,
         impact_text=impact_text,
+        section=section,
+        crux=crux,
+        analysis_source=analysis_source,
     ), "ok"
-
 
 
 def _truthy_env(name, default="1"):
@@ -753,53 +1012,61 @@ def _extract_json_object(text):
 def _validate_semantic_result(obj):
     if not isinstance(obj, dict):
         return None
-    tone = str(obj.get("tone", "")).strip().title()
+    tone_raw = re.sub(r"\s+", " ", str(obj.get("tone", "")).strip())
+    tone_map = {
+        "positive": "Positive",
+        "neutral": "Neutral-Mixed",
+        "neutral-mixed": "Neutral-Mixed",
+        "neutral mixed": "Neutral-Mixed",
+        "negative": "Critical-Negative",
+        "critical-negative": "Critical-Negative",
+        "critical negative": "Critical-Negative",
+    }
+    tone = tone_map.get(tone_raw.lower())
     impact = str(obj.get("impact_level", "")).strip().title()
     crux = re.sub(r"\s+", " ", str(obj.get("crux", "")).strip())
     analysis = re.sub(r"\s+", " ", str(obj.get("impact_analysis", "")).strip())
-    if tone not in {"Positive", "Neutral", "Negative"}:
+    if tone not in {"Positive", "Neutral-Mixed", "Critical-Negative"}:
         return None
     if impact not in {"High", "Medium", "Low"}:
         return None
     if not crux or not analysis:
         return None
-    # Reject suspiciously long/free-form outputs. The report should remain concise.
-    if len(crux) > 420 or len(analysis) > 700:
+    if len(crux) > 360 or len(analysis) > 620:
         return None
-    return {
-        "tone": tone,
-        "impact_level": impact,
-        "crux": crux,
-        "impact_analysis": analysis,
-    }
+    # Keep the reader-facing analysis concise: at most two sentences. We do not
+    # rewrite model content here; overlong responses are rejected for fallback.
+    sentences = [x for x in re.split(r"(?<=[.!?])\s+", analysis) if x.strip()]
+    if len(sentences) > 2:
+        return None
+    return {"tone": tone, "impact_level": impact, "crux": crux, "impact_analysis": analysis}
 
 
 def _semantic_prompt(title, body, publisher, institutions):
-    inst = ", ".join(institutions or []) or "ISRO / Department of Space / IN-SPACe / NSIL"
-    # Keep enough article context for meaning analysis while controlling free-tier token use.
-    article_text = re.sub(r"\s+", " ", str(body or "")).strip()[:5200]
-    return f"""You are preparing a DoS/ISRO media intelligence report.
+    inst = ", ".join(institutions or []) or "ISRO / Department of Space / IN-SPACe / NSIL / Indian private-space ecosystem"
+    article_text = re.sub(r"\s+", " ", str(body or "")).strip()[:5600]
+    return f"""You are preparing a Version 8.0 DoS/ISRO media intelligence report.
 
-Analyse the ARTICLE by meaning and consequence, not by isolated positive or negative words.
-Perspective: ISRO, Department of Space (DoS), IN-SPACe and NSIL. Institutions detected: {inst}.
+Analyse the ARTICLE by meaning and consequence, never by isolated sentiment words.
+Perspective: ISRO, Department of Space (DoS), IN-SPACe, NSIL and, where relevant, India's private-space ecosystem. Detected context: {inst}.
 
-STRICT RULES
-1. CRUX: one short, plain-English sentence saying what actually happened in the article. Do not invent facts.
-2. TONE is about portrayal of ISRO/DoS/IN-SPACe/NSIL:
-   - Negative only when coverage is derogatory, accusatory, strongly critical, reputation-damaging, or materially questions their competence, integrity, governance, performance or decisions.
-   - Positive when it praises/supports them, reports an achievement/success, or describes a clearly beneficial development for their space ecosystem.
-   - Neutral for factual/balanced reporting without a clear favourable or derogatory stance.
-   A delay, anomaly, accident, failure, risk or investigation is NOT automatically Negative.
+STRICT OUTPUT RULES
+1. CRUX: one short plain-English sentence stating what actually happened. No invented facts.
+2. TONE must be exactly one of:
+   - Positive: favourable/supportive reporting, achievement/success, or clearly beneficial development.
+   - Neutral-Mixed: factual/balanced/mixed reporting without a clearly derogatory stance.
+   - Critical-Negative: derogatory, accusatory, strongly critical or reputation-damaging coverage of ISRO/DoS/IN-SPACe/NSIL, or coverage materially questioning competence, integrity, governance, performance or decisions.
+   A delay, anomaly, accident, failure, risk or investigation is NOT automatically Critical-Negative.
 3. IMPACT LEVEL is separate from tone:
    - High: major direct consequence for an important mission/programme, crew/safety, strategic capability, major resources/budget, or institutional functioning.
-   - Medium: meaningful but indirect/medium-term effect on technology, suppliers, private-space ecosystem, partnership, regulation, commercial activity or planning.
-   - Low: little identifiable consequence for current ISRO/DoS/IN-SPACe/NSIL activities.
-   Do not make High from a single word such as launch, contract, policy, approval, delay or strategic.
-4. IMPACT ANALYSIS: 1-2 short natural sentences explaining specifically why this news matters from the ISRO/DoS perspective. Avoid generic phrases like 'this is relevant to planning'. If little effect is evident, say so plainly.
-5. Use only information supported by the article. Do not speculate beyond a cautious immediate implication.
+   - Medium: meaningful indirect or medium-term effect on technology, suppliers, private-space ecosystem, partnership, regulation, commercial activity or planning.
+   - Low: little identifiable consequence for current activities.
+   Never make High from a single word such as launch, contract, policy, approval, delay or strategic.
+4. IMPACT ANALYSIS: one or two short, concrete, simple-English sentences explaining institutional, policy, mission, commercial or reputational significance from the ISRO/DoS perspective. Avoid generic phrases. If little effect is evident, say so plainly.
+5. Use only information supported by the article. Cautious immediate implications are allowed; speculation is not.
 
 Return ONLY valid JSON in exactly this shape:
-{{"crux":"...","tone":"Positive|Neutral|Negative","impact_level":"High|Medium|Low","impact_analysis":"..."}}
+{{"crux":"...","tone":"Positive|Neutral-Mixed|Critical-Negative","impact_level":"High|Medium|Low","impact_analysis":"..."}}
 
 PUBLISHER: {publisher}
 TITLE: {title}
@@ -1002,7 +1269,8 @@ def classify_tone(title, body="", institutions=None):
         ),
     ]
     institution_present = bool(re.search(inst_pattern, lower, flags=re.I))
-    if institution_present:
+    private_ecosystem_story = _is_private_space_story(title, body)
+    if institution_present or private_ecosystem_story:
         for left, right in beneficial_event_rules:
             if any(x in lower for x in left) and any(x in lower for x in right):
                 pos_score += 2
@@ -1012,10 +1280,10 @@ def classify_tone(title, body="", institutions=None):
     # This keeps "launch delayed by weather" Neutral but "ISRO criticised over
     # repeated delays" Negative.
     if neg_score >= 3 and neg_score > pos_score:
-        return "Negative"
+        return "Critical-Negative"
     if pos_score >= 2 and pos_score > neg_score:
         return "Positive"
-    return "Neutral"
+    return "Neutral-Mixed"
 
 
 def classify_impact(text, institutions, concern_ids):
@@ -1109,7 +1377,7 @@ def classify_impact(text, institutions, concern_ids):
         level = "High"
     elif direct and consequence_dimensions >= 2 and (mission_effect or resource_effect or strategic_effect or institutional_effect):
         level = "High"
-    elif ecosystem or mission_effect or resource_effect or strategic_effect or institutional_effect or concern_ids or (direct and commercial_event):
+    elif material_delay or ecosystem or mission_effect or resource_effect or strategic_effect or institutional_effect or concern_ids or (direct and commercial_event):
         level = "Medium"
     else:
         level = "Low"
@@ -1223,18 +1491,22 @@ def classify_impact(text, institutions, concern_ids):
 
 
 def edition_window(edition, report_date=None):
+    """Return strict V8 publication window plus 24-hour discovery lookback start."""
     now = datetime.now(IST)
     rd = report_date or now.date()
     if edition == "morning":
         end = datetime.combine(rd, dtime(8, 0), IST)
-        start = end - timedelta(hours=12)
-        search_start = datetime.combine(rd - timedelta(days=1), dtime(8, 0), IST)
+        start = datetime.combine(rd - timedelta(days=1), dtime(20, 0), IST)
+        search_start = end - timedelta(hours=24)
         return start, end, search_start
     if edition == "evening":
         start = datetime.combine(rd, dtime(8, 0), IST)
         end = datetime.combine(rd, dtime(20, 0), IST)
-        return start, end, start
+        search_start = end - timedelta(hours=24)
+        return start, end, search_start
     if edition == "weekly":
+        # Legacy/manual feature retained from Build 5.19, but V8 automatic weekly
+        # scheduling is paused. A manual dispatch is an explicit user action.
         end = datetime.combine(rd, dtime(20, 0), IST)
         if rd.weekday() != 4:
             raise ValueError("Weekly report date must be Friday")
@@ -1244,37 +1516,29 @@ def edition_window(edition, report_date=None):
 
 
 def article_in_window(article: Article, edition, start, end, search_start, previous_evening_keys=None):
-    prev_keys = previous_evening_keys or set()
-    article_date = date.fromisoformat(article.published_date)
-    catch_up = False
+    """V8 first-publication eligibility.
 
-    if article.time_known:
-        dt = datetime.fromisoformat(article.published_iso_ist).astimezone(IST)
-        if start <= dt < end:
-            return True, False, "exact-in-window"
-        if edition == "morning" and search_start <= dt < start and article.article_key not in prev_keys:
-            catch_up = True
-            return True, True, "previous-evening-recovery"
-        return False, False, "exact-outside-window"
+    Search/RSS crawl timestamps never decide eligibility. If the original
+    publisher time is unavailable, the candidate is held for verification rather
+    than guessed into a boundary window.
+    """
+    if not article.time_known:
+        return False, False, "hold-original-publication-time-unverified"
 
-    # Date-only eligibility from master policy.
-    if edition == "morning":
-        eligible_dates = {start.date(), end.date()}
-        if article_date in eligible_dates:
-            if article_date == search_start.date() and article.article_key not in prev_keys:
-                catch_up = True
-            return True, catch_up, "date-only-boundary-eligible"
-    elif edition == "evening":
-        if article_date == start.date():
-            return True, False, "date-only-evening-eligible"
-    elif edition == "weekly":
-        d = start.date()
-        eligible = set()
-        while d <= end.date():
-            eligible.add(d); d += timedelta(days=1)
-        if article_date in eligible:
-            return True, False, "date-only-weekly-eligible"
-    return False, False, "date-only-outside-window"
+    dt = datetime.fromisoformat(article.published_iso_ist).astimezone(IST)
+    if start <= dt < end:
+        # Broader-space-only stories are not main-window DoS/ISRO/private rows.
+        if article.gate_route == "BROADER_SPACE":
+            return False, False, "broader-space-not-main-window-eligible"
+        return True, False, "exact-in-window"
+
+    # V8 Relevant Space News: verified, not in strict main window, within the
+    # preceding 24-hour discovery lookback. Archive dedup is applied separately.
+    if edition in {"morning", "evening"} and search_start <= dt < end:
+        article.section = "relevant"
+        return True, True, "relevant-space-lookback"
+
+    return False, False, "exact-outside-window"
 
 
 def dedupe_article_level(articles):
@@ -1287,6 +1551,250 @@ def dedupe_article_level(articles):
         if old is None or a.source_pass < old.source_pass:
             out[key] = a
     return list(out.values())
+
+
+def _read_archive_text(path):
+    suffix = path.suffix.lower()
+    try:
+        if suffix == ".docx":
+            doc = Document(str(path))
+            parts = [p.text for p in doc.paragraphs]
+            for table in doc.tables:
+                for row in table.rows:
+                    parts.extend(cell.text for cell in row.cells)
+            return "\n".join(parts)
+        if suffix == ".pdf":
+            from pypdf import PdfReader
+            return "\n".join((pg.extract_text() or "") for pg in PdfReader(str(path)).pages)
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def load_archive_registry():
+    """Load only the most recent configured consolidated archive as V8 registry.
+
+    The archive is never modified automatically. Exact publisher+canonical URL is
+    primary. Structured CSV/JSON rows may also supply the V8 fallback identity:
+    publisher + normalized headline + verified first-publication date.
+    """
+    configured = env("CONSOLIDATED_ARCHIVE_FILE")
+    path = Path(configured) if configured else None
+    if not path or not path.exists():
+        candidates = []
+        for pattern in ("*consolidated*archive*", "*media*archive*", "*news*archive*"):
+            candidates.extend([x for x in Path('.').glob(pattern) if x.is_file()])
+        # Do not treat our generated evidence/diagnostic files as archives.
+        candidates = [x for x in candidates if "diagnostic" not in x.name.lower() and "evidence" not in x.name.lower()]
+        path = max(candidates, key=lambda x: x.stat().st_mtime) if candidates else None
+    if not path or not path.exists():
+        return {"available": False, "path": "", "urls": set(), "fallback": set(), "error": "latest consolidated archive unavailable"}
+
+    urls = set()
+    fallback = set()
+    text = _read_archive_text(path)
+    for u in re.findall(r"https?://[^\s<>\]\[\)\(\"']+", text):
+        cu = canonicalize_url(u.rstrip(".,;"))
+        if cu:
+            urls.add(cu)
+
+    try:
+        if path.suffix.lower() == ".csv":
+            with path.open("r", encoding="utf-8-sig", errors="ignore", newline="") as f:
+                for row in csv.DictReader(f):
+                    low = {str(k or "").strip().lower(): str(v or "").strip() for k, v in row.items()}
+                    url = next((low[k] for k in low if "url" in k or "link" in k), "")
+                    publisher = next((low[k] for k in low if "publisher" in k or "media house" in k or "source" == k), "")
+                    title = next((low[k] for k in low if "title" in k or "description" in k), "")
+                    pubdate = next((low[k] for k in low if "published" in k or k == "date"), "")
+                    if url:
+                        cu = canonicalize_url(url)
+                        if cu: urls.add(cu)
+                    d, _ = _parse_published(pubdate)
+                    if publisher and title and d:
+                        fallback.add((publisher.lower().strip(), _norm_title(title), d))
+        elif path.suffix.lower() == ".json":
+            payload = json.loads(text)
+            rows = payload if isinstance(payload, list) else payload.get("articles", []) if isinstance(payload, dict) else []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                url = row.get("canonical_url") or row.get("url") or row.get("link") or ""
+                publisher = row.get("publisher") or row.get("source") or ""
+                title = row.get("title") or row.get("headline") or ""
+                pubdate = row.get("published_date") or row.get("date") or row.get("published") or ""
+                if url:
+                    cu = canonicalize_url(url)
+                    if cu: urls.add(cu)
+                d, _ = _parse_published(str(pubdate))
+                if publisher and title and d:
+                    fallback.add((str(publisher).lower().strip(), _norm_title(title), d))
+    except Exception as exc:
+        return {"available": True, "path": str(path), "urls": urls, "fallback": fallback, "error": f"structured archive parse warning: {exc}"}
+
+    return {"available": True, "path": str(path), "urls": urls, "fallback": fallback, "error": ""}
+
+
+def archive_match(article, registry):
+    if not registry.get("available"):
+        return False, "archive-unavailable"
+    cu = canonicalize_url(article.canonical_url)
+    if cu and cu in registry.get("urls", set()):
+        return True, "archive-canonical-url"
+    key = (article.publisher.lower().strip(), _norm_title(article.title), article.published_date)
+    if key in registry.get("fallback", set()):
+        return True, "archive-publisher-title-date"
+    return False, "archive-new-article"
+
+
+def _official_page_extract(url):
+    try:
+        r = http_get(url, timeout=24, retries=1)
+        if r.status_code != 200 or not r.text:
+            return None
+        final = canonicalize_url(r.url)
+        if not _host_is_official(final):
+            return None
+        soup = BeautifulSoup(r.text, "html.parser")
+        title = _first_meta(soup, [{"property": "og:title"}, {"name": "title"}])
+        if not title and soup.title:
+            title = soup.title.get_text(" ", strip=True)
+        published_raw = _first_meta(soup, [
+            {"property": "article:published_time"}, {"name": "datePublished"},
+            {"itemprop": "datePublished"}, {"name": "date"},
+        ])
+        pub_date, _ = _parse_published(published_raw)
+        for bad in soup(["script", "style", "nav", "footer", "aside", "form", "noscript"]):
+            bad.decompose()
+        paras = []
+        for node in soup.find_all("p"):
+            t = re.sub(r"\s+", " ", node.get_text(" ", strip=True)).strip()
+            if len(t) > 30:
+                paras.append(t)
+            if sum(map(len, paras)) > 4000:
+                break
+        return {"url": final, "title": re.sub(r"\s+", " ", title or "").strip(), "date": pub_date, "excerpt": " ".join(paras)[:1800]}
+    except Exception:
+        return None
+
+
+def check_official_sources(article):
+    """V8 official-source-first comparison, retained in the private audit only."""
+    title_words = [w for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9-]+", article.title) if len(w) >= 4]
+    stop = {"this", "that", "with", "from", "will", "india", "indian", "space", "news", "says", "report", "latest"}
+    probe_words = [w for w in title_words if w.lower() not in stop][:10]
+    if not probe_words:
+        probe_words = title_words[:8]
+    probe = " ".join(probe_words)
+
+    domains = ["isro.gov.in"]
+    if "IN-SPACe" in article.institutions or "in-space" in article.body_excerpt.lower():
+        domains.append("inspace.gov.in")
+    if "NSIL" in article.institutions or "nsil" in article.body_excerpt.lower():
+        domains.extend(["nsilindia.co.in", "nsilindia.com"])
+    domains.append("pib.gov.in")
+
+    leads = []
+    attempts = []
+    for domain in dict.fromkeys(domains):
+        q = f"site:{domain} {probe}"
+        try:
+            items = bing_web_rss(q, limit=8)
+            attempts.append({"domain": domain, "query": q, "status": "ok", "hits": len(items)})
+            for item in items:
+                u = canonicalize_url(item.get("url"))
+                if u and _host_is_official(u):
+                    leads.append(u)
+        except Exception as exc:
+            attempts.append({"domain": domain, "query": q, "status": "error", "error": f"{type(exc).__name__}: {exc}"})
+
+    # Score by title-token overlap after fetching the actual official page.
+    wanted = set(_norm_title(article.title).split())
+    best = (0.0, None)
+    seen = set()
+    for u in leads[:6]:
+        if u in seen:
+            continue
+        seen.add(u)
+        page = _official_page_extract(u)
+        if not page:
+            continue
+        got = set(_norm_title(page.get("title", "")).split())
+        score = len(wanted & got) / max(1, len(wanted | got))
+        # Mission-name overlap is a strong match even when wording differs.
+        mission_overlap = any(m.lower() in (article.title + " " + article.body_excerpt).lower() and m.lower() in (page.get("title", "") + " " + page.get("excerpt", "")).lower() for m in MISSION_TERMS)
+        if mission_overlap:
+            score += 0.25
+        if score > best[0]:
+            best = (score, page)
+
+    page = best[1] if best[0] >= 0.18 else None
+    possible_difference = False
+    if page:
+        media_nums = set(re.findall(r"\b\d[\d.,:/-]*\b", article.title + " " + article.body_excerpt[:1400]))
+        official_nums = set(re.findall(r"\b\d[\d.,:/-]*\b", page.get("title", "") + " " + page.get("excerpt", "")))
+        # Only flag as a possible difference, never assert an error automatically.
+        if media_nums and official_nums and not (media_nums & official_nums) and article.impact_level == "High":
+            possible_difference = True
+
+    return {
+        "matched": bool(page),
+        "score": round(best[0], 3),
+        "url": page.get("url", "") if page else "",
+        "title": page.get("title", "") if page else "",
+        "date": page.get("date", "") if page else "",
+        "excerpt": page.get("excerpt", "") if page else "",
+        "possible_difference": possible_difference,
+        "attempts": attempts,
+    }
+
+
+def assign_remarks_action(article, official):
+    """Apply V8 non-directive website-focused action language."""
+    text = f"{article.title} {article.body_excerpt[:2200]}".lower()
+    article.official_match = bool(official.get("matched"))
+    article.official_url = official.get("url", "")
+    article.official_title = official.get("title", "")
+    article.official_excerpt = official.get("excerpt", "")[:1200]
+    article.official_possible_difference = bool(official.get("possible_difference"))
+
+    association_claim = any(x in text for x in [
+        "with isro", "isro association", "isro-associated", "isro backed", "isro-backed",
+        "isro contract", "isro partnership", "partnered with isro", "working with isro",
+    ]) and _is_private_space_story(article.title, article.body_excerpt)
+    if association_claim and not article.official_match:
+        article.remarks_action = "Suggested action: Any reported ISRO association may be verified before public acknowledgement."
+        return
+
+    # Routine reporting already covered by official information requires no repeat circulation/update.
+    if article.official_match and not article.official_possible_difference and article.tone != "Critical-Negative":
+        article.remarks_action = "Nil action."
+        return
+
+    if article.official_possible_difference:
+        article.remarks_action = "Suggested action: A factual clarification may be considered with reference to the information on the ISRO website."
+        return
+
+    if article.tone == "Critical-Negative":
+        if "navic" in text and any(x in text for x in ["service", "status", "availability", "continuity"]):
+            article.remarks_action = "Suggested action: The NavIC service-status assertion may be verified. A factual article on the ISRO website may be considered for clarity, if required."
+        elif article.impact_level in {"High", "Medium"}:
+            article.remarks_action = "Suggested action: The reported assertion may be verified. A clarification may be considered for publication on the ISRO website, subject to approval."
+        else:
+            article.remarks_action = "Nil action."
+        return
+
+    technical = any(x in text for x in ["anomaly", "failure", "failed", "qualification", "test", "engine", "orbit", "separation", "propulsion", "crew", "launch vehicle"])
+    if technical and article.impact_level == "High" and not article.official_match:
+        article.remarks_action = "Suggested action: The technical details may be verified before any website update is considered."
+        return
+
+    significant_new = article.impact_level == "High" and bool(article.institutions) and article.tone == "Positive"
+    if significant_new and not article.official_match:
+        article.remarks_action = "Suggested action: A suitable update on the ISRO website may be considered."
+        return
+
+    article.remarks_action = "Nil action."
 
 
 def supabase_config():
@@ -1486,95 +1994,171 @@ def _set_run_font(run, bold=False, size=12, color=None):
         run.font.color.rgb = RGBColor(*color)
 
 
-def build_docx(edition, report_date, start, end, articles, output_path):
-    doc = Document()
-    sec = doc.sections[0]
-    sec.orientation = WD_ORIENT.LANDSCAPE
-    sec.page_width, sec.page_height = Mm(297), Mm(210)
-    sec.top_margin = Mm(10); sec.bottom_margin = Mm(12); sec.left_margin = Mm(10); sec.right_margin = Mm(10)
+def _set_para_compact(paragraph, before=0, after=0, line=1.0):
+    pf = paragraph.paragraph_format
+    pf.space_before = Pt(before)
+    pf.space_after = Pt(after)
+    pf.line_spacing = line
 
-    styles = doc.styles
-    styles["Normal"].font.name = "Arial"; styles["Normal"].font.size = Pt(12)
 
-    edition_label = {"morning": "Morning", "evening": "Evening", "weekly": "Weekly"}[edition]
-    p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    if edition == "weekly":
-        line = f"{edition_label} Report — {report_date.strftime('%d %B %Y')} — {start.strftime('%d %B %Y, %I:%M %p')} to {end.strftime('%d %B %Y, %I:%M %p')} IST"
-    else:
-        line = f"{edition_label} Report — {report_date.strftime('%d %B %Y')} — {end.strftime('%I:%M %p')} IST"
-    _set_run_font(p.add_run(line), bold=False, size=12)
-    p2 = doc.add_paragraph(); p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    _set_run_font(p2.add_run("DoS / ISRO Media News and Impact Analysis Report"), bold=True, size=12)
+def _add_section_table(doc, section_title, articles, generated_at, show_empty=False):
+    psec = doc.add_paragraph()
+    psec.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    _set_para_compact(psec, before=2, after=4)
+    _set_run_font(psec.add_run(section_title), bold=True, size=12)
 
     headers = [
-        "S. No.", "Description / Title of News", "Electronic / Print / Media House / Author",
-        "Positive / Negative / Neutral", "Impact Analysis", "Remarks (Search Engine)"
+        "No.", "Description / Title of News", "Publisher / author",
+        "Publication date / Time", "Tone", "Impact Analysis", "Remarks / Action"
     ]
-    table = doc.add_table(rows=1, cols=6)
+    table = doc.add_table(rows=1, cols=7)
     table.autofit = False
-    widths = [Mm(13), Mm(72), Mm(62), Mm(29), Mm(75), Mm(26)]
+    # Approximately 273 mm usable width on A4 landscape with ~0.46-inch side margins.
+    widths = [Mm(12), Mm(60), Mm(40), Mm(32), Mm(26), Mm(64), Mm(39)]
     set_fixed_table_layout(table, widths)
+    set_table_borders(table, "404040", "6")
     for i, cell in enumerate(table.rows[0].cells):
         set_cell_width(cell, widths[i])
         cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
         set_cell_shading(cell, "D9EAF7")
-        para = cell.paragraphs[0]; para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        para = cell.paragraphs[0]
+        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        _set_para_compact(para)
         _set_run_font(para.add_run(headers[i]), bold=True, size=12)
     set_repeat_table_header(table.rows[0])
-    set_table_borders(table, "404040", "6")  # 0.75pt printed borders for all editions.
 
-    if not articles:
+    rows = articles
+    if not rows and show_empty:
         row = table.add_row(); prevent_row_split(row)
-        values = ["1", "No qualifying verified news was found for the reporting period.", "Not applicable\nAuthor: Not stated\nPublished: Not applicable\nTime: Not stated", "Neutral", "Low Impact.\nNo qualifying institution-grounded article was verified in the reporting window.", ""]
+        values = [
+            "1", "No qualifying verified news was found for the reporting period.",
+            "Not applicable\nAuthor: Not stated", "Published: Not applicable\nTime: Not stated",
+            "Neutral-Mixed", "Low Impact.\nNo qualifying article was verified within the strict publication window.", "Nil action."
+        ]
         for i, value in enumerate(values):
-            cell = row.cells[i]; set_cell_width(cell, widths[i])
-            for pi, line in enumerate(value.split("\n")):
-                para = cell.paragraphs[0] if pi == 0 else cell.add_paragraph()
+            cell = row.cells[i]; set_cell_width(cell, widths[i]); cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+            for j, line in enumerate(value.split("\n")):
+                para = cell.paragraphs[0] if j == 0 else cell.add_paragraph()
+                _set_para_compact(para)
                 _set_run_font(para.add_run(line), size=12)
+        return table
+
+    for idx, a in enumerate(rows, 1):
+        row = table.add_row(); prevent_row_split(row)
+        for i, cell in enumerate(row.cells):
+            set_cell_width(cell, widths[i])
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+            for para in cell.paragraphs:
+                _set_para_compact(para)
+
+        pno = row.cells[0].paragraphs[0]; pno.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        _set_run_font(pno.add_run(str(idx)), size=12)
+
+        ptitle = row.cells[1].paragraphs[0]
+        _set_run_font(ptitle.add_run(a.title), bold=False, size=12)
+        psrc = row.cells[1].add_paragraph(); _set_para_compact(psrc, before=2, after=0)
+        _set_run_font(psrc.add_run("Source: "), size=12)
+        add_hyperlink(psrc, "Article", a.canonical_url)
+
+        ppub = row.cells[2].paragraphs[0]
+        _set_run_font(ppub.add_run(a.publisher), size=12)
+        pauth = row.cells[2].add_paragraph(); _set_para_compact(pauth)
+        _set_run_font(pauth.add_run(f"Author: {a.author or 'Not stated'}"), size=12)
+
+        pub_date = date.fromisoformat(a.published_date).strftime("%d %B %Y")
+        pdate = row.cells[3].paragraphs[0]
+        _set_run_font(pdate.add_run(f"Published: {pub_date}"), size=12)
+        ptime = row.cells[3].add_paragraph(); _set_para_compact(ptime)
+        if a.time_known:
+            time_text = datetime.strptime(a.published_time_ist, "%H:%M:%S").strftime("%I:%M %p") + " IST"
+        else:
+            time_text = "Not stated"
+        _set_run_font(ptime.add_run(f"Time: {time_text}"), size=12)
+
+        ptone = row.cells[4].paragraphs[0]
+        _set_run_font(ptone.add_run(a.tone), size=12)
+
+        pimp = row.cells[5].paragraphs[0]
+        _set_run_font(pimp.add_run(f"{a.impact_level} Impact."), bold=True, size=12)
+        ptxt = row.cells[5].add_paragraph(); _set_para_compact(ptxt, before=1, after=0)
+        _set_run_font(ptxt.add_run(a.impact_text), size=12)
+
+        pact = row.cells[6].paragraphs[0]
+        _set_run_font(pact.add_run(a.remarks_action or "Nil action."), size=12)
+
+    return table
+
+
+def build_docx(edition, report_date, start, end, articles, output_path, generated_at=None):
+    """Build the mandatory V8 seven-column reader-facing DOCX."""
+    doc = Document()
+    sec = doc.sections[0]
+    sec.orientation = WD_ORIENT.LANDSCAPE
+    sec.page_width, sec.page_height = Mm(297), Mm(210)
+    sec.left_margin = Mm(11.7); sec.right_margin = Mm(11.7)
+    sec.top_margin = Mm(14.5); sec.bottom_margin = Mm(15.0)
+
+    styles = doc.styles
+    styles["Normal"].font.name = "Arial"
+    styles["Normal"]._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+    styles["Normal"].font.size = Pt(12)
+
+    edition_label = {"morning": "Morning Edition", "evening": "Evening Edition", "weekly": "Weekly Edition"}[edition]
+    p1 = doc.add_paragraph(); p1.alignment = WD_ALIGN_PARAGRAPH.CENTER; _set_para_compact(p1, after=2)
+    if edition in {"morning", "evening"}:
+        coverage = f"Publication Coverage: {start.strftime('%d %B %Y, %I:%M %p')} to {end.strftime('%d %B %Y, %I:%M %p')} IST"
+        reporting_time = "08:00 AM IST" if edition == "morning" else "08:00 PM IST"
+        line1 = f"{report_date.strftime('%d %B %Y')} — {edition_label} — Reporting Time: {reporting_time} — {coverage}"
     else:
-        for idx, a in enumerate(articles, 1):
-            r = table.add_row(); prevent_row_split(r)
-            for i, cell in enumerate(r.cells):
-                set_cell_width(cell, widths[i])
-                cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+        line1 = f"{report_date.strftime('%d %B %Y')} — {edition_label} — Publication Coverage: {start.strftime('%d %B %Y, %I:%M %p')} to {end.strftime('%d %B %Y, %I:%M %p')} IST"
+    _set_run_font(p1.add_run(line1), size=12)
 
-            _set_run_font(r.cells[0].paragraphs[0].add_run(str(idx)), size=12)
+    p2 = doc.add_paragraph(); p2.alignment = WD_ALIGN_PARAGRAPH.CENTER; _set_para_compact(p2, after=5)
+    _set_run_font(p2.add_run("DoS / ISRO — Daily Major News / Media News and Impact Analysis Report"), bold=True, size=12)
 
-            # Always show only the original article title. Prior-evening omission
-            # recovery is an internal selection rule and must not add any visible
-            # label or recovery-style wording to the report.
-            title = a.title
-            for j, line in enumerate(title.split("\n")):
-                para = r.cells[1].paragraphs[0] if j == 0 else r.cells[1].add_paragraph()
-                _set_run_font(para.add_run(line), bold=(j == 0), size=12)
+    main = [a for a in articles if a.section == "main"]
+    startup = [a for a in articles if a.section == "startup"]
+    relevant = [a for a in articles if a.section == "relevant"]
 
-            pub_date = date.fromisoformat(a.published_date).strftime("%d %B %Y")
-            media_lines = [
-                a.publisher,
-                f"Author: {a.author or 'Not stated'}",
-                f"Published: {pub_date}",
-                (f"Time: {datetime.strptime(a.published_time_ist, '%H:%M:%S').strftime('%I:%M %p')} IST" if a.time_known else "Time: Not stated"),
-            ]
-            for j, line in enumerate(media_lines):
-                para = r.cells[2].paragraphs[0] if j == 0 else r.cells[2].add_paragraph()
-                _set_run_font(para.add_run(line), size=12)
+    _add_section_table(doc, "DoS / ISRO Major News", main, generated_at, show_empty=(not main and not startup))
 
-            _set_run_font(r.cells[3].paragraphs[0].add_run(a.tone), size=12)
+    if startup:
+        spacer = doc.add_paragraph(); _set_para_compact(spacer, after=2)
+        _add_section_table(doc, "Indian Private Space / Startup News", startup, generated_at, show_empty=False)
 
-            p_imp = r.cells[4].paragraphs[0]
-            _set_run_font(p_imp.add_run(f"{a.impact_level} Impact."), bold=True, size=12)
-            p_imp2 = r.cells[4].add_paragraph()
-            _set_run_font(p_imp2.add_run(a.impact_text), size=12)
+    if relevant:
+        # Highest-priority V8 pagination rule: explicit Word page break before heading.
+        doc.add_page_break()
+        _add_section_table(doc, "Relevant Space News", relevant, generated_at, show_empty=False)
 
-            add_hyperlink(r.cells[5].paragraphs[0], "Article", a.canonical_url)
-
-    # Footer on every page.
-    generated = datetime.now(IST)
+    generated = generated_at or datetime.now(IST)
     footer = sec.footer.paragraphs[0]
     footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    _set_run_font(footer.add_run(f"Report generated: {generated.strftime('%d %B %Y, %I:%M %p')} IST"), size=10)
+    _set_para_compact(footer)
+    _set_run_font(footer.add_run(f"Report generated: {generated.strftime('%d %B %Y, %I:%M:%S %p')} IST"), size=9)
 
     doc.save(output_path)
+
+
+def validate_docx_v8(docx_path, has_relevant=False):
+    doc = Document(str(docx_path))
+    if not doc.tables:
+        raise RuntimeError("V8 DOCX validation failed: no report table")
+    for table in doc.tables:
+        if len(table.columns) != 7:
+            raise RuntimeError(f"V8 DOCX validation failed: expected 7 columns, found {len(table.columns)}")
+        hdr = " | ".join(c.text.strip() for c in table.rows[0].cells)
+        required = ["No.", "Description / Title of News", "Publisher / author", "Publication date / Time", "Tone", "Impact Analysis", "Remarks / Action"]
+        if any(x not in hdr for x in required):
+            raise RuntimeError(f"V8 DOCX validation failed: unexpected header row: {hdr}")
+    footer_text = " ".join(p.text for sec in doc.sections for p in sec.footer.paragraphs)
+    if not re.search(r"Report generated: \d{2} \w+ \d{4}, \d{2}:\d{2}:\d{2} [AP]M IST", footer_text):
+        raise RuntimeError("V8 DOCX validation failed: footer does not contain actual generation time with seconds")
+    xml = doc._element.xml
+    if has_relevant:
+        if "Relevant Space News" not in xml or 'w:type="page"' not in xml:
+            raise RuntimeError("V8 DOCX validation failed: Relevant Space News lacks explicit page break")
+    return True
 
 
 def convert_docx_to_pdf(docx_path, output_dir):
@@ -1593,26 +2177,48 @@ def convert_docx_to_pdf(docx_path, output_dir):
 
 
 def validate_pdf_matches_articles(pdf_path, articles):
-    """Automated all-page render + text/content validation for non-LLM GitHub runs."""
+    """Automated V8 PDF content/pagination/render validation."""
     from pypdf import PdfReader
     reader = PdfReader(str(pdf_path))
     if not reader.pages:
         raise RuntimeError("Generated PDF has no pages")
-    extracted = " ".join((page.extract_text() or "") for page in reader.pages)
+    page_texts = [(page.extract_text() or "") for page in reader.pages]
+    extracted = " ".join(page_texts)
     norm_pdf = re.sub(r"\s+", " ", extracted).lower()
+
+    required_headers = ["description / title of news", "publisher / author", "publication date / time", "tone", "impact analysis", "remarks / action"]
+    if any(h not in norm_pdf for h in required_headers):
+        raise RuntimeError("V8 PDF validation failed: seven-column header text is incomplete")
+    if "late-discovered news" in norm_pdf:
+        raise RuntimeError("V8 PDF validation failed: legacy Late-Discovered heading is present")
+
     for article in articles:
         probe = re.sub(r"\s+", " ", article.title).strip().lower()[:45]
         if probe and probe[:24] not in norm_pdf:
             raise RuntimeError(f"PDF content validation failed for article title: {article.title[:80]}")
+        # Source hyperlink display text must be present for every row.
+        # URL annotations are renderer-dependent, so we validate display text + title here.
 
-    # Render every PDF page to PNG when pdftoppm is available. This catches
-    # malformed/clipped conversion failures without requiring ChatGPT/vision.
+    relevant = [a for a in articles if a.section == "relevant"]
+    if relevant:
+        rel_pages = [i for i, txt in enumerate(page_texts) if "Relevant Space News" in txt]
+        if not rel_pages:
+            raise RuntimeError("V8 PDF validation failed: Relevant Space News heading missing")
+        first_rel = rel_pages[0]
+        # Explicit page break means the Relevant heading must begin on a page that
+        # contains no article title from main/startup sections before it.
+        rel_txt = page_texts[first_rel]
+        for a in [x for x in articles if x.section != "relevant"]:
+            probe = re.sub(r"\s+", " ", a.title).strip()[:32]
+            if probe and probe in rel_txt:
+                raise RuntimeError("V8 PDF validation failed: Relevant Space News shares a page with prior-section article content")
+
     render_bin = env("PDFTOPPM_BIN", "pdftoppm")
     render_dir = OUTPUT_DIR / (pdf_path.stem + "_rendercheck")
     render_dir.mkdir(parents=True, exist_ok=True)
     try:
         proc = subprocess.run(
-            [render_bin, "-png", "-r", "90", str(pdf_path), str(render_dir / "page")],
+            [render_bin, "-png", "-r", "100", str(pdf_path), str(render_dir / "page")],
             check=False, capture_output=True, text=True, timeout=180,
         )
         if proc.returncode != 0:
@@ -1640,7 +2246,7 @@ def recipients():
     return list(dict.fromkeys(vals))
 
 
-def send_edition_email(edition, report_date, docx_path, pdf_path):
+def send_edition_email(edition, report_date, docx_path, pdf_path, run_status="COMPLETE", limitations=None):
     sender = env("SMTP_EMAIL")
     password = env("SMTP_APP_PASSWORD").replace(" ", "")
     recips = recipients()
@@ -1650,10 +2256,18 @@ def send_edition_email(edition, report_date, docx_path, pdf_path):
         raise RuntimeError("SMTP_EMAIL and SMTP_APP_PASSWORD are required for scheduled report email delivery")
 
     label = {"morning": "Morning", "evening": "Evening", "weekly": "Weekly"}[edition]
-    subject = f"DoS / ISRO {label} Media Report — {report_date.strftime('%d %B %Y')}"
+    prefix = "[PROVISIONAL] " if run_status == "PROVISIONAL" else ""
+    subject = f"{prefix}DoS / ISRO {label} Media Report — {report_date.strftime('%d %B %Y')}"
     body = (
         f"Please find attached the {label.lower()} DoS / ISRO Media News and Impact Analysis Report "
         f"for {report_date.strftime('%d %B %Y')}.\n\n"
+    )
+    if run_status == "PROVISIONAL":
+        body += "Status: PROVISIONAL. The report document itself remains reader-facing and contains no process notes.\n"
+        for item in (limitations or [])[:6]:
+            body += f"- {item}\n"
+        body += "\n"
+    body += (
         "Attachments:\n"
         f"- {docx_path.name}\n"
         f"- {pdf_path.name}\n"
@@ -1694,64 +2308,142 @@ def run(edition, report_date=None, send_email=True):
     rd = report_date or datetime.now(IST).date()
     start, end, search_start = edition_window(edition, rd)
     report_key = f"{rd.isoformat()}:{edition}"
+    run_started_mono = time.monotonic()
+    run_started_ist = datetime.now(IST)
 
-    previous_evening_keys, ledger_available = (set(), False)
-    if edition == "morning":
-        previous_evening_keys, ledger_available = load_previous_evening_keys(rd)
-
+    archive_registry = load_archive_registry()
     candidates, discovery_diag = discover_candidates(edition, search_start, end)
     verified = []
     excluded = {}
     evidence_register = []
+    attempted_urls = set()
 
-    # Verify every discovered candidate on every run. Comprehensive scheduled
-    # reports must not be truncated by a legacy verification limit.
-    verify_candidates = candidates
-    for idx, candidate in enumerate(verify_candidates, 1):
+    def reject(reason):
+        excluded[reason] = excluded.get(reason, 0) + 1
+
+    def process_candidate(candidate, sweep_no):
+        attempted_urls.add(canonicalize_url(candidate.url) or candidate.url)
         article, reason = verify_article(candidate)
         if not article:
-            excluded[reason] = excluded.get(reason, 0) + 1
+            reject(reason)
             evidence_register.append({
-                "candidate_url": candidate.url, "search_title": candidate.search_title,
-                "source_pass": candidate.pass_no, "query": candidate.query,
-                "eligibility": "FAIL", "reason": reason,
+                "sweep": sweep_no,
+                "candidate_url": candidate.url,
+                "search_title": candidate.search_title,
+                "source_pass": candidate.pass_no,
+                "query": candidate.query,
+                "eligibility": "FAIL",
+                "reason": reason,
             })
-            continue
-        ok, catch_up, window_reason = article_in_window(
-            article, edition, start, end, search_start, previous_evening_keys
-        )
+            return None
+
+        ok, lookback, window_reason = article_in_window(article, edition, start, end, search_start)
         if not ok:
-            excluded[window_reason] = excluded.get(window_reason, 0) + 1
-            record = asdict(article); record.update({"eligibility": "FAIL", "reason": window_reason})
+            reject(window_reason)
+            record = asdict(article); record.update({"sweep": sweep_no, "eligibility": "FAIL", "reason": window_reason})
             evidence_register.append(record)
-            continue
-        article.catch_up = bool(catch_up)
-        verified.append(article)
-        record = asdict(article); record.update({"eligibility": "PASS", "reason": window_reason})
+            return None
+
+        archived, archive_reason = archive_match(article, archive_registry)
+        if archived:
+            reject(archive_reason)
+            record = asdict(article); record.update({"sweep": sweep_no, "eligibility": "FAIL", "reason": archive_reason})
+            evidence_register.append(record)
+            return None
+
+        article.catch_up = bool(lookback)  # legacy field retained; reader-facing report never labels catch-up.
+        record = asdict(article); record.update({"sweep": sweep_no, "eligibility": "PASS", "reason": window_reason, "archive_reason": archive_reason})
         evidence_register.append(record)
+        return article
+
+    # Sweep 1: verify every discovered candidate. No legacy max-candidate cap.
+    for candidate in candidates:
+        article = process_candidate(candidate, 1)
+        if article:
+            verified.append(article)
+
+    first_pass_articles = dedupe_article_level(verified)
+
+    # Sweep 2: cross-source/event reconciliation after first verification and
+    # article-identity deduplication, as mandated by V8.
+    gap_candidates, gap_diag = gap_reconciliation_candidates(first_pass_articles, search_start, end)
+    for candidate in gap_candidates:
+        cu = canonicalize_url(candidate.url) or candidate.url
+        if cu in attempted_urls:
+            continue
+        article = process_candidate(candidate, 2)
+        if article:
+            verified.append(article)
 
     articles = dedupe_article_level(verified)
+
+    # Mandatory official-site-first check before drafting each action. This is
+    # private audit evidence; official releases are never independent media rows.
+    official_audit = []
+    for article in articles:
+        official = check_official_sources(article)
+        assign_remarks_action(article, official)
+        official_audit.append({
+            "article_key": article.article_key,
+            "media_url": article.canonical_url,
+            "media_title": article.title,
+            "official": official,
+            "remarks_action": article.remarks_action,
+        })
 
     def sort_key(a):
         if a.time_known:
             return datetime.fromisoformat(a.published_iso_ist).timestamp()
-        return datetime.combine(date.fromisoformat(a.published_date), dtime(12, 0), IST).timestamp()
+        return 0
     articles.sort(key=sort_key, reverse=True)
 
+    # V8 completion assessment BEFORE publication. Do not force a 20-minute
+    # sleep; assess the target honestly and label the external delivery provisional
+    # when the environment completed too quickly to satisfy the normal research dwell target.
+    dwell_target = env_int("MIN_RESEARCH_DWELL_SECONDS", 1200)
+    elapsed_before_output = int(time.monotonic() - run_started_mono)
+    limitations = []
+    if discovery_diag.get("queries", 0) < 39:
+        limitations.append(f"Only {discovery_diag.get('queries', 0)} distinct discovery/theme queries were submitted; V8 requires at least 39.")
+    if discovery_diag.get("theme_checks", 0) != 44:
+        limitations.append(f"Only {discovery_diag.get('theme_checks', 0)} of 44 V8 themes were checked.")
+    if gap_diag.get("sweep") != 2:
+        limitations.append("Second gap-reconciliation sweep was not completed.")
+    if not archive_registry.get("available"):
+        limitations.append("Latest consolidated archive was unavailable; historical article-identity deduplication could not be confirmed.")
+    if dwell_target > 0 and elapsed_before_output < dwell_target:
+        limitations.append(f"Research dwell-time target was not met ({elapsed_before_output}s completed vs {dwell_target}s target).")
+
+    # The original V7 DOCX template may not be committed in GitHub. V8 explicitly
+    # permits faithful reproduction of its seven-column style, but the limitation
+    # must be disclosed outside the publication.
+    template_path = Path(env("V8_TEMPLATE_FILE", "DoS_ISRO_Media_Report_V7_0_Template.docx"))
+    template_available = template_path.exists()
+    external_notes = list(limitations)
+    if not template_available:
+        external_notes.append("The original V7 DOCX template file was unavailable; Build 6.0 reproduced the specified V8 seven-column A4-landscape style programmatically.")
+
+    run_status = "PROVISIONAL" if limitations else "COMPLETE"
+
     docx_path, expected_pdf = report_filenames(edition, rd)
-    build_docx(edition, rd, start, end, articles, docx_path)
+    generated_at = datetime.now(IST)
+    build_docx(edition, rd, start, end, articles, docx_path, generated_at=generated_at)
+    validate_docx_v8(docx_path, has_relevant=any(a.section == "relevant" for a in articles))
     pdf_path = convert_docx_to_pdf(docx_path, OUTPUT_DIR)
     if pdf_path != expected_pdf:
         expected_pdf.write_bytes(pdf_path.read_bytes())
         pdf_path = expected_pdf
     validate_pdf_matches_articles(pdf_path, articles)
 
+    # Visual/structural shipping checks have passed at this point.
     email_result = {"sent": [], "failed": {}, "skipped": "email disabled"}
     if send_email:
         if already_emailed(report_key):
             email_result = {"sent": [], "failed": {}, "skipped": "already emailed; use FORCE_SCHEDULED_SEND=true to resend"}
         else:
-            email_result = send_edition_email(edition, rd, docx_path, pdf_path)
+            email_result = send_edition_email(
+                edition, rd, docx_path, pdf_path, run_status=run_status, limitations=external_notes
+            )
 
     email_status = (
         "sent:" + ",".join(email_result.get("sent", []))
@@ -1761,40 +2453,67 @@ def run(edition, report_date=None, send_email=True):
     if email_result.get("failed"):
         email_status += ";failed:" + json.dumps(email_result["failed"], ensure_ascii=False)
 
-    matched_concerns = sorted({cid for a in articles for cid in a.concern_ids})
-    concern_audit = [
-        {"id": i, "concern": concern, "status": ("FOUND" if i in matched_concerns else "CHECKED_NOT_FOUND")}
-        for i, concern in enumerate(CONCERNS, 1)
+    matched_themes = sorted({cid for a in articles for cid in a.concern_ids})
+    theme_audit = [
+        {"id": i, "theme": theme, "status": ("FOUND_IN_INCLUDED_ARTICLE" if i in matched_themes else "CHECKED_NO_INCLUDED_MATCH")}
+        for i, theme in enumerate(THEMES, 1)
     ]
+
     evidence_path = OUTPUT_DIR / f"{report_key.replace(':','_')}_candidate_evidence_register.json"
     evidence_path.write_text(json.dumps({
         "report_key": report_key,
+        "run_status": run_status,
         "articles": evidence_register,
-        "concern_audit": concern_audit,
+        "theme_audit": theme_audit,
+        "official_source_checks": official_audit,
+        "archive_registry": {
+            "available": archive_registry.get("available"),
+            "path": archive_registry.get("path"),
+            "url_count": len(archive_registry.get("urls", set())),
+            "fallback_identity_count": len(archive_registry.get("fallback", set())),
+            "error": archive_registry.get("error"),
+        },
     }, indent=2, ensure_ascii=False), encoding="utf-8")
 
     diagnostics = {
         "build": BUILD,
         "master_query_file": str(MASTER_QUERY_FILE),
+        "master_query_version": "8.0",
+        "run_status": run_status,
+        "limitations_outside_publication": external_notes,
         "edition": edition,
         "report_date": rd.isoformat(),
         "window_start": start.isoformat(),
         "window_end": end.isoformat(),
-        "search_start": search_start.isoformat(),
+        "late_discovery_lookback_start": search_start.isoformat(),
+        "run_started_ist": run_started_ist.isoformat(),
+        "generated_at_ist": generated_at.isoformat(),
+        "research_elapsed_seconds_before_output": elapsed_before_output,
+        "research_dwell_target_seconds": dwell_target,
         "fresh_scan": True,
-        "candidate_count": len(candidates),
-        "verified_candidate_count": len(verify_candidates),
+        "sweep_1": discovery_diag,
+        "sweep_2": gap_diag,
+        "candidate_count_sweep1": len(candidates),
+        "candidate_count_sweep2": len(gap_candidates),
         "verified_included_count": len(articles),
+        "section_counts": {
+            "main": sum(a.section == "main" for a in articles),
+            "startup": sum(a.section == "startup" for a in articles),
+            "relevant": sum(a.section == "relevant" for a in articles),
+        },
         "excluded_counts": excluded,
-        "discovery": discovery_diag,
-        "previous_evening_ledger_available": ledger_available,
-        "previous_evening_article_keys": len(previous_evening_keys),
+        "archive_available": archive_registry.get("available"),
+        "archive_path": archive_registry.get("path"),
+        "template_available": template_available,
+        "template_path": str(template_path),
+        "official_checks_attempted": len(official_audit),
         "email": email_result,
         "docx": docx_path.name,
         "pdf": pdf_path.name,
         "candidate_evidence_register": evidence_path.name,
-        "concern_audit_checked": len(concern_audit),
-        "concerns_with_included_matches": matched_concerns,
+        "theme_checks": len(theme_audit),
+        "themes_with_included_matches": matched_themes,
+        "free_semantic_analysis_enabled": _truthy_env("ENABLE_FREE_LLM_ANALYSIS", "1"),
     }
     diag_path = OUTPUT_DIR / f"{report_key.replace(':','_')}_scheduled_media_diagnostics.json"
     diag_path.write_text(json.dumps(diagnostics, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -1803,10 +2522,13 @@ def run(edition, report_date=None, send_email=True):
     print(json.dumps({
         "report_key": report_key,
         "edition": edition,
+        "run_status": run_status,
         "article_count": len(articles),
+        "section_counts": diagnostics["section_counts"],
         "docx": str(docx_path),
         "pdf": str(pdf_path),
         "email": email_result,
+        "limitations": external_notes,
     }, ensure_ascii=False, indent=2))
     return diagnostics
 

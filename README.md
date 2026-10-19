@@ -1,4 +1,4 @@
-# Social Media Intelligence Platform — Build 5.14.2
+# Social Media Intelligence Platform — Build 6.0.0
 
 Build 5.13 is based on the uploaded Build 5.12 recipient-email hotfix.
 
@@ -38,7 +38,7 @@ runner, not inside the phone/browser session.
 Run `supabase_build513.sql` once in the Supabase SQL Editor. It creates a
 `monitoring_runs` table that stores:
 
-- each half-hour slot;
+- each hourly slot;
 - run time;
 - positive / neutral / negative percentages;
 - alert threshold and alert state;
@@ -151,7 +151,7 @@ the correct PostgREST conflict targets (`external_id` and `slot_key`).
 ## Build 5.13.3 — Dual Scheduler
 
 - GitHub Actions schedule is explicitly timezone-aware for Asia/Kolkata.
-- Native schedule runs at :07 and :37 IST.
+- Native schedule runs once per hour at :07 IST.
 - Optional Supabase Cron fallback dispatches the GitHub workflow every hour.
 - Slot-based deduplication prevents duplicate routine emails if both schedulers fire.
 - Trigger source is shown in GitHub run summaries and email/report status text.
@@ -388,3 +388,13 @@ used first and the local rules remain the automatic fallback. Set
 The scheduled report remains operational when a provider times out, returns
 invalid JSON, is rate-limited, or has exhausted its free quota. No online LLM is
 a hard dependency.
+
+## Build 6.0.0 — Master Query V8.0 scheduled reports
+
+Build 6.0 keeps the existing hourly monitoring, X/news intelligence, email/Supabase features and the optional free semantic-analysis chain, while replacing the scheduled AM/PM editorial and formatting policy with `DoS_ISRO_Master_Query_Version_8_0.txt`.
+
+Key changes: strict 20:00→08:00 / 08:00→20:00 original-publication windows; fresh five-pass search every run; 44-theme matrix; second gap-reconciliation sweep; article-level rather than event-level deduplication; optional latest consolidated archive registry; official-ISRO-site-first action check; separate Main / Indian Private Space / Relevant Space sections; and mandatory seven-column A4-landscape DOCX/PDF output.
+
+The free analysis order remains Groq → OpenRouter Free → Cloudflare Workers AI → local rules. Tone in scheduled V8 reports is now `Positive`, `Neutral-Mixed`, or `Critical-Negative`; impact remains High / Medium / Low and is consequence-based.
+
+See `BUILD_6.0_V8_MASTER_QUERY_INTEGRATION.md` for the complete change summary.

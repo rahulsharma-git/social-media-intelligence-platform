@@ -1,4 +1,4 @@
-"""Safe diagnostic for Build 5.20 semantic-analysis fallback chain.
+"""Safe diagnostic for Build 6.0 V8 semantic-analysis fallback chain.
 
 Run locally or in GitHub Actions with provider secrets set. It prints only the
 provider name and validated result; it never prints API keys.
