@@ -47,7 +47,7 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 UTC = timezone.utc
-BUILD = "6.0.1"
+BUILD = "6.0.5"
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MASTER_QUERY_FILE = Path(os.getenv(
@@ -2200,6 +2200,71 @@ def convert_docx_to_pdf(docx_path, output_dir):
     return pdf
 
 
+def validate_docx_article_links(docx_path, articles):
+    """Verify source URLs survive into the actual generated DOCX package.
+
+    PDF converters can omit link annotations for individual cells. The DOCX
+    relationships are authoritative for whether the deliverable contains links.
+    """
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    doc = Document(str(docx_path))
+    links = {
+        rel.target_ref.strip()
+        for rel in doc.part.rels.values()
+        if rel.reltype == RT.HYPERLINK and rel.target_ref
+    }
+    missing = [a.title[:80] for a in articles if not a.canonical_url or a.canonical_url.strip() not in links]
+    if missing:
+        raise RuntimeError("DOCX source hyperlink missing for: " + "; ".join(missing[:5]))
+    return True
+
+
+def ensure_pdf_source_links(pdf_path, articles):
+    """Repair absent PDF URI annotations at the visible Source: Article labels.
+
+    The PDF is never considered valid until every article's canonical URL has
+    a real clickable annotation. The source-label count must match article
+    count; otherwise we fail closed instead of linking the wrong article.
+    """
+    import fitz
+    from urllib.parse import unquote
+    with fitz.open(str(pdf_path)) as pdf:
+        targets = []
+        for page_number, page in enumerate(pdf):
+            # Every article has a 'Source: Article' line in the DOCX.
+            labels = page.search_for("Source: Article")
+            if not labels:
+                labels = page.search_for("Source:  Article")
+            for rect in labels:
+                targets.append((page_number, rect))
+        if len(targets) != len(articles):
+            raise RuntimeError(
+                f"PDF hyperlink repair refused: {len(targets)} source labels for "
+                f"{len(articles)} articles; cannot safely match URLs to rows"
+            )
+        changed = False
+        for (page_number, rect), article in zip(targets, articles):
+            url = str(article.canonical_url or '').strip()
+            if not url.startswith(('https://', 'http://')):
+                raise RuntimeError(f"Missing original publisher URL: {article.title[:80]}")
+            page = pdf[page_number]
+            found = False
+            for link in page.get_links():
+                if link.get('kind') == fitz.LINK_URI and unquote(str(link.get('uri', ''))) == unquote(url):
+                    found = True
+                    break
+            if not found:
+                # Limit the clickable rectangle to the visible source label.
+                page.insert_link({'kind': fitz.LINK_URI, 'from': rect, 'uri': url})
+                changed = True
+        if changed:
+            tmp = Path(pdf_path).with_name(Path(pdf_path).stem + '_links_fixed.pdf')
+            pdf.save(str(tmp), garbage=3, deflate=True)
+    if changed:
+        tmp.replace(pdf_path)
+    return True
+
+
 def validate_pdf_matches_articles(pdf_path, articles):
     """Automated V8 PDF content/pagination/render validation."""
     from pypdf import PdfReader
@@ -2235,8 +2300,10 @@ def validate_pdf_matches_articles(pdf_path, articles):
                 continue
     for article in articles:
         url = str(article.canonical_url or "").strip()
-        if not url or url not in pdf_links:
-            raise RuntimeError(f"PDF validation failed: source hyperlink missing for article: {article.title[:80]}")
+        if not url:
+            raise RuntimeError(f"PDF validation failed: article has no source URL: {article.title[:80]}")
+        if url not in pdf_links:
+            raise RuntimeError(f"PDF validation failed: clickable source hyperlink missing for article: {article.title[:80]}")
         # Exact headline extraction is reliable only for predominantly Latin
         # titles; do not make Marathi/Hindi font encoding a fatal report error.
         probe = re.sub(r"\s+", " ", article.title).strip().lower()[:45]
@@ -2337,6 +2404,43 @@ def format_email_article_list(articles):
     return "\n".join(plain).rstrip(), "".join(html)
 
 
+def send_news_detection_email(edition, report_date, articles):
+    """First email: news list only; never attaches files or includes analysis."""
+    sender = env('SMTP_EMAIL')
+    password = env('SMTP_APP_PASSWORD').replace(' ', '')
+    recips = recipients()
+    if not recips:
+        return {'sent': [], 'failed': {}, 'skipped': 'no recipients configured'}
+    if not sender or not password:
+        raise RuntimeError('SMTP_EMAIL and SMTP_APP_PASSWORD are required for scheduled report email delivery')
+    label = {'morning': 'Morning', 'evening': 'Evening', 'weekly': 'Weekly'}[edition]
+    plain, html_list = format_email_article_list(articles)
+    subject = f'DoS / ISRO {label} — News Detection List — {report_date:%d %B %Y}'
+    body = f'DoS / ISRO {label} News Detection List — {report_date:%d %B %Y}\n\n{plain}\n'
+    html_body = ('<html><body style="font-family:Arial,sans-serif;font-size:12pt">'
+                 f'<h2>{html_escape(label)} News Detection List — {report_date:%d %B %Y}</h2>'
+                 + html_list + '</body></html>')
+    sent, failed = [], {}
+    with smtplib.SMTP_SSL('smtp.gmail.com', 465, context=ssl.create_default_context(), timeout=45) as smtp:
+        smtp.login(sender, password)
+        for recipient in recips:
+            try:
+                msg = EmailMessage()
+                msg['From'] = sender
+                msg['To'] = recipient
+                msg['Subject'] = subject
+                msg.set_content(body)
+                msg.add_alternative(html_body, subtype='html')
+                refused = smtp.send_message(msg, from_addr=sender, to_addrs=[recipient])
+                if refused:
+                    failed[recipient] = str(refused)
+                else:
+                    sent.append(recipient)
+            except Exception as exc:
+                failed[recipient] = f'{type(exc).__name__}: {exc}'
+    return {'sent': sent, 'failed': failed}
+
+
 def send_edition_email(edition, report_date, docx_path, pdf_path, run_status="COMPLETE", limitations=None, articles=None):
     sender = env("SMTP_EMAIL")
     password = env("SMTP_APP_PASSWORD").replace(" ", "")
@@ -2358,8 +2462,6 @@ def send_edition_email(edition, report_date, docx_path, pdf_path, run_status="CO
         for item in (limitations or [])[:6]:
             body += f"- {item}\n"
         body += "\n"
-    news_plain, news_html = format_email_article_list(articles)
-    body += "News items:\n\n" + news_plain + "\n\n"
     body += (
         "Attachments:\n"
         f"- {docx_path.name}\n"
@@ -2383,7 +2485,6 @@ def send_edition_email(edition, report_date, docx_path, pdf_path, run_status="CO
                     f'<p>Please find attached the {html_escape(label.lower())} DoS / ISRO Media News and Impact Analysis Report '
                     f'for {html_escape(report_date.strftime("%d %B %Y"))}.</p>'
                     + (f'<p>Status: PROVISIONAL.</p><p>{html_escape("; ".join((limitations or [])[:6]))}</p>' if run_status == "PROVISIONAL" else "")
-                    + '<h2>News items</h2>' + news_html
                     + '<p>Attachments:<br>' + html_escape(docx_path.name) + '<br>' + html_escape(pdf_path.name) + '</p></body></html>'
                 )
                 msg.add_alternative(html_body, subtype="html")
@@ -2479,6 +2580,26 @@ def run(edition, report_date=None, send_email=True):
 
     articles = dedupe_article_level(verified)
 
+    def sort_key(a):
+        if a.time_known:
+            return datetime.fromisoformat(a.published_iso_ist).timestamp()
+        return 0
+    articles.sort(key=sort_key, reverse=True)
+
+    # Stage 1: send the article list immediately after final eligibility and
+    # article-wise deduplication. PDF/LLM/conversion failures must not block it.
+    detection_email_result = {'sent': [], 'failed': {}, 'skipped': 'email disabled'}
+    if send_email:
+        if already_emailed(report_key):
+            detection_email_result = {'sent': [], 'failed': {}, 'skipped': 'already emailed; set FORCE_SCHEDULED_SEND=true to resend'}
+        else:
+            try:
+                detection_email_result = send_news_detection_email(edition, rd, articles)
+            except Exception as exc:
+                detection_email_result = {'sent': [], 'failed': {'smtp': f'{type(exc).__name__}: {exc}'}}
+                print('::warning::First news-list email failed; continuing report generation', flush=True)
+    print('[email-stage-1] ' + json.dumps(detection_email_result, ensure_ascii=False), flush=True)
+
     # Mandatory official-site-first check before drafting each action. This is
     # private audit evidence; official releases are never independent media rows.
     official_audit = []
@@ -2492,12 +2613,6 @@ def run(edition, report_date=None, send_email=True):
             "official": official,
             "remarks_action": article.remarks_action,
         })
-
-    def sort_key(a):
-        if a.time_known:
-            return datetime.fromisoformat(a.published_iso_ist).timestamp()
-        return 0
-    articles.sort(key=sort_key, reverse=True)
 
     # V8 completion assessment BEFORE publication. Do not force a 20-minute
     # sleep; assess the target honestly and label the external delivery provisional
@@ -2531,10 +2646,12 @@ def run(edition, report_date=None, send_email=True):
     generated_at = datetime.now(IST)
     build_docx(edition, rd, start, end, articles, docx_path, generated_at=generated_at)
     validate_docx_v8(docx_path, has_relevant=any(a.section == "relevant" for a in articles))
+    validate_docx_article_links(docx_path, articles)
     pdf_path = convert_docx_to_pdf(docx_path, OUTPUT_DIR)
     if pdf_path != expected_pdf:
         expected_pdf.write_bytes(pdf_path.read_bytes())
         pdf_path = expected_pdf
+    ensure_pdf_source_links(pdf_path, articles)
     validate_pdf_matches_articles(pdf_path, articles)
 
     # Visual/structural shipping checks have passed at this point.
@@ -2547,6 +2664,7 @@ def run(edition, report_date=None, send_email=True):
                 edition, rd, docx_path, pdf_path, run_status=run_status, limitations=external_notes, articles=articles
             )
 
+    email_result["news_detection"] = detection_email_result
     email_status = (
         "sent:" + ",".join(email_result.get("sent", []))
         if email_result.get("sent")

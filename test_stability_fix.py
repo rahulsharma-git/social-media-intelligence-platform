@@ -1,4 +1,4 @@
-"""Offline regression tests for Build 6.0.1."""
+"""Offline regression tests for Build 6.0.5."""
 from unittest.mock import patch
 import tempfile
 from pathlib import Path
@@ -6,7 +6,7 @@ from datetime import date, datetime
 import requests
 import scheduled_media_reports as s
 
-assert s.BUILD == '6.0.1'
+assert s.BUILD == '6.0.5'
 s._SEMANTIC_DISABLED_PROVIDERS.clear()
 s._SEMANTIC_RESULT_CACHE.clear()
 counts = {'groq': 0, 'router': 0}
@@ -46,6 +46,13 @@ with tempfile.TemporaryDirectory() as tmp:
     article=SimpleNamespace(title='इस्रो कडून मोहिमेची चाचणी',canonical_url='https://example.com/marathi',section='relevant')
     s.validate_pdf_matches_articles(p,[article])
     article.canonical_url='https://example.com/missing'
-    try:s.validate_pdf_matches_articles(p,[article]);raise AssertionError('Missing URL accepted')
-    except RuntimeError as e:assert 'source hyperlink missing' in str(e)
-print('Build 6.0.1 stability tests: PASS')
+    # Missing PDF annotations must fail: PDF links are mandatory.
+    try:
+        s.validate_pdf_matches_articles(p,[article])
+        raise AssertionError("Missing PDF link accepted")
+    except RuntimeError as e:
+        assert "clickable source hyperlink missing" in str(e)
+    article.canonical_url=''
+    try:s.validate_pdf_matches_articles(p,[article]);raise AssertionError('Empty source URL accepted')
+    except RuntimeError as e:assert 'no source URL' in str(e)
+print('Build 6.0.5 stability tests: PASS')
