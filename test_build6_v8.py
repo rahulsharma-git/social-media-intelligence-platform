@@ -5,7 +5,7 @@ import tempfile
 
 import scheduled_media_reports as s
 
-assert s.BUILD == "6.0.0"
+assert s.BUILD == "6.0.1"
 assert len(s.THEMES) == 44
 assert sum(len(v) for v in s.PASS_QUERIES.values()) >= 39
 assert set(s.PASS_QUERIES) == {1, 2, 3, 4, 5}

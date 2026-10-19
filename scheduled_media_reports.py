@@ -46,7 +46,7 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 UTC = timezone.utc
-BUILD = "6.0.0"
+BUILD = "6.0.1"
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MASTER_QUERY_FILE = Path(os.getenv(
@@ -55,7 +55,7 @@ MASTER_QUERY_FILE = Path(os.getenv(
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "Chrome/140 Safari/537.36 SMI-ScheduledReports/6.0.0"
+    "Chrome/140 Safari/537.36 SMI-ScheduledReports/6.0.1"
 )
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": USER_AGENT, "Accept-Language": "en-IN,en;q=0.9"})
@@ -1149,6 +1149,17 @@ def _analyse_with_cloudflare(prompt):
     return _validate_semantic_result(_extract_json_object(content))
 
 
+# Per-run provider circuit breaker and article cache. A rate-limited free provider
+# must not be retried for every article in the same scheduled edition.
+_SEMANTIC_DISABLED_PROVIDERS = set()
+_SEMANTIC_RESULT_CACHE = {}
+
+
+def _is_provider_quota_error(exc):
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status in (401, 402, 403, 404, 429) or (isinstance(status, int) and status >= 500)
+
+
 def semantic_article_analysis(title, body, publisher, institutions):
     """Try free hosted open-model providers in order, then return None for local fallback.
 
@@ -1157,6 +1168,11 @@ def semantic_article_analysis(title, body, publisher, institutions):
     """
     if not _truthy_env("ENABLE_FREE_LLM_ANALYSIS", "1"):
         return None, "local-rules-disabled-remote"
+    cache_key = hashlib.sha256(json.dumps(
+        [title, body, publisher, institutions], ensure_ascii=False, sort_keys=True,
+    ).encode("utf-8")).hexdigest()
+    if cache_key in _SEMANTIC_RESULT_CACHE:
+        return _SEMANTIC_RESULT_CACHE[cache_key]
     prompt = _semantic_prompt(title, body, publisher, institutions)
     providers = [
         ("groq-free", _analyse_with_groq),
@@ -1164,14 +1180,21 @@ def semantic_article_analysis(title, body, publisher, institutions):
         ("cloudflare-workers-ai-free", _analyse_with_cloudflare),
     ]
     for name, fn in providers:
+        if name in _SEMANTIC_DISABLED_PROVIDERS:
+            continue
         try:
             result = fn(prompt)
             if result:
                 print(f"[semantic-analysis] provider={name} title={title[:90]!r}")
+                _SEMANTIC_RESULT_CACHE[cache_key] = (result, name)
                 return result, name
         except Exception as exc:
-            # Never expose API keys; exception strings contain status/reason only.
-            print(f"[semantic-analysis] {name} unavailable: {type(exc).__name__}: {str(exc)[:220]}")
+            if _is_provider_quota_error(exc):
+                _SEMANTIC_DISABLED_PROVIDERS.add(name)
+                print(f"[semantic-analysis] {name} disabled for remainder of run: HTTP quota/auth/service error")
+            else:
+                print(f"[semantic-analysis] {name} unavailable: {type(exc).__name__}: {str(exc)[:140]}")
+    _SEMANTIC_RESULT_CACHE[cache_key] = (None, "local-rules")
     return None, "local-rules"
 
 def classify_tone(title, body="", institutions=None):
@@ -2192,12 +2215,35 @@ def validate_pdf_matches_articles(pdf_path, articles):
     if "late-discovered news" in norm_pdf:
         raise RuntimeError("V8 PDF validation failed: legacy Late-Discovered heading is present")
 
+    # PDF extraction can drop or reorder Devanagari glyphs even when the PDF
+    # displays correctly. Validate every row by its *canonical clickable source
+    # URL* instead of relying on extracted headline bytes for Indic scripts.
+    # For Latin headlines retain the additional readable-title check.
+    from urllib.parse import unquote as _url_unquote
+    pdf_links = set()
+    for page in reader.pages:
+        for annot_ref in (page.get("/Annots") or []):
+            try:
+                annot = annot_ref.get_object()
+                action = annot.get("/A")
+                if action:
+                    uri = action.get("/URI")
+                    if uri:
+                        pdf_links.add(str(uri).strip())
+            except Exception:
+                continue
     for article in articles:
+        url = str(article.canonical_url or "").strip()
+        if not url or url not in pdf_links:
+            raise RuntimeError(f"PDF validation failed: source hyperlink missing for article: {article.title[:80]}")
+        # Exact headline extraction is reliable only for predominantly Latin
+        # titles; do not make Marathi/Hindi font encoding a fatal report error.
         probe = re.sub(r"\s+", " ", article.title).strip().lower()[:45]
-        if probe and probe[:24] not in norm_pdf:
-            raise RuntimeError(f"PDF content validation failed for article title: {article.title[:80]}")
-        # Source hyperlink display text must be present for every row.
-        # URL annotations are renderer-dependent, so we validate display text + title here.
+        latin_letters = len(re.findall(r"[a-zA-Z]", probe))
+        all_letters = sum(ch.isalpha() for ch in probe)
+        if probe and all_letters and latin_letters / all_letters >= 0.85:
+            if probe[:24] not in norm_pdf:
+                raise RuntimeError(f"PDF content validation failed for article title: {article.title[:80]}")
 
     relevant = [a for a in articles if a.section == "relevant"]
     if relevant:
