@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass, asdict
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from email.message import EmailMessage
+from html import escape as html_escape
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urljoin, urlparse, urlunparse
 import xml.etree.ElementTree as ET
@@ -2292,7 +2293,51 @@ def recipients():
     return list(dict.fromkeys(vals))
 
 
-def send_edition_email(edition, report_date, docx_path, pdf_path, run_status="COMPLETE", limitations=None):
+def format_email_article_list(articles):
+    """Produce plain-text and HTML email lists from the exact final report articles.
+
+    Numbers restart per report section, matching the DOCX. No source lookup or
+    additional filtering occurs here; the list cannot drift from the report.
+    """
+    section_labels = {"main": "DoS / ISRO Major News", "startup": "Space Startups", "relevant": "Relevant Space News"}
+    groups = {}
+    for article in (articles or []):
+        groups.setdefault(article.section, []).append(article)
+    plain, html = [], []
+    for section in ("main", "startup", "relevant"):
+        entries = groups.get(section, [])
+        if not entries:
+            continue
+        label = section_labels[section]
+        plain.append(label)
+        html.append(f"<h3>{html_escape(label)}</h3><ol>")
+        for index, article in enumerate(entries, 1):
+            try:
+                published = date.fromisoformat(article.published_date).strftime("%d %B %Y")
+            except (ValueError, TypeError):
+                published = "Not stated"
+            time_text = "Not stated"
+            if article.time_known and article.published_time_ist:
+                try:
+                    time_text = datetime.strptime(article.published_time_ist, "%H:%M:%S").strftime("%I:%M %p") + " IST"
+                except ValueError:
+                    time_text = "Not stated"
+            title = str(article.title or "Not stated")
+            publisher = str(article.publisher or "Not stated")
+            author = str(article.author or "Not stated")
+            plain.append(f"{index}. {title}\n   Publisher: {publisher}; Author: {author}\n   Published: {published}; Time: {time_text}")
+            url = str(article.canonical_url or "")
+            safe_url = html_escape(url, quote=True)
+            linked_title = (f'<a href="{safe_url}">{html_escape(title)}</a>' if url.startswith(("https://", "http://")) else html_escape(title))
+            html.append(f'<li style="margin-bottom:10px">{linked_title}<div>Publisher: {html_escape(publisher)}; Author: {html_escape(author)}</div><div>Published: {html_escape(published)}; Time: {html_escape(time_text)}</div></li>')
+        html.append("</ol>")
+        plain.append("")
+    if not plain:
+        return "News items: Nil qualifying articles.", "<p>News items: Nil qualifying articles.</p>"
+    return "\n".join(plain).rstrip(), "".join(html)
+
+
+def send_edition_email(edition, report_date, docx_path, pdf_path, run_status="COMPLETE", limitations=None, articles=None):
     sender = env("SMTP_EMAIL")
     password = env("SMTP_APP_PASSWORD").replace(" ", "")
     recips = recipients()
@@ -2313,6 +2358,8 @@ def send_edition_email(edition, report_date, docx_path, pdf_path, run_status="CO
         for item in (limitations or [])[:6]:
             body += f"- {item}\n"
         body += "\n"
+    news_plain, news_html = format_email_article_list(articles)
+    body += "News items:\n\n" + news_plain + "\n\n"
     body += (
         "Attachments:\n"
         f"- {docx_path.name}\n"
@@ -2331,6 +2378,15 @@ def send_edition_email(edition, report_date, docx_path, pdf_path, run_status="CO
                 msg = EmailMessage()
                 msg["From"] = sender; msg["To"] = recipient; msg["Subject"] = subject
                 msg.set_content(body)
+                html_body = (
+                    '<html><body style="font-family:Arial,sans-serif;font-size:12pt">'
+                    f'<p>Please find attached the {html_escape(label.lower())} DoS / ISRO Media News and Impact Analysis Report '
+                    f'for {html_escape(report_date.strftime("%d %B %Y"))}.</p>'
+                    + (f'<p>Status: PROVISIONAL.</p><p>{html_escape("; ".join((limitations or [])[:6]))}</p>' if run_status == "PROVISIONAL" else "")
+                    + '<h2>News items</h2>' + news_html
+                    + '<p>Attachments:<br>' + html_escape(docx_path.name) + '<br>' + html_escape(pdf_path.name) + '</p></body></html>'
+                )
+                msg.add_alternative(html_body, subtype="html")
                 for fn, payload, mt, st in attachments:
                     msg.add_attachment(payload, maintype=mt, subtype=st, filename=fn)
                 refused = smtp.send_message(msg, from_addr=sender, to_addrs=[recipient])
@@ -2488,7 +2544,7 @@ def run(edition, report_date=None, send_email=True):
             email_result = {"sent": [], "failed": {}, "skipped": "already emailed; use FORCE_SCHEDULED_SEND=true to resend"}
         else:
             email_result = send_edition_email(
-                edition, rd, docx_path, pdf_path, run_status=run_status, limitations=external_notes
+                edition, rd, docx_path, pdf_path, run_status=run_status, limitations=external_notes, articles=articles
             )
 
     email_status = (
@@ -2585,7 +2641,18 @@ def main():
     parser.add_argument("--report-date", help="YYYY-MM-DD in IST; defaults to current IST date")
     parser.add_argument("--no-email", action="store_true")
     args = parser.parse_args()
-    rd = date.fromisoformat(args.report_date) if args.report_date else None
+    rd = None
+    if args.report_date:
+        raw_date = args.report_date.strip()
+        if raw_date.lower() in {"interim", "today", "current"}:
+            # Historical manual dispatches used "interim" in the date input.
+            # Treat this as today's IST date rather than crashing the workflow.
+            print(f"[scheduled-report] --report-date={raw_date!r} is not a calendar date; using current IST date.")
+        else:
+            try:
+                rd = date.fromisoformat(raw_date)
+            except ValueError:
+                parser.error("--report-date must be YYYY-MM-DD or blank (interim/today/current also select today IST)")
     run(args.edition, report_date=rd, send_email=not args.no_email)
 
 
