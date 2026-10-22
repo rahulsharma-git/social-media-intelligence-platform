@@ -2,9 +2,9 @@ name: SMI Background Monitor - Every 30 Minutes
 
 on:
   schedule:
-    - cron: "7 * * * *"
+ '   - cron: "7 * * * *"
       timezone: "Asia/Kolkata"
-    - cron: "37 * * * *"
+'    - cron: "37 * * * *"
       timezone: "Asia/Kolkata"
 
   workflow_dispatch:
