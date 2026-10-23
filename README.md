@@ -1,4 +1,4 @@
-# Social Media Intelligence Platform — Build 6.0.0
+# Social Media Intelligence Platform — Build 6.0.6
 
 Build 5.13 is based on the uploaded Build 5.12 recipient-email hotfix.
 
@@ -388,6 +388,11 @@ used first and the local rules remain the automatic fallback. Set
 The scheduled report remains operational when a provider times out, returns
 invalid JSON, is rate-limited, or has exhausted its free quota. No online LLM is
 a hard dependency.
+
+
+## Build 6.0.6 — Visible Source URL in News Detection List
+
+The first-stage News Detection List email displays each original publisher URL as a separate complete `Source URL:` line. The article title is plain text; in the HTML alternative the visible URL itself remains clickable. All Build 6.0.5 two-stage email, PDF-link validation, V8 reporting, Groq/free-provider fallback, hourly monitoring and local fallback behavior is retained.
 
 ## Build 6.0.0 — Master Query V8.0 scheduled reports
 

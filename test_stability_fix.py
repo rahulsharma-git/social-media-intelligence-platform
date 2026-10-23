@@ -1,4 +1,4 @@
-"""Offline regression tests for Build 6.0.5."""
+"""Offline regression tests retained for Build 6.0.6."""
 from unittest.mock import patch
 import tempfile
 from pathlib import Path
@@ -6,7 +6,7 @@ from datetime import date, datetime
 import requests
 import scheduled_media_reports as s
 
-assert s.BUILD == '6.0.5'
+assert s.BUILD == '6.0.6'
 s._SEMANTIC_DISABLED_PROVIDERS.clear()
 s._SEMANTIC_RESULT_CACHE.clear()
 counts = {'groq': 0, 'router': 0}
@@ -55,4 +55,4 @@ with tempfile.TemporaryDirectory() as tmp:
     article.canonical_url=''
     try:s.validate_pdf_matches_articles(p,[article]);raise AssertionError('Empty source URL accepted')
     except RuntimeError as e:assert 'no source URL' in str(e)
-print('Build 6.0.5 stability tests: PASS')
+print('Build 6.0.6 stability tests: PASS')

@@ -1,4 +1,4 @@
-"""Build 6.0.0 — V8-governed DoS/ISRO media reports with semantic-analysis fallback.
+"""Build 6.0.6 — V8-governed DoS/ISRO media reports with semantic-analysis fallback.
 
 This worker implements the user-supplied Master Query V8.0 with an optional free hosted open-model analysis chain and a deterministic local fallback.
 
@@ -47,7 +47,7 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 UTC = timezone.utc
-BUILD = "6.0.5"
+BUILD = "6.0.6"
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MASTER_QUERY_FILE = Path(os.getenv(
@@ -2392,11 +2392,27 @@ def format_email_article_list(articles):
             title = str(article.title or "Not stated")
             publisher = str(article.publisher or "Not stated")
             author = str(article.author or "Not stated")
-            plain.append(f"{index}. {title}\n   Publisher: {publisher}; Author: {author}\n   Published: {published}; Time: {time_text}")
-            url = str(article.canonical_url or "")
+            url = str(article.canonical_url or "").strip()
+            source_line = url if url.startswith(("https://", "http://")) else "Not available"
+            plain.append(
+                f"{index}. {title}\n"
+                f"   Source URL: {source_line}\n"
+                f"   Publisher: {publisher}; Author: {author}\n"
+                f"   Published: {published}; Time: {time_text}"
+            )
             safe_url = html_escape(url, quote=True)
-            linked_title = (f'<a href="{safe_url}">{html_escape(title)}</a>' if url.startswith(("https://", "http://")) else html_escape(title))
-            html.append(f'<li style="margin-bottom:10px">{linked_title}<div>Publisher: {html_escape(publisher)}; Author: {html_escape(author)}</div><div>Published: {html_escape(published)}; Time: {html_escape(time_text)}</div></li>')
+            if url.startswith(("https://", "http://")):
+                visible_source = f'<a href="{safe_url}">{html_escape(url)}</a>'
+            else:
+                visible_source = "Not available"
+            html.append(
+                f'<li style="margin-bottom:12px">'
+                f'<div>{html_escape(title)}</div>'
+                f'<div><strong>Source URL:</strong> {visible_source}</div>'
+                f'<div>Publisher: {html_escape(publisher)}; Author: {html_escape(author)}</div>'
+                f'<div>Published: {html_escape(published)}; Time: {html_escape(time_text)}</div>'
+                f'</li>'
+            )
         html.append("</ol>")
         plain.append("")
     if not plain:

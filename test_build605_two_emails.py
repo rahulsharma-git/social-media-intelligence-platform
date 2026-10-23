@@ -1,4 +1,4 @@
-"""Build 6.0.5: first email is list-only; second email contains two attachments."""
+"""Build 6.0.6: first email shows the full source URL; second email contains two attachments."""
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from datetime import date
@@ -29,7 +29,12 @@ with TemporaryDirectory() as td:
     assert 'ISRO satellite mission update' in a.get_body(preferencelist=('plain',)).get_content()
     assert 'SENSITIVE IMPACT TEXT' not in a.as_string()
     assert 'SENSITIVE ACTION TEXT' not in a.as_string()
-    assert 'https://example.com/real-news' in a.get_body(preferencelist=('html',)).get_content()
+    plain_body=a.get_body(preferencelist=('plain',)).get_content()
+    html_body=a.get_body(preferencelist=('html',)).get_content()
+    assert 'Source URL: https://example.com/real-news' in plain_body
+    assert 'https://example.com/real-news' in html_body
+    assert '>https://example.com/real-news</a>' in html_body
+    assert '>ISRO satellite mission update</a>' not in html_body
     assert len(list(b.iter_attachments()))==2
     assert 'News Detection List' not in b['Subject']
-print('Build 6.0.5 two-email regression: PASS')
+print('Build 6.0.6 visible-URL two-email regression: PASS')
