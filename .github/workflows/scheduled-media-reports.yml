@@ -1,10 +1,10 @@
-name: DoS-ISRO Build 6.0 V8 Media Reports - 8AM 8PM
+name: DoS-ISRO Build 6.0.2 V8 Media Reports - 8AM 8PM
 
 on:
   schedule:
     # GitHub cron is UTC. 02:30 UTC = 08:00 IST; 14:30 UTC = 20:00 IST.
-    - cron: "30 7 * * *"
-    - cron: "30 19 * * *"
+    - cron: "30 2 * * *"
+    - cron: "30 14 * * *"
 
   workflow_dispatch:
     inputs:
@@ -18,7 +18,7 @@ on:
           - evening
           - weekly
       report_date:
-        description: "Optional IST report date YYYY-MM-DD (blank = today IST)"
+        description: "Optional IST report date YYYY-MM-DD (blank/interim = today IST)"
         required: false
         default: ""
         type: string
@@ -57,9 +57,6 @@ jobs:
       REPORT_RECIPIENTS_30MIN: ${{ secrets.REPORT_RECIPIENTS_30MIN }}
       REPORT_RECIPIENTS: ${{ secrets.REPORT_RECIPIENTS }}
 
-      # Build 5.19.4: scheduled editions always perform a fresh comprehensive
-      # scan and verify every discovered candidate. Legacy candidate/verify
-      # caps are intentionally not used here.
       FORCE_SCHEDULED_SEND: ${{ github.event_name == 'workflow_dispatch' && inputs.force_send || false }}
 
       # V8.0 research / archive / template controls.
@@ -166,8 +163,9 @@ jobs:
         shell: bash
         run: |
           args=(--edition "${{ steps.edition.outputs.edition }}")
-          if [ -n "${{ steps.edition.outputs.report_date }}" ]; then
-            args+=(--report-date "${{ steps.edition.outputs.report_date }}")
+          report_date="${{ steps.edition.outputs.report_date }}"
+          if [ -n "$report_date" ]; then
+            args+=(--report-date "$report_date")
           fi
           python scheduled_media_reports.py "${args[@]}"
 
