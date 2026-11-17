@@ -1,3 +1,13 @@
+# Build 6.1.0 — Master Query V10.3 (ACTIVE)
+
+The active daily-report workflow is `.github/workflows/scheduled-media-reports.yml` and the active policy file is `DoS_ISRO_Master_Query_Version_10_3.txt`. V10.3 uses one complete sequential run at **06:05 IST** and **18:05 IST**, with Morning `[18:00,06:00)` and Evening `[06:00,18:00)` publication windows. Each run produces synchronized DOCX, PDF and XLSX outputs and preserves the two-stage email flow. See `BUILD_6.1.0_V10_3_SINGLE_SEQUENTIAL.md`.
+
+## Where to update daily report email recipients
+
+In GitHub open **Settings → Secrets and variables → Actions → Repository secrets** and create/edit `REPORT_RECIPIENTS_SCHEDULED`. Enter addresses separated by commas, semicolons or new lines. Both the first News Detection List and the final DOCX/PDF/XLSX report email use this list. If it is absent, the code falls back to `REPORT_RECIPIENTS_30MIN`, then `REPORT_RECIPIENTS`. The hourly monitor still uses `REPORT_RECIPIENTS_30MIN` by default.
+
+---
+
 # Social Media Intelligence Platform — Build 6.0.6
 
 Build 5.13 is based on the uploaded Build 5.12 recipient-email hotfix.

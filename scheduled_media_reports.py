@@ -1,12 +1,15 @@
-"""Build 6.0.6 — V8-governed DoS/ISRO media reports with semantic-analysis fallback.
+"""Build 6.1.0 — Master Query V10.3 governed DoS/ISRO daily media reports.
 
-This worker implements the user-supplied Master Query V8.0 with an optional free hosted open-model analysis chain and a deterministic local fallback.
+Single sequential execution runs twice daily at 06:05 and 18:05 IST.
+Morning window: previous day 18:00 inclusive to report day 06:00 exclusive.
+Evening window: report day 06:00 inclusive to 18:00 exclusive.
 
-* Morning: daily 08:00 IST; original first-publication window previous day 20:00 inclusive -> report day 08:00 exclusive.
-* Evening: daily 20:00 IST; original first-publication window report day 08:00 inclusive -> 20:00 exclusive.
-* Weekly: legacy/manual feature retained, but automatic weekly scheduling is paused under V8.0.
-
-Each generated edition produces an editable DOCX and matching PDF. The existing hourly background monitor and all Build 5.19 monitoring/X features are preserved.
+Each run performs the five research passes and two sweeps, verifies article identity
+and publication time, applies the designated read-only archive, classifies and sorts
+articles, sends the attachment-free News Detection List, performs official-source
+checks, generates synchronized DOCX/PDF/XLSX outputs, validates them, and sends the
+final report. Free hosted semantic providers remain optional and local rules remain
+the final fallback.
 """
 from __future__ import annotations
 
@@ -39,6 +42,8 @@ from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Mm, Pt, RGBColor
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, Alignment
 try:
     from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 except ImportError:  # GitHub installs vaderSentiment from requirements.txt; fallback aids local diagnostics.
@@ -47,16 +52,16 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 UTC = timezone.utc
-BUILD = "6.0.6"
+BUILD = "6.1.0"
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MASTER_QUERY_FILE = Path(os.getenv(
-    "MASTER_QUERY_FILE", "DoS_ISRO_Master_Query_Version_8_0.txt"
+    "MASTER_QUERY_FILE", "DoS_ISRO_Master_Query_Version_10_3.txt"
 ))
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "Chrome/140 Safari/537.36 SMI-ScheduledReports/6.0.1"
+    "Chrome/140 Safari/537.36 SMI-ScheduledReports/6.1.0"
 )
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": USER_AGENT, "Accept-Language": "en-IN,en;q=0.9"})
@@ -91,7 +96,7 @@ MISSION_TERMS = [
     "lupex", "eos-", "oceansat", "project netra", "poem-", "rlv", "trishna",
 ]
 
-# V8.0 44-theme coverage matrix. Themes are coverage checks, never quotas.
+# V10.3 inherited 44-theme coverage matrix. Themes are coverage checks, never quotas.
 THEMES = [
     "DoS governance", "ISRO leadership", "IN-SPACe authorizations", "NSIL commerce",
     "policy regulation", "parliamentary oversight", "budgets", "bilateral multilateral cooperation",
@@ -105,7 +110,7 @@ THEMES = [
     "criticism accountability", "emerging issues",
 ]
 
-# Five substantially distinct V8 discovery passes. This deliberately exceeds the
+# Five substantially distinct V10.3 discovery passes. This deliberately exceeds the
 # minimum 39-query execution gate (5 + 7 + 8 + 9 + 10). Startups are represented
 # in every pass, and regional/local-language spellings are searched explicitly.
 PASS_QUERIES = {
@@ -232,6 +237,10 @@ class Article:
     crux: str = ""
     analysis_source: str = "local-rules"
     catch_up: bool = False
+    final_no: int = 0
+    timestamp_grade: str = "A"
+    url_verification_status: str = "publisher article content/title confirmed"
+    decision: str = ""
 
     @property
     def article_key(self):
@@ -252,6 +261,20 @@ def env_int(name, default):
 
 def env_bool(name, default=False):
     return env(name, "true" if default else "false").lower() in {"1", "true", "yes", "on", "y"}
+
+
+def load_master_query_contract():
+    """Read the complete governing Master Query on every execution."""
+    if not MASTER_QUERY_FILE.exists():
+        raise RuntimeError(f"Master Query file missing: {MASTER_QUERY_FILE}")
+    text = MASTER_QUERY_FILE.read_text(encoding="utf-8", errors="strict")
+    if "VERSION 10.3" not in text or "SINGLE SEQUENTIAL DAILY EXECUTION" not in text:
+        raise RuntimeError("Configured Master Query is not the V10.3 single sequential contract")
+    return {
+        "path": str(MASTER_QUERY_FILE),
+        "bytes": len(text.encode("utf-8")),
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
 
 
 def http_get(url, *, params=None, timeout=30, retries=2):
@@ -472,7 +495,7 @@ def _candidate_relevance_hint(item):
 
 
 def discover_candidates(edition, search_start_ist, report_end_ist):
-    """V8 sweep 1: fresh broad discovery for the requested edition.
+    """V10.3 sweep 1: fresh broad discovery for the requested edition.
 
     Search first, filter second. Every invocation re-runs all five passes and all
     44 theme checks. Search/feed timestamps are only discovery hints; original
@@ -590,7 +613,7 @@ def discover_candidates(edition, search_start_ist, report_end_ist):
 
 
 def gap_reconciliation_candidates(articles, search_start_ist, report_end_ist, max_events=30):
-    """V8 sweep 2: re-search discovered substantive events for missed publishers."""
+    """V10.3 sweep 2: re-search discovered substantive events for missed publishers."""
     candidates = {}
     diag = {"sweep": 2, "queries": 0, "events_researched": 0, "errors": [], "channels": {}}
 
@@ -764,9 +787,38 @@ def _host_is_official(url):
 def _is_private_space_story(title, body):
     text = f"{title} {body[:2600]}".lower()
     private = any(term in text for term in PRIVATE_SPACE_TERMS)
-    india = any(x in text for x in ["india", "indian", "bengaluru", "hyderabad", "chennai", "ahmedabad", "sriharikota"])
-    commercial = any(x in text for x in ["startup", "start-up", "company", "funding", "investment", "contract", "manufacturing", "commercial", "private"])
-    return private and (india or commercial)
+    india = any(x in text for x in [
+        "india", "indian", "bengaluru", "bangalore", "hyderabad", "chennai",
+        "ahmedabad", "sriharikota", "new delhi", "delhi", "pune"
+    ])
+    named_indian_company = any(x in text for x in [
+        "skyroot", "agnikul", "pixxel", "bellatrix", "dhruva space", "digantara",
+        "galaxeye", "satsure", "piersight", "manastu", "etherealx", "orbitaid",
+        "takeme2space", "take me 2 space", "xovian", "astrogate"
+    ])
+    return private and (india or named_indian_company)
+
+
+def _has_substantive_india_space_link(title, body):
+    text = f"{title} {body[:3200]}".lower()
+    if any(re.search(p, text, flags=re.I) for pats in INSTITUTION_PATTERNS.values() for p in pats):
+        return True
+    if _is_private_space_story(title, body):
+        return True
+    if any(m.lower() in text for m in MISSION_TERMS):
+        return True
+    india_terms = ("india", "indian", "bharat", "navic", "sriharikota")
+    space_terms = tuple(SPACE_RELEVANCE_TERMS) + ("rocket", "spacecraft", "launch", "orbital")
+    return any(x in text for x in india_terms) and any(x in text for x in space_terms)
+
+
+def _is_english_article(title, body):
+    sample = re.sub(r"\s+", " ", f"{title} {body[:2400]}").strip()
+    letters = [c for c in sample if c.isalpha()]
+    if not letters:
+        return False
+    latin = sum(1 for c in letters if ("A" <= c <= "Z") or ("a" <= c <= "z"))
+    return latin / max(1, len(letters)) >= 0.72
 
 
 def _is_private_space_headline(title):
@@ -776,7 +828,7 @@ def _is_private_space_headline(title):
 
 def _is_broader_space_story(title, body):
     text = f"{title} {body[:2200]}".lower()
-    return any(term in text for term in SPACE_RELEVANCE_TERMS)
+    return any(term in text for term in SPACE_RELEVANCE_TERMS) and _has_substantive_india_space_link(title, body)
 
 
 def _is_recruitment_or_tender_only(title, body):
@@ -807,7 +859,7 @@ def verify_article(candidate: Candidate):
         return None, "non-publisher-final-url"
 
     # Official sources are corroboration/discovery evidence, never independent
-    # media rows under V8.
+    # media rows under V10.3.
     if _host_is_official(final_url):
         return None, "official-primary-source-excluded"
 
@@ -885,6 +937,8 @@ def verify_article(candidate: Candidate):
         return None, "insufficient-article-body"
     if _is_recruitment_or_tender_only(title, body):
         return None, "recruitment-or-tender-only"
+    if not _is_english_article(title, body):
+        return None, "non-english-final-publication"
 
     evidence_text = f"{title} {body}".strip()
     lower = evidence_text.lower()
@@ -982,6 +1036,9 @@ def verify_article(candidate: Candidate):
         section=section,
         crux=crux,
         analysis_source=analysis_source,
+        timestamp_grade=("A" if pub_dt else "C"),
+        url_verification_status="publisher article content/title confirmed",
+        decision=("Space Startups" if section == "startup" else "DoS / ISRO Major News"),
     ), "ok"
 
 
@@ -1016,18 +1073,18 @@ def _validate_semantic_result(obj):
     tone_raw = re.sub(r"\s+", " ", str(obj.get("tone", "")).strip())
     tone_map = {
         "positive": "Positive",
-        "neutral": "Neutral-Mixed",
-        "neutral-mixed": "Neutral-Mixed",
-        "neutral mixed": "Neutral-Mixed",
-        "negative": "Critical-Negative",
-        "critical-negative": "Critical-Negative",
-        "critical negative": "Critical-Negative",
+        "neutral": "Neutral",
+        "neutral-mixed": "Neutral",
+        "neutral mixed": "Neutral",
+        "negative": "Negative",
+        "critical-negative": "Negative",
+        "critical negative": "Negative",
     }
     tone = tone_map.get(tone_raw.lower())
     impact = str(obj.get("impact_level", "")).strip().title()
     crux = re.sub(r"\s+", " ", str(obj.get("crux", "")).strip())
     analysis = re.sub(r"\s+", " ", str(obj.get("impact_analysis", "")).strip())
-    if tone not in {"Positive", "Neutral-Mixed", "Critical-Negative"}:
+    if tone not in {"Positive", "Neutral", "Negative"}:
         return None
     if impact not in {"High", "Medium", "Low"}:
         return None
@@ -1046,7 +1103,7 @@ def _validate_semantic_result(obj):
 def _semantic_prompt(title, body, publisher, institutions):
     inst = ", ".join(institutions or []) or "ISRO / Department of Space / IN-SPACe / NSIL / Indian private-space ecosystem"
     article_text = re.sub(r"\s+", " ", str(body or "")).strip()[:5600]
-    return f"""You are preparing a Version 8.0 DoS/ISRO media intelligence report.
+    return f"""You are preparing a Master Query Version 10.3 DoS/ISRO media intelligence report for senior institutional readership.
 
 Analyse the ARTICLE by meaning and consequence, never by isolated sentiment words.
 Perspective: ISRO, Department of Space (DoS), IN-SPACe, NSIL and, where relevant, India's private-space ecosystem. Detected context: {inst}.
@@ -1055,19 +1112,19 @@ STRICT OUTPUT RULES
 1. CRUX: one short plain-English sentence stating what actually happened. No invented facts.
 2. TONE must be exactly one of:
    - Positive: favourable/supportive reporting, achievement/success, or clearly beneficial development.
-   - Neutral-Mixed: factual/balanced/mixed reporting without a clearly derogatory stance.
-   - Critical-Negative: derogatory, accusatory, strongly critical or reputation-damaging coverage of ISRO/DoS/IN-SPACe/NSIL, or coverage materially questioning competence, integrity, governance, performance or decisions.
-   A delay, anomaly, accident, failure, risk or investigation is NOT automatically Critical-Negative.
+   - Neutral: factual/balanced reporting without a clearly derogatory stance.
+   - Negative: derogatory, accusatory, strongly critical or reputation-damaging coverage of ISRO/DoS/IN-SPACe/NSIL, or coverage materially questioning competence, integrity, governance, performance or decisions.
+   A delay, anomaly, accident, failure, risk or investigation is NOT automatically Negative.
 3. IMPACT LEVEL is separate from tone:
    - High: major direct consequence for an important mission/programme, crew/safety, strategic capability, major resources/budget, or institutional functioning.
    - Medium: meaningful indirect or medium-term effect on technology, suppliers, private-space ecosystem, partnership, regulation, commercial activity or planning.
    - Low: little identifiable consequence for current activities.
    Never make High from a single word such as launch, contract, policy, approval, delay or strategic.
-4. IMPACT ANALYSIS: one or two short, concrete, simple-English sentences explaining institutional, policy, mission, commercial or reputational significance from the ISRO/DoS perspective. Avoid generic phrases. If little effect is evident, say so plainly.
+4. IMPACT ANALYSIS: one or two short, concrete, simple-English sentences explaining institutional, policy, mission, commercial or reputational significance from the ISRO/DoS perspective. Keep the language exceptionally mild, dignified, factual, attributed and non-presumptive. Prefer constructions such as "The article highlights...", "The report discusses...", "The coverage refers to..." and qualified "may/could/reported" wording. Do not prescribe action, grade institutional competence, assign blame, exaggerate, speculate or use senior leadership titles unless essential. If little effect is evident, say so plainly.
 5. Use only information supported by the article. Cautious immediate implications are allowed; speculation is not.
 
 Return ONLY valid JSON in exactly this shape:
-{{"crux":"...","tone":"Positive|Neutral-Mixed|Critical-Negative","impact_level":"High|Medium|Low","impact_analysis":"..."}}
+{{"crux":"...","tone":"Positive|Neutral|Negative","impact_level":"High|Medium|Low","impact_analysis":"..."}}
 
 PUBLISHER: {publisher}
 TITLE: {title}
@@ -1304,10 +1361,10 @@ def classify_tone(title, body="", institutions=None):
     # This keeps "launch delayed by weather" Neutral but "ISRO criticised over
     # repeated delays" Negative.
     if neg_score >= 3 and neg_score > pos_score:
-        return "Critical-Negative"
+        return "Negative"
     if pos_score >= 2 and pos_score > neg_score:
         return "Positive"
-    return "Neutral-Mixed"
+    return "Neutral"
 
 
 def classify_impact(text, institutions, concern_ids):
@@ -1456,7 +1513,7 @@ def classify_impact(text, institutions, concern_ids):
         )
     elif minor_delay:
         reason = (
-            "The delay may shift the immediate schedule, but the wider impact appears limited unless it affects dependent milestones."
+            "The article reports a schedule change that may affect the immediate timeline. Wider significance may remain limited unless dependent milestones are also affected."
         )
     elif has("test", "trial", "demonstration"):
         reason = (
@@ -1506,32 +1563,28 @@ def classify_impact(text, institutions, concern_ids):
         )
     elif level == "Medium":
         reason = (
-            "The development is relevant to ISRO's planning, ecosystem or external environment, but no major immediate disruption is evident."
+            "The article covers a development of potential relevance to programme planning, the space ecosystem or the wider operating environment. No major immediate operational effect is evident from the available report."
         )
     else:
-        reason = "The update is relevant to ISRO, but no significant operational or strategic consequence is evident from the report."
+        reason = "The article provides information relevant to the Indian space programme, while no significant operational or strategic consequence is evident from the available report."
 
     return level, reason
 
 
 def edition_window(edition, report_date=None):
-    """Return strict V8 publication window plus 24-hour discovery lookback start."""
+    """Return the V10.3 strict main window and rolling 24-hour lookback start."""
     now = datetime.now(IST)
     rd = report_date or now.date()
     if edition == "morning":
-        end = datetime.combine(rd, dtime(8, 0), IST)
-        start = datetime.combine(rd - timedelta(days=1), dtime(20, 0), IST)
-        search_start = end - timedelta(hours=24)
-        return start, end, search_start
+        end = datetime.combine(rd, dtime(6, 0), IST)
+        start = datetime.combine(rd - timedelta(days=1), dtime(18, 0), IST)
+        return start, end, end - timedelta(hours=24)
     if edition == "evening":
-        start = datetime.combine(rd, dtime(8, 0), IST)
-        end = datetime.combine(rd, dtime(20, 0), IST)
-        search_start = end - timedelta(hours=24)
-        return start, end, search_start
+        start = datetime.combine(rd, dtime(6, 0), IST)
+        end = datetime.combine(rd, dtime(18, 0), IST)
+        return start, end, end - timedelta(hours=24)
     if edition == "weekly":
-        # Legacy/manual feature retained from Build 5.19, but V8 automatic weekly
-        # scheduling is paused. A manual dispatch is an explicit user action.
-        end = datetime.combine(rd, dtime(20, 0), IST)
+        end = datetime.combine(rd, dtime(18, 0), IST)
         if rd.weekday() != 4:
             raise ValueError("Weekly report date must be Friday")
         start = end - timedelta(days=7)
@@ -1540,14 +1593,13 @@ def edition_window(edition, report_date=None):
 
 
 def article_in_window(article: Article, edition, start, end, search_start, previous_evening_keys=None):
-    """V8 first-publication eligibility.
+    """V10.3 two-test first-publication eligibility with no Hold disposition.
 
-    Search/RSS crawl timestamps never decide eligibility. If the original
-    publisher time is unavailable, the candidate is held for verification rather
-    than guessed into a boundary window.
+    Search/RSS crawl timestamps never decide eligibility. Unresolved publication
+    time is documented and dropped rather than guessed into a boundary window.
     """
     if not article.time_known:
-        return False, False, "hold-original-publication-time-unverified"
+        return False, False, "drop-original-publication-time-unverified"
 
     dt = datetime.fromisoformat(article.published_iso_ist).astimezone(IST)
     if start <= dt < end:
@@ -1556,10 +1608,11 @@ def article_in_window(article: Article, edition, start, end, search_start, previ
             return False, False, "broader-space-not-main-window-eligible"
         return True, False, "exact-in-window"
 
-    # V8 Relevant Space News: verified, not in strict main window, within the
+    # V10.3 Relevant Space News: verified, not in strict main window, within the
     # preceding 24-hour discovery lookback. Archive dedup is applied separately.
     if edition in {"morning", "evening"} and search_start <= dt < end:
         article.section = "relevant"
+        article.decision = "Relevant Space News"
         return True, True, "relevant-space-lookback"
 
     return False, False, "exact-outside-window"
@@ -1569,12 +1622,41 @@ def dedupe_article_level(articles):
     """Only identical original publisher article identity is deduplicated."""
     out = {}
     for a in articles:
-        # canonical URL is the primary identity; publisher keeps identity explicit.
         key = (a.publisher.lower().strip(), a.canonical_url)
         old = out.get(key)
         if old is None or a.source_pass < old.source_pass:
             out[key] = a
     return list(out.values())
+
+
+def sort_and_number_articles(articles):
+    """V10.3 section order and exact sentiment-impact ordering."""
+    section_rank = {"main": 0, "startup": 1, "relevant": 2}
+    tone_rank = {
+        "Positive": 0,
+        "Neutral": 1, "Neutral-Mixed": 1,
+        "Negative": 2, "Critical-Negative": 2,
+    }
+    impact_rank = {"High": 0, "Medium": 1, "Low": 2}
+    def key(a):
+        ts = 0.0
+        if a.time_known and a.published_iso_ist:
+            try:
+                ts = datetime.fromisoformat(a.published_iso_ist).timestamp()
+            except Exception:
+                ts = 0.0
+        return (
+            section_rank.get(a.section, 9),
+            tone_rank.get(a.tone, 9),
+            impact_rank.get(a.impact_level, 9),
+            -ts,
+            a.article_key,
+        )
+    ordered = sorted(articles, key=key)
+    for i, a in enumerate(ordered, 1):
+        a.final_no = i
+        a.decision = {"main": "DoS / ISRO Major News", "startup": "Space Startups", "relevant": "Relevant Space News"}.get(a.section, "Drop")
+    return ordered
 
 
 def _read_archive_text(path):
@@ -1596,67 +1678,89 @@ def _read_archive_text(path):
 
 
 def load_archive_registry():
-    """Load only the most recent configured consolidated archive as V8 registry.
+    """Load only the explicitly designated read-only V10.3 archive.
 
-    The archive is never modified automatically. Exact publisher+canonical URL is
-    primary. Structured CSV/JSON rows may also supply the V8 fallback identity:
-    publisher + normalized headline + verified first-publication date.
+    No directory scan or silent older fallback is permitted. The default designation
+    follows Master Query V10.3. If the designated CSV is unavailable, only the exact
+    same-basename XLSX fallback is attempted.
     """
-    configured = env("CONSOLIDATED_ARCHIVE_FILE")
-    path = Path(configured) if configured else None
-    if not path or not path.exists():
-        candidates = []
-        for pattern in ("*consolidated*archive*", "*media*archive*", "*news*archive*"):
-            candidates.extend([x for x in Path('.').glob(pattern) if x.is_file()])
-        # Do not treat our generated evidence/diagnostic files as archives.
-        candidates = [x for x in candidates if "diagnostic" not in x.name.lower() and "evidence" not in x.name.lower()]
-        path = max(candidates, key=lambda x: x.stat().st_mtime) if candidates else None
-    if not path or not path.exists():
-        return {"available": False, "path": "", "urls": set(), "fallback": set(), "error": "latest consolidated archive unavailable"}
+    configured = env("CONSOLIDATED_ARCHIVE_FILE", "ISRO_News_Archive_16Nov2026_Morning.csv")
+    path = Path(configured)
+    fallback_used = False
+    if not path.exists() and path.suffix.lower() == ".csv":
+        exact_xlsx = path.with_suffix(".xlsx")
+        if exact_xlsx.exists():
+            path = exact_xlsx
+            fallback_used = True
+    if not path.exists():
+        return {
+            "available": False, "path": str(Path(configured)), "urls": set(), "fallback": set(),
+            "error": "explicitly designated archive unavailable; no older archive fallback permitted",
+            "row_count": 0, "column_count": 0, "unique_id_count": 0, "last_id": "",
+            "read_only": True, "fallback_used": False,
+        }
 
-    urls = set()
-    fallback = set()
-    text = _read_archive_text(path)
-    for u in re.findall(r"https?://[^\s<>\]\[\)\(\"']+", text):
-        cu = canonicalize_url(u.rstrip(".,;"))
-        if cu:
-            urls.add(cu)
-
+    urls, fallback = set(), set()
+    row_count = column_count = unique_id_count = 0
+    last_id = ""
+    ids = []
     try:
         if path.suffix.lower() == ".csv":
             with path.open("r", encoding="utf-8-sig", errors="ignore", newline="") as f:
-                for row in csv.DictReader(f):
-                    low = {str(k or "").strip().lower(): str(v or "").strip() for k, v in row.items()}
-                    url = next((low[k] for k in low if "url" in k or "link" in k), "")
-                    publisher = next((low[k] for k in low if "publisher" in k or "media house" in k or "source" == k), "")
-                    title = next((low[k] for k in low if "title" in k or "description" in k), "")
-                    pubdate = next((low[k] for k in low if "published" in k or k == "date"), "")
-                    if url:
-                        cu = canonicalize_url(url)
-                        if cu: urls.add(cu)
-                    d, _ = _parse_published(pubdate)
-                    if publisher and title and d:
-                        fallback.add((publisher.lower().strip(), _norm_title(title), d))
-        elif path.suffix.lower() == ".json":
-            payload = json.loads(text)
-            rows = payload if isinstance(payload, list) else payload.get("articles", []) if isinstance(payload, dict) else []
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                url = row.get("canonical_url") or row.get("url") or row.get("link") or ""
-                publisher = row.get("publisher") or row.get("source") or ""
-                title = row.get("title") or row.get("headline") or ""
-                pubdate = row.get("published_date") or row.get("date") or row.get("published") or ""
-                if url:
-                    cu = canonicalize_url(url)
-                    if cu: urls.add(cu)
-                d, _ = _parse_published(str(pubdate))
-                if publisher and title and d:
-                    fallback.add((str(publisher).lower().strip(), _norm_title(title), d))
-    except Exception as exc:
-        return {"available": True, "path": str(path), "urls": urls, "fallback": fallback, "error": f"structured archive parse warning: {exc}"}
+                reader = csv.DictReader(f)
+                fields = reader.fieldnames or []
+                column_count = len(fields)
+                rows = list(reader)
+            row_count = len(rows)
+        elif path.suffix.lower() == ".xlsx":
+            wb = load_workbook(path, read_only=True, data_only=True)
+            ws = wb.active
+            values = list(ws.iter_rows(values_only=True))
+            fields = [str(x or "").strip() for x in (values[0] if values else [])]
+            column_count = len(fields)
+            rows = [dict(zip(fields, row)) for row in values[1:] if any(v is not None and str(v).strip() for v in row)]
+            row_count = len(rows)
+            wb.close()
+        else:
+            return {
+                "available": False, "path": str(path), "urls": set(), "fallback": set(),
+                "error": "designated archive must be CSV or exact XLSX fallback",
+                "row_count": 0, "column_count": 0, "unique_id_count": 0, "last_id": "",
+                "read_only": True, "fallback_used": fallback_used,
+            }
 
-    return {"available": True, "path": str(path), "urls": urls, "fallback": fallback, "error": ""}
+        for row in rows:
+            low = {str(k or "").strip().lower(): str(v or "").strip() for k, v in row.items()}
+            url = next((low[k] for k in low if "url" in k or "link" in k), "")
+            publisher = next((low[k] for k in low if "publisher" in k or "media house" in k or k == "source"), "")
+            title = next((low[k] for k in low if "title" in k or "description" in k), "")
+            pubdate = next((low[k] for k in low if "published" in k or k == "date"), "")
+            ident = next((low[k] for k in low if k in {"id", "article id", "article_id", "unique id", "unique_id"} or k.endswith(" id")), "")
+            if ident:
+                ids.append(ident)
+            if url:
+                cu = canonicalize_url(url)
+                if cu:
+                    urls.add(cu)
+            d, _ = _parse_published(pubdate)
+            if publisher and title and d:
+                fallback.add((publisher.lower().strip(), _norm_title(title), d))
+        unique_ids = list(dict.fromkeys(ids))
+        unique_id_count = len(unique_ids)
+        last_id = unique_ids[-1] if unique_ids else ""
+    except Exception as exc:
+        return {
+            "available": False, "path": str(path), "urls": urls, "fallback": fallback,
+            "error": f"designated archive parse failed: {type(exc).__name__}: {exc}",
+            "row_count": row_count, "column_count": column_count, "unique_id_count": unique_id_count,
+            "last_id": last_id, "read_only": True, "fallback_used": fallback_used,
+        }
+
+    return {
+        "available": True, "path": str(path), "urls": urls, "fallback": fallback, "error": "",
+        "row_count": row_count, "column_count": column_count, "unique_id_count": unique_id_count,
+        "last_id": last_id, "read_only": True, "fallback_used": fallback_used,
+    }
 
 
 def archive_match(article, registry):
@@ -1703,7 +1807,7 @@ def _official_page_extract(url):
 
 
 def check_official_sources(article):
-    """V8 official-source-first comparison, retained in the private audit only."""
+    """V10.3 official-source-first comparison, retained in the private audit only."""
     title_words = [w for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9-]+", article.title) if len(w) >= 4]
     stop = {"this", "that", "with", "from", "will", "india", "indian", "space", "news", "says", "report", "latest"}
     probe_words = [w for w in title_words if w.lower() not in stop][:10]
@@ -1774,51 +1878,25 @@ def check_official_sources(article):
 
 
 def assign_remarks_action(article, official):
-    """Apply V8 non-directive website-focused action language."""
-    text = f"{article.title} {article.body_excerpt[:2200]}".lower()
+    """V10.3 default: exact 'Nil action.' unless explicit exception mode is enabled."""
     article.official_match = bool(official.get("matched"))
     article.official_url = official.get("url", "")
     article.official_title = official.get("title", "")
     article.official_excerpt = official.get("excerpt", "")[:1200]
     article.official_possible_difference = bool(official.get("possible_difference"))
+    article.remarks_action = "Nil action."
+    if not env_bool("ENABLE_REMARKS_EXCEPTIONS", False):
+        return
 
+    text = f"{article.title} {article.body_excerpt[:2200]}".lower()
     association_claim = any(x in text for x in [
         "with isro", "isro association", "isro-associated", "isro backed", "isro-backed",
         "isro contract", "isro partnership", "partnered with isro", "working with isro",
     ]) and _is_private_space_story(article.title, article.body_excerpt)
     if association_claim and not article.official_match:
         article.remarks_action = "Suggested action: Any reported ISRO association may be verified before public acknowledgement."
-        return
-
-    # Routine reporting already covered by official information requires no repeat circulation/update.
-    if article.official_match and not article.official_possible_difference and article.tone != "Critical-Negative":
-        article.remarks_action = "Nil action."
-        return
-
-    if article.official_possible_difference:
-        article.remarks_action = "Suggested action: A factual clarification may be considered with reference to the information on the ISRO website."
-        return
-
-    if article.tone == "Critical-Negative":
-        if "navic" in text and any(x in text for x in ["service", "status", "availability", "continuity"]):
-            article.remarks_action = "Suggested action: The NavIC service-status assertion may be verified. A factual article on the ISRO website may be considered for clarity, if required."
-        elif article.impact_level in {"High", "Medium"}:
-            article.remarks_action = "Suggested action: The reported assertion may be verified. A clarification may be considered for publication on the ISRO website, subject to approval."
-        else:
-            article.remarks_action = "Nil action."
-        return
-
-    technical = any(x in text for x in ["anomaly", "failure", "failed", "qualification", "test", "engine", "orbit", "separation", "propulsion", "crew", "launch vehicle"])
-    if technical and article.impact_level == "High" and not article.official_match:
-        article.remarks_action = "Suggested action: The technical details may be verified before any website update is considered."
-        return
-
-    significant_new = article.impact_level == "High" and bool(article.institutions) and article.tone == "Positive"
-    if significant_new and not article.official_match:
-        article.remarks_action = "Suggested action: A suitable update on the ISRO website may be considered."
-        return
-
-    article.remarks_action = "Nil action."
+    elif article.official_possible_difference:
+        article.remarks_action = "Suggested action: The reported factual position may be verified with reference to official information."
 
 
 def supabase_config():
@@ -2029,6 +2107,7 @@ def _add_section_table(doc, section_title, articles, generated_at, show_empty=Fa
     psec = doc.add_paragraph()
     psec.alignment = WD_ALIGN_PARAGRAPH.CENTER
     _set_para_compact(psec, before=2, after=4)
+    psec.paragraph_format.keep_with_next = True
     _set_run_font(psec.add_run(section_title), bold=True, size=12)
 
     headers = [
@@ -2057,7 +2136,7 @@ def _add_section_table(doc, section_title, articles, generated_at, show_empty=Fa
         values = [
             "1", "No qualifying verified news was found for the reporting period.",
             "Not applicable\nAuthor: Not stated", "Published: Not applicable\nTime: Not stated",
-            "Neutral-Mixed", "Low Impact.\nNo qualifying article was verified within the strict publication window.", "Nil action."
+            "Neutral", "Low Impact.\nNo qualifying article was verified within the strict publication window.", "Nil action."
         ]
         for i, value in enumerate(values):
             cell = row.cells[i]; set_cell_width(cell, widths[i]); cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
@@ -2076,7 +2155,7 @@ def _add_section_table(doc, section_title, articles, generated_at, show_empty=Fa
                 _set_para_compact(para)
 
         pno = row.cells[0].paragraphs[0]; pno.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        _set_run_font(pno.add_run(str(idx)), size=12)
+        _set_run_font(pno.add_run(str(a.final_no or idx)), size=12)
 
         ptitle = row.cells[1].paragraphs[0]
         _set_run_font(ptitle.add_run(a.title), bold=False, size=12)
@@ -2114,74 +2193,67 @@ def _add_section_table(doc, section_title, articles, generated_at, show_empty=Fa
 
 
 def build_docx(edition, report_date, start, end, articles, output_path, generated_at=None):
-    """Build the mandatory V8 seven-column reader-facing DOCX."""
+    """Build the V10.3 seven-column A4-landscape DOCX from the final dataset."""
     doc = Document()
     sec = doc.sections[0]
     sec.orientation = WD_ORIENT.LANDSCAPE
     sec.page_width, sec.page_height = Mm(297), Mm(210)
     sec.left_margin = Mm(11.7); sec.right_margin = Mm(11.7)
     sec.top_margin = Mm(14.5); sec.bottom_margin = Mm(15.0)
-
     styles = doc.styles
     styles["Normal"].font.name = "Arial"
     styles["Normal"]._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
     styles["Normal"].font.size = Pt(12)
 
     edition_label = {"morning": "Morning Edition", "evening": "Evening Edition", "weekly": "Weekly Edition"}[edition]
-    p1 = doc.add_paragraph(); p1.alignment = WD_ALIGN_PARAGRAPH.CENTER; _set_para_compact(p1, after=2)
-    if edition in {"morning", "evening"}:
-        coverage = f"Publication Coverage: {start.strftime('%d %B %Y, %I:%M %p')} to {end.strftime('%d %B %Y, %I:%M %p')} IST"
-        reporting_time = "08:00 AM IST" if edition == "morning" else "08:00 PM IST"
-        line1 = f"{report_date.strftime('%d %B %Y')} — {edition_label} — Reporting Time: {reporting_time} — {coverage}"
-    else:
-        line1 = f"{report_date.strftime('%d %B %Y')} — {edition_label} — Publication Coverage: {start.strftime('%d %B %Y, %I:%M %p')} to {end.strftime('%d %B %Y, %I:%M %p')} IST"
-    _set_run_font(p1.add_run(line1), size=12)
-
+    p1 = doc.add_paragraph(); p1.alignment = WD_ALIGN_PARAGRAPH.CENTER; _set_para_compact(p1, after=1)
+    _set_run_font(p1.add_run(f"{report_date.strftime('%d %B %Y')} — {edition_label}"), size=12)
+    pcover = doc.add_paragraph(); pcover.alignment = WD_ALIGN_PARAGRAPH.CENTER; _set_para_compact(pcover, after=2)
+    coverage = f"News coverage: {start.strftime('%d %B %Y, %I:%M %p')} IST to {end.strftime('%d %B %Y, %I:%M %p')} IST"
+    _set_run_font(pcover.add_run(coverage), size=12)
     p2 = doc.add_paragraph(); p2.alignment = WD_ALIGN_PARAGRAPH.CENTER; _set_para_compact(p2, after=5)
     _set_run_font(p2.add_run("DoS / ISRO — Daily Major News / Media News and Impact Analysis Report"), bold=True, size=12)
 
-    main = [a for a in articles if a.section == "main"]
-    startup = [a for a in articles if a.section == "startup"]
-    relevant = [a for a in articles if a.section == "relevant"]
-
-    _add_section_table(doc, "DoS / ISRO Major News", main, generated_at, show_empty=(not main and not startup))
-
-    if startup:
-        spacer = doc.add_paragraph(); _set_para_compact(spacer, after=2)
-        _add_section_table(doc, "Indian Private Space / Startup News", startup, generated_at, show_empty=False)
-
-    if relevant:
-        # Highest-priority V8 pagination rule: explicit Word page break before heading.
-        doc.add_page_break()
-        _add_section_table(doc, "Relevant Space News", relevant, generated_at, show_empty=False)
+    groups = [
+        ("DoS / ISRO Major News", [a for a in articles if a.section == "main"]),
+        ("Space Startups", [a for a in articles if a.section == "startup"]),
+        ("Relevant Space News", [a for a in articles if a.section == "relevant"]),
+    ]
+    first = True
+    for label, rows in groups:
+        if not rows:
+            continue
+        if not first:
+            spacer = doc.add_paragraph(); _set_para_compact(spacer, after=2)
+        _add_section_table(doc, label, rows, generated_at, show_empty=False)
+        first = False
 
     generated = generated_at or datetime.now(IST)
     footer = sec.footer.paragraphs[0]
     footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
     _set_para_compact(footer)
     _set_run_font(footer.add_run(f"Report generated: {generated.strftime('%d %B %Y, %I:%M:%S %p')} IST"), size=9)
-
     doc.save(output_path)
 
 
-def validate_docx_v8(docx_path, has_relevant=False):
+def validate_docx_v10_3(docx_path, articles):
     doc = Document(str(docx_path))
-    if not doc.tables:
-        raise RuntimeError("V8 DOCX validation failed: no report table")
+    if articles and not doc.tables:
+        raise RuntimeError("V10.3 DOCX validation failed: included articles but no report table")
     for table in doc.tables:
         if len(table.columns) != 7:
-            raise RuntimeError(f"V8 DOCX validation failed: expected 7 columns, found {len(table.columns)}")
+            raise RuntimeError(f"V10.3 DOCX validation failed: expected 7 columns, found {len(table.columns)}")
         hdr = " | ".join(c.text.strip() for c in table.rows[0].cells)
         required = ["No.", "Description / Title of News", "Publisher / author", "Publication date / Time", "Tone", "Impact Analysis", "Remarks / Action"]
         if any(x not in hdr for x in required):
-            raise RuntimeError(f"V8 DOCX validation failed: unexpected header row: {hdr}")
+            raise RuntimeError(f"V10.3 DOCX validation failed: unexpected header row: {hdr}")
+        for row in table.rows[1:]:
+            impact_paras = [p.text.strip() for p in row.cells[5].paragraphs if p.text.strip()]
+            if len(impact_paras) < 2 or impact_paras[0] not in {"High Impact.", "Medium Impact.", "Low Impact."}:
+                raise RuntimeError("V10.3 DOCX validation failed: impact rating/explanation must be separate paragraphs")
     footer_text = " ".join(p.text for sec in doc.sections for p in sec.footer.paragraphs)
     if not re.search(r"Report generated: \d{2} \w+ \d{4}, \d{2}:\d{2}:\d{2} [AP]M IST", footer_text):
-        raise RuntimeError("V8 DOCX validation failed: footer does not contain actual generation time with seconds")
-    xml = doc._element.xml
-    if has_relevant:
-        if "Relevant Space News" not in xml or 'w:type="page"' not in xml:
-            raise RuntimeError("V8 DOCX validation failed: Relevant Space News lacks explicit page break")
+        raise RuntimeError("V10.3 DOCX validation failed: footer lacks actual generation time with seconds")
     return True
 
 
@@ -2266,7 +2338,7 @@ def ensure_pdf_source_links(pdf_path, articles):
 
 
 def validate_pdf_matches_articles(pdf_path, articles):
-    """Automated V8 PDF content/pagination/render validation."""
+    """Automated V10.3 PDF content/link/render validation."""
     from pypdf import PdfReader
     reader = PdfReader(str(pdf_path))
     if not reader.pages:
@@ -2277,9 +2349,9 @@ def validate_pdf_matches_articles(pdf_path, articles):
 
     required_headers = ["description / title of news", "publisher / author", "publication date / time", "tone", "impact analysis", "remarks / action"]
     if any(h not in norm_pdf for h in required_headers):
-        raise RuntimeError("V8 PDF validation failed: seven-column header text is incomplete")
+        raise RuntimeError("V10.3 PDF validation failed: seven-column header text is incomplete")
     if "late-discovered news" in norm_pdf:
-        raise RuntimeError("V8 PDF validation failed: legacy Late-Discovered heading is present")
+        raise RuntimeError("V10.3 PDF validation failed: legacy Late-Discovered heading is present")
 
     # PDF extraction can drop or reorder Devanagari glyphs even when the PDF
     # displays correctly. Validate every row by its *canonical clickable source
@@ -2313,20 +2385,6 @@ def validate_pdf_matches_articles(pdf_path, articles):
             if probe[:24] not in norm_pdf:
                 raise RuntimeError(f"PDF content validation failed for article title: {article.title[:80]}")
 
-    relevant = [a for a in articles if a.section == "relevant"]
-    if relevant:
-        rel_pages = [i for i, txt in enumerate(page_texts) if "Relevant Space News" in txt]
-        if not rel_pages:
-            raise RuntimeError("V8 PDF validation failed: Relevant Space News heading missing")
-        first_rel = rel_pages[0]
-        # Explicit page break means the Relevant heading must begin on a page that
-        # contains no article title from main/startup sections before it.
-        rel_txt = page_texts[first_rel]
-        for a in [x for x in articles if x.section != "relevant"]:
-            probe = re.sub(r"\s+", " ", a.title).strip()[:32]
-            if probe and probe in rel_txt:
-                raise RuntimeError("V8 PDF validation failed: Relevant Space News shares a page with prior-section article content")
-
     render_bin = env("PDFTOPPM_BIN", "pdftoppm")
     render_dir = OUTPUT_DIR / (pdf_path.stem + "_rendercheck")
     render_dir.mkdir(parents=True, exist_ok=True)
@@ -2353,8 +2411,8 @@ def validate_pdf_matches_articles(pdf_path, articles):
 
 
 def recipients():
-    # Same addresses as the existing 30-minute report by default. Optional
-    # scheduled-specific override is allowed without requiring it.
+    # Preferred daily-report recipient list is REPORT_RECIPIENTS_SCHEDULED.
+    # Legacy hourly/general secrets remain compatibility fallbacks.
     raw = env("REPORT_RECIPIENTS_SCHEDULED") or env("REPORT_RECIPIENTS_30MIN") or env("REPORT_RECIPIENTS")
     vals = [x.strip() for x in re.split(r"[,;\n]+", raw) if x.strip()]
     return list(dict.fromkeys(vals))
@@ -2363,7 +2421,7 @@ def recipients():
 def format_email_article_list(articles):
     """Produce plain-text and HTML email lists from the exact final report articles.
 
-    Numbers restart per report section, matching the DOCX. No source lookup or
+    Numbers use the final continuous report numbering across all sections. No source lookup or
     additional filtering occurs here; the list cannot drift from the report.
     """
     section_labels = {"main": "DoS / ISRO Major News", "startup": "Space Startups", "relevant": "Relevant Space News"}
@@ -2377,7 +2435,7 @@ def format_email_article_list(articles):
             continue
         label = section_labels[section]
         plain.append(label)
-        html.append(f"<h3>{html_escape(label)}</h3><ol>")
+        html.append(f"<h3>{html_escape(label)}</h3><div>")
         for index, article in enumerate(entries, 1):
             try:
                 published = date.fromisoformat(article.published_date).strftime("%d %B %Y")
@@ -2395,7 +2453,7 @@ def format_email_article_list(articles):
             url = str(article.canonical_url or "").strip()
             source_line = url if url.startswith(("https://", "http://")) else "Not available"
             plain.append(
-                f"{index}. {title}\n"
+                f"{article.final_no or index}. {title}\n"
                 f"   Source URL: {source_line}\n"
                 f"   Publisher: {publisher}; Author: {author}\n"
                 f"   Published: {published}; Time: {time_text}"
@@ -2406,14 +2464,14 @@ def format_email_article_list(articles):
             else:
                 visible_source = "Not available"
             html.append(
-                f'<li style="margin-bottom:12px">'
-                f'<div>{html_escape(title)}</div>'
+                f'<div style="margin-bottom:12px">'
+                f'<div><strong>{article.final_no or index}.</strong> {html_escape(title)}</div>'
                 f'<div><strong>Source URL:</strong> {visible_source}</div>'
                 f'<div>Publisher: {html_escape(publisher)}; Author: {html_escape(author)}</div>'
                 f'<div>Published: {html_escape(published)}; Time: {html_escape(time_text)}</div>'
-                f'</li>'
+                f'</div>'
             )
-        html.append("</ol>")
+        html.append("</div>")
         plain.append("")
     if not plain:
         return "News items: Nil qualifying articles.", "<p>News items: Nil qualifying articles.</p>"
@@ -2457,7 +2515,7 @@ def send_news_detection_email(edition, report_date, articles):
     return {'sent': sent, 'failed': failed}
 
 
-def send_edition_email(edition, report_date, docx_path, pdf_path, run_status="COMPLETE", limitations=None, articles=None):
+def send_edition_email(edition, report_date, docx_path, pdf_path, xlsx_path, run_status="COMPLETE", limitations=None, articles=None):
     sender = env("SMTP_EMAIL")
     password = env("SMTP_APP_PASSWORD").replace(" ", "")
     recips = recipients()
@@ -2465,52 +2523,33 @@ def send_edition_email(edition, report_date, docx_path, pdf_path, run_status="CO
         return {"sent": [], "failed": {}, "skipped": "no recipients configured"}
     if not sender or not password:
         raise RuntimeError("SMTP_EMAIL and SMTP_APP_PASSWORD are required for scheduled report email delivery")
-
     label = {"morning": "Morning", "evening": "Evening", "weekly": "Weekly"}[edition]
     prefix = "[PROVISIONAL] " if run_status == "PROVISIONAL" else ""
     subject = f"{prefix}DoS / ISRO {label} Media Report — {report_date.strftime('%d %B %Y')}"
-    body = (
-        f"Please find attached the {label.lower()} DoS / ISRO Media News and Impact Analysis Report "
-        f"for {report_date.strftime('%d %B %Y')}.\n\n"
-    )
+    body = f"Please find attached the {label.lower()} DoS / ISRO Media Report for {report_date.strftime('%d %B %Y')}.\n\n"
     if run_status == "PROVISIONAL":
-        body += "Status: PROVISIONAL. The report document itself remains reader-facing and contains no process notes.\n"
-        for item in (limitations or [])[:6]:
+        body += "Status: PROVISIONAL. Limitations are listed below and are not inserted in the official DOCX/PDF.\n"
+        for item in (limitations or [])[:8]:
             body += f"- {item}\n"
         body += "\n"
-    body += (
-        "Attachments:\n"
-        f"- {docx_path.name}\n"
-        f"- {pdf_path.name}\n"
-    )
+    body += "Attachments:\n" + "\n".join(f"- {x.name}" for x in (docx_path, pdf_path, xlsx_path)) + "\n"
     attachments = [
         (docx_path.name, docx_path.read_bytes(), "application", "vnd.openxmlformats-officedocument.wordprocessingml.document"),
         (pdf_path.name, pdf_path.read_bytes(), "application", "pdf"),
+        (xlsx_path.name, xlsx_path.read_bytes(), "application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
     ]
     sent, failed = [], {}
-    context = ssl.create_default_context()
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context, timeout=45) as smtp:
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context(), timeout=45) as smtp:
         smtp.login(sender, password)
         for recipient in recips:
             try:
-                msg = EmailMessage()
-                msg["From"] = sender; msg["To"] = recipient; msg["Subject"] = subject
+                msg = EmailMessage(); msg["From"] = sender; msg["To"] = recipient; msg["Subject"] = subject
                 msg.set_content(body)
-                html_body = (
-                    '<html><body style="font-family:Arial,sans-serif;font-size:12pt">'
-                    f'<p>Please find attached the {html_escape(label.lower())} DoS / ISRO Media News and Impact Analysis Report '
-                    f'for {html_escape(report_date.strftime("%d %B %Y"))}.</p>'
-                    + (f'<p>Status: PROVISIONAL.</p><p>{html_escape("; ".join((limitations or [])[:6]))}</p>' if run_status == "PROVISIONAL" else "")
-                    + '<p>Attachments:<br>' + html_escape(docx_path.name) + '<br>' + html_escape(pdf_path.name) + '</p></body></html>'
-                )
-                msg.add_alternative(html_body, subtype="html")
                 for fn, payload, mt, st in attachments:
                     msg.add_attachment(payload, maintype=mt, subtype=st, filename=fn)
                 refused = smtp.send_message(msg, from_addr=sender, to_addrs=[recipient])
-                if refused:
-                    failed[recipient] = str(refused)
-                else:
-                    sent.append(recipient)
+                if refused: failed[recipient] = str(refused)
+                else: sent.append(recipient)
             except Exception as exc:
                 failed[recipient] = f"{type(exc).__name__}: {exc}"
     return {"sent": sent, "failed": failed}
@@ -2520,7 +2559,57 @@ def report_filenames(edition, report_date):
     ymd = report_date.strftime("%Y%m%d")
     suffix = {"morning": "Morning", "evening": "Evening", "weekly": "WEEKLY"}[edition]
     base = f"{ymd}_{suffix}_DoS_ISRO_Media_Report"
-    return OUTPUT_DIR / f"{base}.docx", OUTPUT_DIR / f"{base}.pdf"
+    return OUTPUT_DIR / f"{base}.docx", OUTPUT_DIR / f"{base}.pdf", OUTPUT_DIR / f"{base}.xlsx"
+
+
+def build_xlsx_source_register(articles, output_path, start, end):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Articles"
+    headers = [
+        "Final Sl. No.", "Section", "News Title", "Publisher Name", "FULL Original Article URL",
+        "URL Verification Status", "Author", "Publication Date", "Publication Time IST",
+        "Tone", "Impact", "Stable Article ID", "Timestamp Evidence Grade",
+        "Coverage Start IST", "Coverage End IST",
+    ]
+    ws.append(headers)
+    for c in ws[1]:
+        c.font = Font(bold=True); c.alignment = Alignment(vertical="top", wrap_text=True)
+    for a in articles:
+        ws.append([
+            a.final_no, a.decision or {"main":"DoS / ISRO Major News","startup":"Space Startups","relevant":"Relevant Space News"}.get(a.section,a.section),
+            a.title, a.publisher, a.canonical_url, a.url_verification_status, a.author, a.published_date,
+            (a.published_time_ist or "Not stated"), a.tone, f"{a.impact_level} Impact.", a.article_key,
+            a.timestamp_grade, start.isoformat(), end.isoformat(),
+        ])
+        cell = ws.cell(ws.max_row, 5)
+        if str(a.canonical_url).startswith(("http://", "https://")):
+            cell.hyperlink = a.canonical_url; cell.style = "Hyperlink"
+    widths = [13, 24, 55, 26, 70, 32, 24, 18, 21, 16, 16, 68, 20, 26, 26]
+    for idx, width in enumerate(widths, 1):
+        ws.column_dimensions[chr(64+idx) if idx <= 26 else 'A'].width = width
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+    wb.save(output_path)
+    if not output_path.exists() or output_path.stat().st_size < 500:
+        raise RuntimeError("V10.3 XLSX generation failed")
+    return output_path
+
+
+def validate_xlsx_source_register(path, articles):
+    wb = load_workbook(path, read_only=True, data_only=False)
+    ws = wb["Articles"]
+    rows = list(ws.iter_rows(values_only=True))
+    wb.close()
+    if len(rows) - 1 != len(articles):
+        raise RuntimeError("V10.3 XLSX article count mismatch")
+    for row, article in zip(rows[1:], articles):
+        if int(row[0]) != int(article.final_no) or str(row[2]) != article.title or str(row[3]) != article.publisher or str(row[4]) != article.canonical_url:
+            raise RuntimeError(f"V10.3 XLSX identity/order mismatch at article {article.final_no}")
+    return True
 
 
 def run(edition, report_date=None, send_email=True):
@@ -2529,6 +2618,7 @@ def run(edition, report_date=None, send_email=True):
     report_key = f"{rd.isoformat()}:{edition}"
     run_started_mono = time.monotonic()
     run_started_ist = datetime.now(IST)
+    master_query_audit = load_master_query_contract()
 
     archive_registry = load_archive_registry()
     candidates, discovery_diag = discover_candidates(edition, search_start, end)
@@ -2551,7 +2641,7 @@ def run(edition, report_date=None, send_email=True):
                 "search_title": candidate.search_title,
                 "source_pass": candidate.pass_no,
                 "query": candidate.query,
-                "eligibility": "FAIL",
+                "eligibility": "DROP", "decision": "Drop",
                 "reason": reason,
             })
             return None
@@ -2559,19 +2649,19 @@ def run(edition, report_date=None, send_email=True):
         ok, lookback, window_reason = article_in_window(article, edition, start, end, search_start)
         if not ok:
             reject(window_reason)
-            record = asdict(article); record.update({"sweep": sweep_no, "eligibility": "FAIL", "reason": window_reason})
+            record = asdict(article); record.update({"sweep": sweep_no, "eligibility": "DROP", "decision": "Drop", "reason": window_reason})
             evidence_register.append(record)
             return None
 
         archived, archive_reason = archive_match(article, archive_registry)
         if archived:
             reject(archive_reason)
-            record = asdict(article); record.update({"sweep": sweep_no, "eligibility": "FAIL", "reason": archive_reason})
+            record = asdict(article); record.update({"sweep": sweep_no, "eligibility": "DROP", "decision": "Drop", "reason": archive_reason})
             evidence_register.append(record)
             return None
 
         article.catch_up = bool(lookback)  # legacy field retained; reader-facing report never labels catch-up.
-        record = asdict(article); record.update({"sweep": sweep_no, "eligibility": "PASS", "reason": window_reason, "archive_reason": archive_reason})
+        record = asdict(article); record.update({"sweep": sweep_no, "eligibility": "INCLUDE", "decision": article.decision or ({"main":"DoS / ISRO Major News","startup":"Space Startups","relevant":"Relevant Space News"}.get(article.section,"Drop")), "reason": window_reason, "archive_reason": archive_reason})
         evidence_register.append(record)
         return article
 
@@ -2584,7 +2674,7 @@ def run(edition, report_date=None, send_email=True):
     first_pass_articles = dedupe_article_level(verified)
 
     # Sweep 2: cross-source/event reconciliation after first verification and
-    # article-identity deduplication, as mandated by V8.
+    # article-identity deduplication, as mandated by V10.3.
     gap_candidates, gap_diag = gap_reconciliation_candidates(first_pass_articles, search_start, end)
     for candidate in gap_candidates:
         cu = canonicalize_url(candidate.url) or candidate.url
@@ -2594,13 +2684,7 @@ def run(edition, report_date=None, send_email=True):
         if article:
             verified.append(article)
 
-    articles = dedupe_article_level(verified)
-
-    def sort_key(a):
-        if a.time_known:
-            return datetime.fromisoformat(a.published_iso_ist).timestamp()
-        return 0
-    articles.sort(key=sort_key, reverse=True)
+    articles = sort_and_number_articles(dedupe_article_level(verified))
 
     # Stage 1: send the article list immediately after final eligibility and
     # article-wise deduplication. PDF/LLM/conversion failures must not block it.
@@ -2630,45 +2714,43 @@ def run(edition, report_date=None, send_email=True):
             "remarks_action": article.remarks_action,
         })
 
-    # V8 completion assessment BEFORE publication. Do not force a 20-minute
-    # sleep; assess the target honestly and label the external delivery provisional
-    # when the environment completed too quickly to satisfy the normal research dwell target.
-    dwell_target = env_int("MIN_RESEARCH_DWELL_SECONDS", 1200)
-    elapsed_before_output = int(time.monotonic() - run_started_mono)
+    # V10.3 evidence-based completion gate; no artificial dwell-time waiting.
     limitations = []
     if discovery_diag.get("queries", 0) < 39:
-        limitations.append(f"Only {discovery_diag.get('queries', 0)} distinct discovery/theme queries were submitted; V8 requires at least 39.")
+        limitations.append(f"Only {discovery_diag.get('queries', 0)} distinct search/theme queries were submitted; minimum target is 39.")
     if discovery_diag.get("theme_checks", 0) != 44:
-        limitations.append(f"Only {discovery_diag.get('theme_checks', 0)} of 44 V8 themes were checked.")
+        limitations.append(f"Only {discovery_diag.get('theme_checks', 0)} of 44 themes were checked.")
     if gap_diag.get("sweep") != 2:
         limitations.append("Second gap-reconciliation sweep was not completed.")
     if not archive_registry.get("available"):
-        limitations.append("Latest consolidated archive was unavailable; historical article-identity deduplication could not be confirmed.")
-    if dwell_target > 0 and elapsed_before_output < dwell_target:
-        limitations.append(f"Research dwell-time target was not met ({elapsed_before_output}s completed vs {dwell_target}s target).")
-
-    # The original V7 DOCX template may not be committed in GitHub. V8 explicitly
-    # permits faithful reproduction of its seven-column style, but the limitation
-    # must be disclosed outside the publication.
-    template_path = Path(env("V8_TEMPLATE_FILE", "DoS_ISRO_Media_Report_V7_0_Template.docx"))
+        limitations.append("The explicitly designated read-only archive was unavailable or unreadable; historical deduplication could not be certified.")
+    expected_name = "ISRO_News_Archive_16Nov2026_Morning"
+    if archive_registry.get("available") and expected_name in Path(archive_registry.get("path", "")).stem:
+        if archive_registry.get("row_count") != 754:
+            limitations.append(f"Designated baseline archive has {archive_registry.get('row_count')} data rows, expected 754.")
+        if archive_registry.get("unique_id_count") != 754:
+            limitations.append(f"Designated baseline archive unique-ID count is {archive_registry.get('unique_id_count')}, expected 754.")
+        if archive_registry.get("column_count") != 17:
+            limitations.append(f"Designated baseline archive has {archive_registry.get('column_count')} columns, expected 17.")
+    template_path = Path(env("REPORT_TEMPLATE_FILE") or env("V8_TEMPLATE_FILE", "DoS_ISRO_Media_Report_V7_0_Template.docx"))
     template_available = template_path.exists()
     external_notes = list(limitations)
     if not template_available:
-        external_notes.append("The original V7 DOCX template file was unavailable; Build 6.0 reproduced the specified V8 seven-column A4-landscape style programmatically.")
-
+        external_notes.append("The approved DOCX template file was unavailable; the workflow reproduced the fixed seven-column A4-landscape style programmatically.")
     run_status = "PROVISIONAL" if limitations else "COMPLETE"
 
-    docx_path, expected_pdf = report_filenames(edition, rd)
+    docx_path, expected_pdf, xlsx_path = report_filenames(edition, rd)
     generated_at = datetime.now(IST)
     build_docx(edition, rd, start, end, articles, docx_path, generated_at=generated_at)
-    validate_docx_v8(docx_path, has_relevant=any(a.section == "relevant" for a in articles))
+    validate_docx_v10_3(docx_path, articles)
     validate_docx_article_links(docx_path, articles)
     pdf_path = convert_docx_to_pdf(docx_path, OUTPUT_DIR)
     if pdf_path != expected_pdf:
-        expected_pdf.write_bytes(pdf_path.read_bytes())
-        pdf_path = expected_pdf
+        expected_pdf.write_bytes(pdf_path.read_bytes()); pdf_path = expected_pdf
     ensure_pdf_source_links(pdf_path, articles)
     validate_pdf_matches_articles(pdf_path, articles)
+    build_xlsx_source_register(articles, xlsx_path, start, end)
+    validate_xlsx_source_register(xlsx_path, articles)
 
     # Visual/structural shipping checks have passed at this point.
     email_result = {"sent": [], "failed": {}, "skipped": "email disabled"}
@@ -2677,7 +2759,7 @@ def run(edition, report_date=None, send_email=True):
             email_result = {"sent": [], "failed": {}, "skipped": "already emailed; use FORCE_SCHEDULED_SEND=true to resend"}
         else:
             email_result = send_edition_email(
-                edition, rd, docx_path, pdf_path, run_status=run_status, limitations=external_notes, articles=articles
+                edition, rd, docx_path, pdf_path, xlsx_path, run_status=run_status, limitations=external_notes, articles=articles
             )
 
     email_result["news_detection"] = detection_email_result
@@ -2695,7 +2777,9 @@ def run(edition, report_date=None, send_email=True):
         for i, theme in enumerate(THEMES, 1)
     ]
 
-    evidence_path = OUTPUT_DIR / f"{report_key.replace(':','_')}_candidate_evidence_register.json"
+    preparation_dir = OUTPUT_DIR / "DoS_ISRO_Media_Monitoring" / "Preparation"
+    preparation_dir.mkdir(parents=True, exist_ok=True)
+    evidence_path = preparation_dir / f"{rd.strftime('%Y%m%d')}_{edition}_consolidated_evidence_ledger.json"
     evidence_path.write_text(json.dumps({
         "report_key": report_key,
         "run_status": run_status,
@@ -2708,13 +2792,22 @@ def run(edition, report_date=None, send_email=True):
             "url_count": len(archive_registry.get("urls", set())),
             "fallback_identity_count": len(archive_registry.get("fallback", set())),
             "error": archive_registry.get("error"),
+            "row_count": archive_registry.get("row_count"),
+            "column_count": archive_registry.get("column_count"),
+            "unique_id_count": archive_registry.get("unique_id_count"),
+            "last_id": archive_registry.get("last_id"),
+            "read_only": archive_registry.get("read_only", True),
+            "fallback_used": archive_registry.get("fallback_used", False),
         },
     }, indent=2, ensure_ascii=False), encoding="utf-8")
+    dataset_path = preparation_dir / f"{rd.strftime('%Y%m%d')}_{edition}_authoritative_dataset.json"
+    dataset_path.write_text(json.dumps([asdict(a) | {"stable_article_id": a.article_key} for a in articles], indent=2, ensure_ascii=False), encoding="utf-8")
 
     diagnostics = {
         "build": BUILD,
         "master_query_file": str(MASTER_QUERY_FILE),
-        "master_query_version": "8.0",
+        "master_query_version": "10.3",
+        "master_query_audit": master_query_audit,
         "run_status": run_status,
         "limitations_outside_publication": external_notes,
         "edition": edition,
@@ -2724,8 +2817,7 @@ def run(edition, report_date=None, send_email=True):
         "late_discovery_lookback_start": search_start.isoformat(),
         "run_started_ist": run_started_ist.isoformat(),
         "generated_at_ist": generated_at.isoformat(),
-        "research_elapsed_seconds_before_output": elapsed_before_output,
-        "research_dwell_target_seconds": dwell_target,
+        "research_elapsed_seconds_before_output": int(time.monotonic() - run_started_mono),
         "fresh_scan": True,
         "sweep_1": discovery_diag,
         "sweep_2": gap_diag,
@@ -2746,7 +2838,9 @@ def run(edition, report_date=None, send_email=True):
         "email": email_result,
         "docx": docx_path.name,
         "pdf": pdf_path.name,
-        "candidate_evidence_register": evidence_path.name,
+        "xlsx": xlsx_path.name,
+        "candidate_evidence_register": str(evidence_path),
+        "authoritative_dataset": str(dataset_path),
         "theme_checks": len(theme_audit),
         "themes_with_included_matches": matched_themes,
         "free_semantic_analysis_enabled": _truthy_env("ENABLE_FREE_LLM_ANALYSIS", "1"),
@@ -2763,6 +2857,7 @@ def run(edition, report_date=None, send_email=True):
         "section_counts": diagnostics["section_counts"],
         "docx": str(docx_path),
         "pdf": str(pdf_path),
+        "xlsx": str(xlsx_path),
         "email": email_result,
         "limitations": external_notes,
     }, ensure_ascii=False, indent=2))

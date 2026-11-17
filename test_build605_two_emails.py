@@ -1,4 +1,4 @@
-"""Build 6.0.6: first email shows the full source URL; second email contains two attachments."""
+"""Build 6.0.6: first email shows the full source URL; second email contains three attachments."""
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from datetime import date
@@ -15,13 +15,13 @@ class FakeSMTP:
         self.messages.append(msg)
         return {}
 
-article=m.Article(canonical_url='https://example.com/real-news', publisher='Publisher', title='ISRO satellite mission update', author='Reporter',published_date='2026-10-19',published_time_ist='09:15:00',published_iso_ist='2026-10-19T09:15:00+05:30',time_known=True,body_excerpt='',institutions=['ISRO'],gate_route='INSTITUTION',support_excerpt='',source_pass=1,discovery_query='',concern_ids=[],tone='Neutral-Mixed',impact_level='Medium',impact_text='SENSITIVE IMPACT TEXT',remarks_action='SENSITIVE ACTION TEXT',section='main')
+article=m.Article(canonical_url='https://example.com/real-news', publisher='Publisher', title='ISRO satellite mission update', author='Reporter',published_date='2026-10-19',published_time_ist='09:15:00',published_iso_ist='2026-10-19T09:15:00+05:30',time_known=True,body_excerpt='',institutions=['ISRO'],gate_route='INSTITUTION',support_excerpt='',source_pass=1,discovery_query='',concern_ids=[],tone='Neutral',impact_level='Medium',impact_text='SENSITIVE IMPACT TEXT',remarks_action='SENSITIVE ACTION TEXT',section='main')
 with TemporaryDirectory() as td:
-    docx=Path(td)/'report.docx';pdf=Path(td)/'report.pdf'
-    docx.write_bytes(b'word');pdf.write_bytes(b'pdf')
+    docx=Path(td)/'report.docx';pdf=Path(td)/'report.pdf';xlsx=Path(td)/'report.xlsx'
+    docx.write_bytes(b'word');pdf.write_bytes(b'pdf');xlsx.write_bytes(b'xlsx')
     with patch.object(m,'env',side_effect=lambda k,default='': {'SMTP_EMAIL':'sender@example.com','SMTP_APP_PASSWORD':'test'}.get(k,default)),patch.object(m,'recipients',return_value=['recipient@example.com']),patch.object(m.smtplib,'SMTP_SSL',FakeSMTP):
         first=m.send_news_detection_email('evening',date(2026,10,19),[article])
-        second=m.send_edition_email('evening',date(2026,10,19),docx,pdf,articles=[article])
+        second=m.send_edition_email('evening',date(2026,10,19),docx,pdf,xlsx,articles=[article])
     assert first['sent']==second['sent']==['recipient@example.com']
     assert len(FakeSMTP.messages)==2
     a,b=FakeSMTP.messages
@@ -35,6 +35,6 @@ with TemporaryDirectory() as td:
     assert 'https://example.com/real-news' in html_body
     assert '>https://example.com/real-news</a>' in html_body
     assert '>ISRO satellite mission update</a>' not in html_body
-    assert len(list(b.iter_attachments()))==2
+    assert len(list(b.iter_attachments()))==3
     assert 'News Detection List' not in b['Subject']
-print('Build 6.0.6 visible-URL two-email regression: PASS')
+print('Build 6.1.0 visible-URL three-output two-email regression: PASS')

@@ -6,7 +6,7 @@ from datetime import date, datetime
 import requests
 import scheduled_media_reports as s
 
-assert s.BUILD == '6.0.6'
+assert s.BUILD == '6.1.0'
 s._SEMANTIC_DISABLED_PROVIDERS.clear()
 s._SEMANTIC_RESULT_CACHE.clear()
 counts = {'groq': 0, 'router': 0}
@@ -16,7 +16,7 @@ def rate_limited(_):
     raise requests.HTTPError('429', response=resp)
 def fallback(_):
     counts['router'] += 1
-    return {'tone':'Neutral-Mixed','impact_level':'Low','crux':'Test','impact_analysis':'No immediate impact.'}
+    return {'tone':'Neutral','impact_level':'Low','crux':'Test','impact_analysis':'No immediate impact.'}
 with patch.object(s, '_analyse_with_groq', rate_limited), patch.object(s, '_analyse_with_openrouter', fallback):
     x = s.semantic_article_analysis('One', 'body', 'Paper', ['ISRO'])
     y = s.semantic_article_analysis('Two', 'body', 'Paper', ['ISRO'])
@@ -55,4 +55,4 @@ with tempfile.TemporaryDirectory() as tmp:
     article.canonical_url=''
     try:s.validate_pdf_matches_articles(p,[article]);raise AssertionError('Empty source URL accepted')
     except RuntimeError as e:assert 'no source URL' in str(e)
-print('Build 6.0.6 stability tests: PASS')
+print('Build 6.1.0 stability tests: PASS')

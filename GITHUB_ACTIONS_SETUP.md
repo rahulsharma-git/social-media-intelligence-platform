@@ -1,3 +1,25 @@
+# GitHub Actions Setup — Build 6.1.0 / Master Query V10.3 (ACTIVE)
+
+## Daily report recipient list
+Go to **GitHub repository → Settings → Secrets and variables → Actions → Repository secrets**. Edit or create:
+
+`REPORT_RECIPIENTS_SCHEDULED`
+
+Value example: `person1@example.com, person2@example.com` (comma, semicolon or newline separators are accepted). This preferred secret controls recipients for BOTH the attachment-free News Detection List email and the final DOCX/PDF/XLSX email. If absent, the scheduled worker falls back to `REPORT_RECIPIENTS_30MIN`, then `REPORT_RECIPIENTS`. Do not commit email addresses into Python/YAML.
+
+## V10.3 active controls
+- Master query: `DoS_ISRO_Master_Query_Version_10_3.txt`
+- Morning cron: `35 0 * * *` UTC = 06:05 IST
+- Evening cron: `35 12 * * *` UTC = 18:05 IST
+- Archive repository variable: `CONSOLIDATED_ARCHIVE_FILE` (default `ISRO_News_Archive_16Nov2026_Morning.csv`; exact XLSX same-basename fallback only)
+- Template repository variable: `REPORT_TEMPLATE_FILE`
+- Optional action exceptions: `ENABLE_REMARKS_EXCEPTIONS=0` by default
+- Free semantic providers remain optional: `GROQ_API_KEY`, `OPENROUTER_API_KEY`, Cloudflare credentials
+
+The daily workflow is single sequential; there are no preparation-stage prerequisite jobs. The hourly monitor remains a separate hourly workflow.
+
+---
+
 # GitHub Actions Setup — Build 6.0.0 (hourly monitor + V8 AM/PM reports)
 
 The browser-independent monitor runs hourly outside the Chrome/Streamlit
