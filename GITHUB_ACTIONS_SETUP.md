@@ -1,4 +1,4 @@
-# GitHub Actions Setup — Build 6.1.0 / Master Query V10.3 (ACTIVE)
+# GitHub Actions Setup — Build 6.1.1 / Master Query V10.3 (ACTIVE)
 
 ## Daily report recipient list
 Go to **GitHub repository → Settings → Secrets and variables → Actions → Repository secrets**. Edit or create:
@@ -11,7 +11,7 @@ Value example: `person1@example.com, person2@example.com` (comma, semicolon or n
 - Master query: `DoS_ISRO_Master_Query_Version_10_3.txt`
 - Morning cron: `35 0 * * *` UTC = 06:05 IST
 - Evening cron: `35 12 * * *` UTC = 18:05 IST
-- Archive repository variable: `CONSOLIDATED_ARCHIVE_FILE` (default `ISRO_News_Archive_16Nov2026_Morning.csv`; exact XLSX same-basename fallback only)
+- Archive: upload/replace `latest-archive.csv` in the repository root. No archive filename variable is required.
 - Template repository variable: `REPORT_TEMPLATE_FILE`
 - Optional action exceptions: `ENABLE_REMARKS_EXCEPTIONS=0` by default
 - Free semantic providers remain optional: `GROQ_API_KEY`, `OPENROUTER_API_KEY`, Cloudflare credentials
@@ -211,11 +211,11 @@ GROQ_MODEL=openai/gpt-oss-20b
 OPENROUTER_MODEL=openrouter/free
 CLOUDFLARE_AI_MODEL=@cf/google/gemma-4-26b-a4b-it
 MIN_RESEARCH_DWELL_SECONDS=1200
-CONSOLIDATED_ARCHIVE_FILE=<latest archive filename committed to the repository>
+# No archive variable is required. Keep the newest archive as latest-archive.csv in repository root.
 V8_TEMPLATE_FILE=DoS_ISRO_Media_Report_V7_0_Template.docx
 PUBLISHER_RSS_URLS=<optional comma/newline-separated extra publisher RSS/Atom URLs>
 ```
 
-`CONSOLIDATED_ARCHIVE_FILE` is strongly recommended. V8 permits only the latest consolidated archive to act as the historical article registry; the worker never modifies it automatically. If it is unavailable, the document can still be generated but delivery is identified as PROVISIONAL outside the DOCX/PDF because historical article deduplication cannot be confirmed.
+Keep the manually maintained current archive in the repository root as `latest-archive.csv`. Replace that file whenever the archive is updated. The worker reads it only and never modifies it. If it is unavailable or unreadable, report generation can continue but historical deduplication cannot be certified.
 
 If the original V7 template DOCX is not present in the GitHub repository, Build 6 programmatically reproduces the specified seven-column A4-landscape design and records the template limitation outside the publication. Add the exact template as `DoS_ISRO_Media_Report_V7_0_Template.docx` (or set `V8_TEMPLATE_FILE`) when available.

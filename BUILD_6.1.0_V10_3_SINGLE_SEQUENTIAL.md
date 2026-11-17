@@ -9,7 +9,7 @@ This build makes `DoS_ISRO_Master_Query_Version_10_3.txt` the active governing p
 
 ## Single-run sequence
 1. Read and hash the complete V10.3 master query.
-2. Load only the explicitly designated read-only archive; default baseline is `ISRO_News_Archive_16Nov2026_Morning.csv`, with exact same-basename XLSX fallback only.
+2. Load only the read-only repository-root archive `latest-archive.csv`. The user replaces this same file whenever a newer manually maintained archive is available; no older archive is auto-selected.
 3. Execute passes A–E sequentially, 39-query minimum target, all 44 themes, native/aggregator/feed attempts and sweep 1.
 4. Verify original publisher, full URL, article body, English-language eligibility and original first-publication evidence.
 5. Apply strict main-window test and rolling-24-hour Relevant Space News test. No Hold disposition: unresolved items are documented and dropped.

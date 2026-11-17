@@ -6,7 +6,7 @@ from datetime import date, datetime
 import requests
 import scheduled_media_reports as s
 
-assert s.BUILD == '6.1.0'
+assert s.BUILD == '6.1.1'
 s._SEMANTIC_DISABLED_PROVIDERS.clear()
 s._SEMANTIC_RESULT_CACHE.clear()
 counts = {'groq': 0, 'router': 0}
@@ -55,4 +55,4 @@ with tempfile.TemporaryDirectory() as tmp:
     article.canonical_url=''
     try:s.validate_pdf_matches_articles(p,[article]);raise AssertionError('Empty source URL accepted')
     except RuntimeError as e:assert 'no source URL' in str(e)
-print('Build 6.1.0 stability tests: PASS')
+print('Build 6.1.1 stability tests: PASS')

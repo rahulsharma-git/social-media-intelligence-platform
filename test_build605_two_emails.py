@@ -37,4 +37,4 @@ with TemporaryDirectory() as td:
     assert '>ISRO satellite mission update</a>' not in html_body
     assert len(list(b.iter_attachments()))==3
     assert 'News Detection List' not in b['Subject']
-print('Build 6.1.0 visible-URL three-output two-email regression: PASS')
+print('Build 6.1.1 visible-URL three-output two-email regression: PASS')

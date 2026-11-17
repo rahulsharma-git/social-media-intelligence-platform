@@ -73,7 +73,7 @@ def main():
     assert "Impact" not in plain and "Tone" not in plain and "Suggested action" not in plain
     assert "https://example.com/p-high-new" in html
 
-    print("Build 6.1.0 / Master Query V10.3 offline checks: PASS")
+    print("Build 6.1.1 / Master Query V10.3 offline checks: PASS")
 
 
 if __name__ == "__main__":

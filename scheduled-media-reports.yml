@@ -60,7 +60,6 @@ jobs:
       FORCE_SCHEDULED_SEND: ${{ github.event_name == 'workflow_dispatch' && inputs.force_send || false }}
 
       # V10.3 designated read-only archive. A later explicit repository variable overrides this baseline.
-      CONSOLIDATED_ARCHIVE_FILE: ${{ vars.CONSOLIDATED_ARCHIVE_FILE || 'ISRO_News_Archive_16Nov2026_Morning.csv' }}
       REPORT_TEMPLATE_FILE: ${{ vars.REPORT_TEMPLATE_FILE || 'DoS_ISRO_Media_Report_V7_0_Template.docx' }}
       PUBLISHER_RSS_URLS: ${{ vars.PUBLISHER_RSS_URLS }}
       ENABLE_REMARKS_EXCEPTIONS: ${{ vars.ENABLE_REMARKS_EXCEPTIONS || '0' }}
@@ -122,13 +121,10 @@ jobs:
           if [ -z "${SUPABASE_URL:-}" ]; then
             echo "::warning::SUPABASE_URL is not configured. Report generation can continue; Supabase persistence/delivery dedup will be unavailable."
           fi
-          if [ ! -f "${CONSOLIDATED_ARCHIVE_FILE}" ]; then
-            xlsx="${CONSOLIDATED_ARCHIVE_FILE%.csv}.xlsx"
-            if [ ! -f "$xlsx" ]; then
-              echo "::warning::Designated archive is unavailable: ${CONSOLIDATED_ARCHIVE_FILE}; no older archive will be selected automatically."
-            else
-              echo "Using exact XLSX fallback for designated archive: $xlsx"
-            fi
+          if [ ! -f "latest-archive.csv" ]; then
+            echo "::warning::latest-archive.csv is unavailable in the repository root; historical archive deduplication cannot be certified."
+          else
+            echo "Using read-only archive: latest-archive.csv"
           fi
           if [ ! -f "${REPORT_TEMPLATE_FILE}" ]; then
             echo "::warning::Approved DOCX template unavailable. Fixed seven-column V10.3 layout will be reproduced programmatically."

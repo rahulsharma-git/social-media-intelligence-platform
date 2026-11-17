@@ -1,4 +1,4 @@
-"""Build 6.1.0 — Master Query V10.3 governed DoS/ISRO daily media reports.
+"""Build 6.1.1 — Master Query V10.3 governed DoS/ISRO daily media reports.
 
 Single sequential execution runs twice daily at 06:05 and 18:05 IST.
 Morning window: previous day 18:00 inclusive to report day 06:00 exclusive.
@@ -52,7 +52,7 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 UTC = timezone.utc
-BUILD = "6.1.0"
+BUILD = "6.1.1"
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MASTER_QUERY_FILE = Path(os.getenv(
@@ -61,7 +61,7 @@ MASTER_QUERY_FILE = Path(os.getenv(
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "Chrome/140 Safari/537.36 SMI-ScheduledReports/6.1.0"
+    "Chrome/140 Safari/537.36 SMI-ScheduledReports/6.1.1"
 )
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": USER_AGENT, "Accept-Language": "en-IN,en;q=0.9"})
@@ -1678,24 +1678,18 @@ def _read_archive_text(path):
 
 
 def load_archive_registry():
-    """Load only the explicitly designated read-only V10.3 archive.
+    """Load the current read-only archive from repository root.
 
-    No directory scan or silent older fallback is permitted. The default designation
-    follows Master Query V10.3. If the designated CSV is unavailable, only the exact
-    same-basename XLSX fallback is attempted.
+    Deployment is intentionally simple: the user replaces ``latest-archive.csv``
+    in the repository root whenever a newer manually maintained archive is ready.
+    The workflow never scans for older archives, never renames the file, and never
+    modifies it.
     """
-    configured = env("CONSOLIDATED_ARCHIVE_FILE", "ISRO_News_Archive_16Nov2026_Morning.csv")
-    path = Path(configured)
-    fallback_used = False
-    if not path.exists() and path.suffix.lower() == ".csv":
-        exact_xlsx = path.with_suffix(".xlsx")
-        if exact_xlsx.exists():
-            path = exact_xlsx
-            fallback_used = True
+    path = Path("latest-archive.csv")
     if not path.exists():
         return {
-            "available": False, "path": str(Path(configured)), "urls": set(), "fallback": set(),
-            "error": "explicitly designated archive unavailable; no older archive fallback permitted",
+            "available": False, "path": str(path), "urls": set(), "fallback": set(),
+            "error": "latest-archive.csv is unavailable in repository root",
             "row_count": 0, "column_count": 0, "unique_id_count": 0, "last_id": "",
             "read_only": True, "fallback_used": False,
         }
@@ -1705,29 +1699,12 @@ def load_archive_registry():
     last_id = ""
     ids = []
     try:
-        if path.suffix.lower() == ".csv":
-            with path.open("r", encoding="utf-8-sig", errors="ignore", newline="") as f:
-                reader = csv.DictReader(f)
-                fields = reader.fieldnames or []
-                column_count = len(fields)
-                rows = list(reader)
-            row_count = len(rows)
-        elif path.suffix.lower() == ".xlsx":
-            wb = load_workbook(path, read_only=True, data_only=True)
-            ws = wb.active
-            values = list(ws.iter_rows(values_only=True))
-            fields = [str(x or "").strip() for x in (values[0] if values else [])]
+        with path.open("r", encoding="utf-8-sig", errors="ignore", newline="") as f:
+            reader = csv.DictReader(f)
+            fields = reader.fieldnames or []
             column_count = len(fields)
-            rows = [dict(zip(fields, row)) for row in values[1:] if any(v is not None and str(v).strip() for v in row)]
-            row_count = len(rows)
-            wb.close()
-        else:
-            return {
-                "available": False, "path": str(path), "urls": set(), "fallback": set(),
-                "error": "designated archive must be CSV or exact XLSX fallback",
-                "row_count": 0, "column_count": 0, "unique_id_count": 0, "last_id": "",
-                "read_only": True, "fallback_used": fallback_used,
-            }
+            rows = list(reader)
+        row_count = len(rows)
 
         for row in rows:
             low = {str(k or "").strip().lower(): str(v or "").strip() for k, v in row.items()}
@@ -1751,15 +1728,15 @@ def load_archive_registry():
     except Exception as exc:
         return {
             "available": False, "path": str(path), "urls": urls, "fallback": fallback,
-            "error": f"designated archive parse failed: {type(exc).__name__}: {exc}",
+            "error": f"latest-archive.csv parse failed: {type(exc).__name__}: {exc}",
             "row_count": row_count, "column_count": column_count, "unique_id_count": unique_id_count,
-            "last_id": last_id, "read_only": True, "fallback_used": fallback_used,
+            "last_id": last_id, "read_only": True, "fallback_used": False,
         }
 
     return {
         "available": True, "path": str(path), "urls": urls, "fallback": fallback, "error": "",
         "row_count": row_count, "column_count": column_count, "unique_id_count": unique_id_count,
-        "last_id": last_id, "read_only": True, "fallback_used": fallback_used,
+        "last_id": last_id, "read_only": True, "fallback_used": False,
     }
 
 
@@ -2723,15 +2700,7 @@ def run(edition, report_date=None, send_email=True):
     if gap_diag.get("sweep") != 2:
         limitations.append("Second gap-reconciliation sweep was not completed.")
     if not archive_registry.get("available"):
-        limitations.append("The explicitly designated read-only archive was unavailable or unreadable; historical deduplication could not be certified.")
-    expected_name = "ISRO_News_Archive_16Nov2026_Morning"
-    if archive_registry.get("available") and expected_name in Path(archive_registry.get("path", "")).stem:
-        if archive_registry.get("row_count") != 754:
-            limitations.append(f"Designated baseline archive has {archive_registry.get('row_count')} data rows, expected 754.")
-        if archive_registry.get("unique_id_count") != 754:
-            limitations.append(f"Designated baseline archive unique-ID count is {archive_registry.get('unique_id_count')}, expected 754.")
-        if archive_registry.get("column_count") != 17:
-            limitations.append(f"Designated baseline archive has {archive_registry.get('column_count')} columns, expected 17.")
+        limitations.append("The repository-root latest-archive.csv was unavailable or unreadable; historical deduplication could not be certified.")
     template_path = Path(env("REPORT_TEMPLATE_FILE") or env("V8_TEMPLATE_FILE", "DoS_ISRO_Media_Report_V7_0_Template.docx"))
     template_available = template_path.exists()
     external_notes = list(limitations)

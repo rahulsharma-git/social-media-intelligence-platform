@@ -1,6 +1,6 @@
-# Build 6.1.0 — Master Query V10.3 (ACTIVE)
+# Build 6.1.1 — Master Query V10.3 (ACTIVE)
 
-The active daily-report workflow is `.github/workflows/scheduled-media-reports.yml` and the active policy file is `DoS_ISRO_Master_Query_Version_10_3.txt`. V10.3 uses one complete sequential run at **06:05 IST** and **18:05 IST**, with Morning `[18:00,06:00)` and Evening `[06:00,18:00)` publication windows. Each run produces synchronized DOCX, PDF and XLSX outputs and preserves the two-stage email flow. See `BUILD_6.1.0_V10_3_SINGLE_SEQUENTIAL.md`.
+The active daily-report workflow is `.github/workflows/scheduled-media-reports.yml` and the active policy file is `DoS_ISRO_Master_Query_Version_10_3.txt`. V10.3 uses one complete sequential run at **06:05 IST** and **18:05 IST**, with Morning `[18:00,06:00)` and Evening `[06:00,18:00)` publication windows. Each run produces synchronized DOCX, PDF and XLSX outputs and preserves the two-stage email flow. See `BUILD_6.1.1_V10_3_SINGLE_SEQUENTIAL.md`.
 
 ## Where to update daily report email recipients
 

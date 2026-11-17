@@ -15,7 +15,7 @@ The scheduled AM/PM media-report worker is now governed by `DoS_ISRO_Master_Quer
 - Two sweeps: broad discovery first, then event/title gap reconciliation for additional original publishers.
 - Same-event articles from different publishers are retained. Deduplication is article-identity based.
 - Official ISRO/DoS/PIB/IN-SPACe/NSIL pages are corroboration/action evidence, never independent-media rows.
-- Latest consolidated archive is the only historical article registry. Configure `CONSOLIDATED_ARCHIVE_FILE`; the archive is never modified automatically.
+- Latest consolidated archive is the only historical article registry. Keep it as `latest-archive.csv` in the repository root; the archive is never modified automatically.
 - If the archive is unavailable or the 20-minute normal research dwell target is not met, the automated delivery is marked PROVISIONAL outside the report document.
 
 ## V8 sections
