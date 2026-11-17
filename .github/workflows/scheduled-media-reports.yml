@@ -1,10 +1,10 @@
-name: DoS-ISRO Build 6.0.2 V8 Media Reports - 8AM 8PM
+name: DoS-ISRO Build 6.1 V10.3 Media Reports - 06:05 18:05 IST
 
 on:
   schedule:
-    # GitHub cron is UTC. 02:30 UTC = 08:00 IST; 14:30 UTC = 20:00 IST.
-    - cron: "00 5 * * *"
-    - cron: "00 17 * * *"
+    # GitHub cron is UTC. 00:35 UTC = 06:05 IST; 12:35 UTC = 18:05 IST.
+    - cron: "35 0 * * *"
+    - cron: "35 12 * * *"
 
   workflow_dispatch:
     inputs:
@@ -18,7 +18,7 @@ on:
           - evening
           - weekly
       report_date:
-        description: "Optional IST report date YYYY-MM-DD (blank/interim = today IST)"
+        description: "Optional IST report date YYYY-MM-DD (blank = today IST)"
         required: false
         default: ""
         type: string
@@ -29,20 +29,20 @@ on:
         type: boolean
 
 concurrency:
-  group: dos-isro-scheduled-media-reports
+  group: dos-isro-v103-single-sequential-report
   cancel-in-progress: false
 
 jobs:
   scheduled-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     permissions:
       contents: read
 
     env:
       TZ: Asia/Kolkata
       OUTPUT_DIR: output
-      MASTER_QUERY_FILE: DoS_ISRO_Master_Query_Version_8_0.txt
+      MASTER_QUERY_FILE: DoS_ISRO_Master_Query_Version_10_3.txt
 
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
@@ -51,21 +51,21 @@ jobs:
       SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
       SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
 
-      # Uses the same email IDs as the hourly monitor by default.
-      # REPORT_RECIPIENTS_SCHEDULED is optional and overrides the fallback.
+      # Preferred recipient list for both the News Detection List and final report.
+      # Fallbacks are retained for compatibility with older deployments.
       REPORT_RECIPIENTS_SCHEDULED: ${{ secrets.REPORT_RECIPIENTS_SCHEDULED }}
       REPORT_RECIPIENTS_30MIN: ${{ secrets.REPORT_RECIPIENTS_30MIN }}
       REPORT_RECIPIENTS: ${{ secrets.REPORT_RECIPIENTS }}
 
       FORCE_SCHEDULED_SEND: ${{ github.event_name == 'workflow_dispatch' && inputs.force_send || false }}
 
-      # V8.0 research / archive / template controls.
-      MIN_RESEARCH_DWELL_SECONDS: ${{ vars.MIN_RESEARCH_DWELL_SECONDS || '1200' }}
-      CONSOLIDATED_ARCHIVE_FILE: ${{ vars.CONSOLIDATED_ARCHIVE_FILE }}
-      V8_TEMPLATE_FILE: ${{ vars.V8_TEMPLATE_FILE || 'DoS_ISRO_Media_Report_V7_0_Template.docx' }}
+      # V10.3 designated read-only archive. A later explicit repository variable overrides this baseline.
+      CONSOLIDATED_ARCHIVE_FILE: ${{ vars.CONSOLIDATED_ARCHIVE_FILE || 'ISRO_News_Archive_16Nov2026_Morning.csv' }}
+      REPORT_TEMPLATE_FILE: ${{ vars.REPORT_TEMPLATE_FILE || 'DoS_ISRO_Media_Report_V7_0_Template.docx' }}
       PUBLISHER_RSS_URLS: ${{ vars.PUBLISHER_RSS_URLS }}
+      ENABLE_REMARKS_EXCEPTIONS: ${{ vars.ENABLE_REMARKS_EXCEPTIONS || '0' }}
 
-      # Optional free hosted open-model analysis. Missing/failed providers are skipped.
+      # Optional free hosted semantic-analysis chain; local rules remain final fallback.
       ENABLE_FREE_LLM_ANALYSIS: ${{ vars.ENABLE_FREE_LLM_ANALYSIS || '1' }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       GROQ_MODEL: ${{ vars.GROQ_MODEL || 'openai/gpt-oss-20b' }}
@@ -88,26 +88,26 @@ jobs:
       - name: Install Python dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Install LibreOffice for DOCX to PDF conversion
+      - name: Install LibreOffice and PDF render tools
         shell: bash
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends libreoffice-writer fonts-liberation poppler-utils
           libreoffice --version
 
-      - name: Validate scheduled-report configuration
+      - name: Validate V10.3 configuration
         shell: bash
         run: |
           set -u
           missing=0
-          for f in scheduled_media_reports.py DoS_ISRO_Master_Query_Version_8_0.txt test_build6_v8.py; do
+          for f in scheduled_media_reports.py DoS_ISRO_Master_Query_Version_10_3.txt test_build61_v103.py; do
             if [ ! -f "$f" ]; then
               echo "::error::Missing required file: $f"
               missing=1
             fi
           done
-          if ! grep -q "VERSION 8.0" DoS_ISRO_Master_Query_Version_8_0.txt; then
-            echo "::error::Master Query file is not Version 8.0."
+          if ! grep -q "VERSION 10.3" DoS_ISRO_Master_Query_Version_10_3.txt || ! grep -q "SINGLE SEQUENTIAL DAILY EXECUTION" DoS_ISRO_Master_Query_Version_10_3.txt; then
+            echo "::error::Master Query file is not the V10.3 single sequential contract."
             missing=1
           fi
           if [ -z "${SMTP_EMAIL:-}" ] || [ -z "${SMTP_APP_PASSWORD:-}" ]; then
@@ -120,28 +120,29 @@ jobs:
             missing=1
           fi
           if [ -z "${SUPABASE_URL:-}" ]; then
-            echo "::warning::SUPABASE_URL is not configured. Reports can run, but delivery dedup/persistence will be unavailable."
+            echo "::warning::SUPABASE_URL is not configured. Report generation can continue; Supabase persistence/delivery dedup will be unavailable."
           fi
-          if [ -z "${CONSOLIDATED_ARCHIVE_FILE:-}" ]; then
-            echo "::warning::CONSOLIDATED_ARCHIVE_FILE is not configured. V8 historical article dedup cannot be confirmed; delivery may be PROVISIONAL."
-          elif [ ! -f "${CONSOLIDATED_ARCHIVE_FILE}" ]; then
-            echo "::warning::Configured consolidated archive is not present in the repository: ${CONSOLIDATED_ARCHIVE_FILE}"
+          if [ ! -f "${CONSOLIDATED_ARCHIVE_FILE}" ]; then
+            xlsx="${CONSOLIDATED_ARCHIVE_FILE%.csv}.xlsx"
+            if [ ! -f "$xlsx" ]; then
+              echo "::warning::Designated archive is unavailable: ${CONSOLIDATED_ARCHIVE_FILE}; no older archive will be selected automatically."
+            else
+              echo "Using exact XLSX fallback for designated archive: $xlsx"
+            fi
           fi
-          if [ ! -f "${V8_TEMPLATE_FILE:-DoS_ISRO_Media_Report_V7_0_Template.docx}" ]; then
-            echo "::warning::Original V7 template is unavailable. Build 6.0 will reproduce the specified seven-column V8 style programmatically."
+          if [ ! -f "${REPORT_TEMPLATE_FILE}" ]; then
+            echo "::warning::Approved DOCX template unavailable. Fixed seven-column V10.3 layout will be reproduced programmatically."
           fi
           if [ -z "${GROQ_API_KEY:-}" ] && [ -z "${OPENROUTER_API_KEY:-}" ] && { [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; }; then
-            echo "::warning::No free LLM provider configured. Scheduled reports will use local ISRO rules only."
-          else
-            echo "Free semantic-analysis chain is configured; unavailable providers will be skipped automatically."
+            echo "::warning::No free LLM provider configured. Local ISRO-perspective rules will be used."
           fi
           if [ "$missing" -ne 0 ]; then exit 1; fi
 
-      - name: Run Build 6.0 V8 offline smoke checks
+      - name: Run V10.3 offline regression checks
         shell: bash
-        run: python test_build6_v8.py
+        run: python test_build61_v103.py
 
-      - name: Determine scheduled edition
+      - name: Determine edition
         id: edition
         shell: bash
         run: |
@@ -150,16 +151,14 @@ jobs:
             echo "report_date=${{ inputs.report_date }}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
-          # Scheduled runs: distinguish by UTC cron expression.
-          if [ "${{ github.event.schedule }}" = "30 2 * * *" ]; then
+          if [ "${{ github.event.schedule }}" = "35 0 * * *" ]; then
             echo "edition=morning" >> "$GITHUB_OUTPUT"
           else
             echo "edition=evening" >> "$GITHUB_OUTPUT"
           fi
           echo "report_date=" >> "$GITHUB_OUTPUT"
 
-      - name: Generate and email Morning or Evening edition
+      - name: Execute complete V10.3 sequential run
         shell: bash
         run: |
           args=(--edition "${{ steps.edition.outputs.edition }}")
@@ -169,22 +168,23 @@ jobs:
           fi
           python scheduled_media_reports.py "${args[@]}"
 
-      - name: Publish report summary
+      - name: Publish run summary
         if: always()
         shell: bash
         run: |
-          echo "## Scheduled DoS / ISRO Media Reports" >> "$GITHUB_STEP_SUMMARY"
+          echo "## DoS / ISRO V10.3 Daily Media Report" >> "$GITHUB_STEP_SUMMARY"
           echo "- Completed (IST): $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M:%S %Z')" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Each edition is emailed independently with its matching DOCX + PDF." >> "$GITHUB_STEP_SUMMARY"
-          echo "- Weekly automatic delivery is paused under Master Query V8.0; weekly remains available only by explicit manual dispatch." >> "$GITHUB_STEP_SUMMARY"
+          echo "- Scheduled runs: 06:05 IST Morning and 18:05 IST Evening." >> "$GITHUB_STEP_SUMMARY"
+          echo "- Each run is a single sequential research → verification → dedup → classification/sort → detection email → official-source check → DOCX/PDF/XLSX → QA → final email flow." >> "$GITHUB_STEP_SUMMARY"
+          echo "- Weekly workflow remains unchanged/manual as previously configured." >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          find output -maxdepth 1 -type f -printf '%f\n' | sort | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY" || true
+          find output -type f -printf '%p\n' | sort | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY" || true
 
-      - name: Preserve generated scheduled reports and diagnostics
+      - name: Preserve reports, source register, ledger and diagnostics
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: dos-isro-scheduled-reports-${{ github.run_id }}
+          name: dos-isro-v103-media-report-${{ github.run_id }}
           path: output/
           if-no-files-found: warn
           retention-days: 14
